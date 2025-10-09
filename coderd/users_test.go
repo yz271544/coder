@@ -2,6 +2,7 @@ package coderd_test
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -10,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/serpent"
-
 	"github.com/coder/coder/v2/coderd"
 	"github.com/coder/coder/v2/coderd/coderdtest/oidctest"
 	"github.com/coder/coder/v2/coderd/notifications"
 	"github.com/coder/coder/v2/coderd/notifications/notificationstest"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
+	"github.com/coder/coder/v2/enterprise/coderd/license"
+	"github.com/coder/serpent"
 
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
@@ -2714,4 +2715,24 @@ func BenchmarkUsersMe(b *testing.B) {
 		_, err := client.User(ctx, codersdk.Me)
 		require.NoError(b, err)
 	}
+}
+
+func TestParseLicense(t *testing.T) {
+
+	var key20220812 []byte
+
+	var keys = map[string]ed25519.PublicKey{"2022-08-12": ed25519.PublicKey(key20220812)}
+
+	raw := "eyJhbGciOiJFZERTQSIsImtpZCI6IjIwMjItMDgtMTIiLCJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMzkzNDU3ODU5OUAxMzkuY29tIiwiZXhwIjoxNzYyNjE3MjIzLCJuYmYiOjE3NjAwMjUyMjMsImlhdCI6MTc2MDAyNTIyMywianRpIjoiZjM4MjlkMzItN2RhZi00Nzk3LTkwMmMtOTlmYTg3MTgyY2E0IiwibGljZW5zZV9leHBpcmVzIjoxNzYyNjE3MjIzLCJhY2NvdW50X3R5cGUiOiJ0cmlhbCIsImFjY291bnRfaWQiOiIxMzkzNDU3ODU5OUAxMzkuY29tIiwidHJpYWwiOnRydWUsInJlcXVpcmVfdGVsZW1ldHJ5Ijp0cnVlLCJ2ZXJzaW9uIjozLCJwdWJsaXNoX3VzYWdlX2RhdGEiOmZhbHNlLCJhbGxfZmVhdHVyZXMiOnRydWUsImZlYXR1cmVfc2V0IjoicHJlbWl1bSIsImZlYXR1cmVzIjp7InVzZXJfbGltaXQiOjAsImF1ZGl0X2xvZyI6MCwiYnJvd3Nlcl9vbmx5IjowLCJzY2ltIjowLCJ0ZW1wbGF0ZV9yYmFjIjowLCJoaWdoX2F2YWlsYWJpbGl0eSI6MCwibXVsdGlwbGVfZ2l0X2F1dGgiOjAsImV4dGVybmFsX3Byb3Zpc2lvbmVyX2RhZW1vbnMiOjAsImFwcGVhcmFuY2UiOjB9fQ.ETtAuKyh426hxjVjFsYFOsQTdghBvy9E6NU67yZ0aWLa2XdJwL4oeybSkxyc4p40V3_cT9x-1KwHjZZftLhIAQ"
+	rawClaims, err := license.ParseRaw(string(raw), keys)
+	if err != nil {
+		t.Error(err)
+	}
+
+	exp, ok := rawClaims["exp"].(float64)
+	if !ok {
+		t.Error("invalid license missing exp claim")
+	}
+	expTime := time.Unix(int64(exp), 0)
+	fmt.Println("expTime:", expTime)
 }
