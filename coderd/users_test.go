@@ -2,7 +2,6 @@ package coderd_test
 
 import (
 	"context"
-	"crypto/ed25519"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 	"github.com/coder/coder/v2/coderd/notifications"
 	"github.com/coder/coder/v2/coderd/notifications/notificationstest"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
+	ecoderd "github.com/coder/coder/v2/enterprise/coderd"
 	"github.com/coder/coder/v2/enterprise/coderd/license"
 	"github.com/coder/serpent"
 
@@ -2717,22 +2717,49 @@ func BenchmarkUsersMe(b *testing.B) {
 	}
 }
 
+// curl --location --request POST 'https://v2-licensor.coder.com/trial' \
+// --header 'Content-Type: application/json' \
+//
+//	--data-raw '{
+//	    "deployment_id": "5459463f-7f75-4b81-aa91-f4e1354f3348",
+//	    "email": "13934578599@139.com",
+//	    "first_name": "Lyndon",
+//	    "last_name": "Hu",
+//	    "phone_number": "13934578599",
+//	    "job_title": "developer",
+//	    "company_name": "bonc",
+//	    "country": "China",
+//	    "developers": "1-100"
+//	}'
 func TestParseLicense(t *testing.T) {
-
-	var key20220812 []byte
-
-	var keys = map[string]ed25519.PublicKey{"2022-08-12": ed25519.PublicKey(key20220812)}
-
-	raw := "eyJhbGciOiJFZERTQSIsImtpZCI6IjIwMjItMDgtMTIiLCJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMzkzNDU3ODU5OUAxMzkuY29tIiwiZXhwIjoxNzYyNjE3MjIzLCJuYmYiOjE3NjAwMjUyMjMsImlhdCI6MTc2MDAyNTIyMywianRpIjoiZjM4MjlkMzItN2RhZi00Nzk3LTkwMmMtOTlmYTg3MTgyY2E0IiwibGljZW5zZV9leHBpcmVzIjoxNzYyNjE3MjIzLCJhY2NvdW50X3R5cGUiOiJ0cmlhbCIsImFjY291bnRfaWQiOiIxMzkzNDU3ODU5OUAxMzkuY29tIiwidHJpYWwiOnRydWUsInJlcXVpcmVfdGVsZW1ldHJ5Ijp0cnVlLCJ2ZXJzaW9uIjozLCJwdWJsaXNoX3VzYWdlX2RhdGEiOmZhbHNlLCJhbGxfZmVhdHVyZXMiOnRydWUsImZlYXR1cmVfc2V0IjoicHJlbWl1bSIsImZlYXR1cmVzIjp7InVzZXJfbGltaXQiOjAsImF1ZGl0X2xvZyI6MCwiYnJvd3Nlcl9vbmx5IjowLCJzY2ltIjowLCJ0ZW1wbGF0ZV9yYmFjIjowLCJoaWdoX2F2YWlsYWJpbGl0eSI6MCwibXVsdGlwbGVfZ2l0X2F1dGgiOjAsImV4dGVybmFsX3Byb3Zpc2lvbmVyX2RhZW1vbnMiOjAsImFwcGVhcmFuY2UiOjB9fQ.ETtAuKyh426hxjVjFsYFOsQTdghBvy9E6NU67yZ0aWLa2XdJwL4oeybSkxyc4p40V3_cT9x-1KwHjZZftLhIAQ"
-	rawClaims, err := license.ParseRaw(string(raw), keys)
-	if err != nil {
-		t.Error(err)
-	}
-
+	t.Parallel()
+	licenseJWT := "eyJhbGciOiJFZERTQSIsImtpZCI6IjIwMjItMDgtMTIiLCJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMzkzNDU3ODU5OUAxMzkuY29tIiwiZXhwIjoxNzYyNjQxNDE2LCJuYmYiOjE3NjAwNDk0MTYsImlhdCI6MTc2MDA0OTQxNiwianRpIjoiNWM2NjA3MzQtODU0Mi00ZTg0LThhYTItMTdkNTUwMjFjMDAzIiwibGljZW5zZV9leHBpcmVzIjoxNzYyNjQxNDE2LCJhY2NvdW50X3R5cGUiOiJ0cmlhbCIsImFjY291bnRfaWQiOiIxMzkzNDU3ODU5OUAxMzkuY29tIiwidHJpYWwiOnRydWUsInJlcXVpcmVfdGVsZW1ldHJ5Ijp0cnVlLCJ2ZXJzaW9uIjozLCJwdWJsaXNoX3VzYWdlX2RhdGEiOmZhbHNlLCJhbGxfZmVhdHVyZXMiOnRydWUsImZlYXR1cmVfc2V0IjoicHJlbWl1bSIsImZlYXR1cmVzIjp7InVzZXJfbGltaXQiOjAsImF1ZGl0X2xvZyI6MCwiYnJvd3Nlcl9vbmx5IjowLCJzY2ltIjowLCJ0ZW1wbGF0ZV9yYmFjIjowLCJoaWdoX2F2YWlsYWJpbGl0eSI6MCwibXVsdGlwbGVfZ2l0X2F1dGgiOjAsImV4dGVybmFsX3Byb3Zpc2lvbmVyX2RhZW1vbnMiOjAsImFwcGVhcmFuY2UiOjB9fQ.5dT3puXdIAzyM7od0p060VF-SDPRywXOFYdQEO_L0U5tcYFaRKO3RR_0y-FaMBVXmneDXFVWb12mcNx8AMaeAA"
+	// 使用enterprise/coderd/licenses.go中定义的公钥
+	keys := ecoderd.Keys
+	// 使用ParseRaw解析原始claims
+	rawClaims, err := license.ParseRaw(licenseJWT, keys)
 	exp, ok := rawClaims["exp"].(float64)
 	if !ok {
 		t.Error("invalid license missing exp claim")
 	}
 	expTime := time.Unix(int64(exp), 0)
-	fmt.Println("expTime:", expTime)
+	t.Log("License expires at:", expTime)
+	require.NoError(t, err, "应该能够解析原始JWT claims")
+	require.NotNil(t, rawClaims)
+
+	// 验证claims包含预期字段
+	require.Contains(t, rawClaims, "exp", "应该包含exp字段")
+	require.Contains(t, rawClaims, "account_type", "应该包含account_type字段")
+	require.Contains(t, rawClaims, "trial", "应该包含trial字段")
+	require.True(t, rawClaims["trial"].(bool), "trial字段应该为true")
+
+	// 使用ParseClaims解析完整的claims结构
+	claims, err := license.ParseClaims(licenseJWT, keys)
+	require.NoError(t, err, "应该能够解析完整的claims")
+	require.NotNil(t, claims)
+
+	// 验证claims内容
+	require.Equal(t, "trial", claims.AccountType, "account_type应该为trial")
+	require.True(t, claims.Trial, "Trial应该为true")
+	require.Equal(t, uint64(3), claims.Version, "Version应该为3")
 }
