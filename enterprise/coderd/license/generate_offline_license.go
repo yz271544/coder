@@ -3,7 +3,6 @@ package license
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"testing"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -53,8 +52,8 @@ func GenerateOfflineLicense() (string, ed25519.PrivateKey, ed25519.PublicKey) {
 }
 
 // GenerateOfflineLicenseForTesting is a test version that can be used in tests
-func GenerateOfflineLicenseForTesting(t *testing.T) string {
-	t.Helper()
+// Note: This function is kept for backward compatibility with existing tests
+func GenerateOfflineLicenseForTesting() string {
 	licenseString, _, _ := GenerateOfflineLicense()
 	return licenseString
 }
