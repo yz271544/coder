@@ -11,12 +11,11 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"time"
 
 	"golang.org/x/xerrors"
 	"tailscale.com/derp"
 	"tailscale.com/types/key"
-
-	"time"
 
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbtime"

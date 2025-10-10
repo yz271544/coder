@@ -1,3 +1,5 @@
+//go:build !slim
+
 package cli
 
 import (
@@ -12,14 +14,21 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 	var (
 		outputFile string
 	)
-
+	
 	cmd := &serpent.Command{
 		Use:   "generate-license",
 		Short: "Generate an offline license for Coder",
 		Long:  "Generate a 10-year offline license for use in air-gapped environments.",
 		Handler: func(inv *serpent.Invocation) error {
+			fmt.Fprintf(inv.Stderr, "Generating offline license...\n")
 			licenseString, _, _ := license.GenerateOfflineLicense()
-
+			
+			// 验证生成的license可以被正确解析
+			_, err := license.ParseClaims(licenseString, license.GetOfflineKeys())
+			if err != nil {
+				return fmt.Errorf("generated license cannot be parsed: %w", err)
+			}
+			
 			if outputFile == "" {
 				// 输出到标准输出
 				fmt.Fprintln(inv.Stdout, licenseString)
@@ -29,9 +38,9 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 				if err != nil {
 					return fmt.Errorf("failed to write license to file: %w", err)
 				}
-				fmt.Fprintf(inv.Stdout, "License written to %s\n", outputFile)
+				fmt.Fprintf(inv.Stderr, "License written to %s\n", outputFile)
 			}
-
+			
 			return nil
 		},
 	}

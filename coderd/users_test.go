@@ -2771,7 +2771,8 @@ func TestParseFileLicense(t *testing.T) {
 	licenseString, _, _ := license.GenerateOfflineLicense()
 
 	// 使用enterprise/coderd/licenses.go中定义的公钥
-	keys := ecoderd.Keys
+	//keys := ecoderd.Keys
+	keys := license.OfflineKeys
 	// 使用ParseRaw解析原始claims
 	rawClaims, err := license.ParseRaw(licenseString, keys)
 	exp, ok := rawClaims["exp"].(float64)
