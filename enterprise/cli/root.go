@@ -21,6 +21,7 @@ func (r *RootCmd) enterpriseOnly() []*serpent.Command {
 		r.workspaceProxy(),
 		r.features(),
 		r.licenses(),
+		r.generateLicense(), // 添加 generate-license 命令
 		r.groups(),
 		r.prebuilds(),
 		r.provisionerd(),

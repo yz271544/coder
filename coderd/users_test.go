@@ -2763,3 +2763,39 @@ func TestParseLicense(t *testing.T) {
 	require.True(t, claims.Trial, "Trial应该为true")
 	require.Equal(t, uint64(3), claims.Version, "Version应该为3")
 }
+
+func TestParseFileLicense(t *testing.T) {
+	t.Parallel()
+
+	// 生成一个本地的10年有效期license，而不是从互联网获取
+	licenseString, _, _ := license.GenerateOfflineLicense()
+
+	// 使用enterprise/coderd/licenses.go中定义的公钥
+	keys := ecoderd.Keys
+	// 使用ParseRaw解析原始claims
+	rawClaims, err := license.ParseRaw(licenseString, keys)
+	exp, ok := rawClaims["exp"].(float64)
+	if !ok {
+		t.Error("invalid license missing exp claim")
+	}
+	expTime := time.Unix(int64(exp), 0)
+	t.Log("License expires at:", expTime)
+	require.NoError(t, err, "应该能够解析原始JWT claims")
+	require.NotNil(t, rawClaims)
+
+	// 验证claims包含预期字段
+	require.Contains(t, rawClaims, "exp", "应该包含exp字段")
+	require.Contains(t, rawClaims, "account_type", "应该包含account_type字段")
+	require.Contains(t, rawClaims, "trial", "应该包含trial字段")
+	require.False(t, rawClaims["trial"].(bool), "trial字段应该为false，因为我们生成的是永久license")
+
+	// 使用ParseClaims解析完整的claims结构
+	claims, err := license.ParseClaims(licenseString, keys)
+	require.NoError(t, err, "应该能够解析完整的claims")
+	require.NotNil(t, claims)
+
+	// 验证claims内容
+	require.Equal(t, "salesforce", claims.AccountType, "account_type应该为salesforce")
+	require.False(t, claims.Trial, "Trial应该为false")
+	require.Equal(t, uint64(3), claims.Version, "Version应该为3")
+}

@@ -10,18 +10,23 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 
 	"golang.org/x/xerrors"
 	"tailscale.com/derp"
 	"tailscale.com/types/key"
 
+	"time"
+
 	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/cryptorand"
 	"github.com/coder/coder/v2/enterprise/audit"
 	"github.com/coder/coder/v2/enterprise/audit/backends"
 	"github.com/coder/coder/v2/enterprise/coderd"
 	"github.com/coder/coder/v2/enterprise/coderd/dormancy"
+	"github.com/coder/coder/v2/enterprise/coderd/license"
 	"github.com/coder/coder/v2/enterprise/coderd/usage"
 	"github.com/coder/coder/v2/enterprise/dbcrypt"
 	"github.com/coder/coder/v2/enterprise/trialer"
@@ -29,6 +34,7 @@ import (
 	"github.com/coder/coder/v2/tailnet"
 	"github.com/coder/quartz"
 	"github.com/coder/serpent"
+	"github.com/google/uuid"
 
 	agplcoderd "github.com/coder/coder/v2/coderd"
 )
@@ -86,7 +92,54 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 			backends.NewSlog(options.Logger),
 		)
 
-		options.TrialGenerator = trialer.New(options.Database, "https://v2-licensor.coder.com/trial", coderd.Keys)
+		// Check if offline mode is enabled via environment variable
+		offlineMode := os.Getenv("CODER_OFFLINE_MODE") == "true"
+		offlineLicenseFile := os.Getenv("CODER_OFFLINE_LICENSE_FILE")
+
+		if offlineMode {
+			// 在离线模式下，使用一个空的 TrialGenerator，不进行网络调用
+			options.TrialGenerator = func(ctx context.Context, body codersdk.LicensorTrialRequest) error {
+				options.Logger.Warn(ctx, "Offline mode enabled, skipping trial license generation")
+				return nil
+			}
+		} else if offlineLicenseFile != "" {
+			// 如果指定了离线license文件，则读取并插入license
+			licenseData, err := os.ReadFile(offlineLicenseFile)
+			if err != nil {
+				options.Logger.Error(ctx, "Failed to read offline license file", "error", err)
+			} else {
+				_, err := license.ParseClaims(string(licenseData), coderd.Keys)
+				if err != nil {
+					options.Logger.Error(ctx, "Failed to parse offline license", "error", err)
+				} else {
+					// 插入license到数据库
+					id, _ := uuid.NewRandom()
+					err = options.Database.InTx(func(tx database.Store) error {
+						_, err := tx.InsertLicense(ctx, database.InsertLicenseParams{
+							UploadedAt: dbtime.Now(),
+							JWT:        string(licenseData),
+							Exp:        dbtime.Now().Add(time.Hour * 24 * 365 * 10), // 10 years
+							UUID:       id,
+						})
+						return err
+					}, nil)
+					if err != nil {
+						options.Logger.Error(ctx, "Failed to insert offline license into database", "error", err)
+					} else {
+						options.Logger.Info(ctx, "Successfully loaded offline license from file")
+					}
+				}
+			}
+
+			// 在使用离线license的情况下，也使用空的 TrialGenerator
+			options.TrialGenerator = func(ctx context.Context, body codersdk.LicensorTrialRequest) error {
+				options.Logger.Warn(ctx, "Offline license file provided, skipping trial license generation")
+				return nil
+			}
+		} else {
+			// 默认在线模式
+			options.TrialGenerator = trialer.New(options.Database, "https://v2-licensor.coder.com/trial", coderd.Keys)
+		}
 
 		o := &coderd.Options{
 			Options:                   options,
