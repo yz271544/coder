@@ -12,9 +12,10 @@ import (
 
 func (r *RootCmd) generateLicense() *serpent.Command {
 	var (
-		outputFile string
+		outputFile    string
+		publicKeyFile string
 	)
-	
+
 	cmd := &serpent.Command{
 		Use:   "generate-license",
 		Short: "Generate an offline license for Coder",
@@ -22,13 +23,21 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 		Handler: func(inv *serpent.Invocation) error {
 			fmt.Fprintf(inv.Stderr, "Generating offline license...\n")
 			licenseString, _, _ := license.GenerateOfflineLicense()
-			
 			// 验证生成的license可以被正确解析
 			_, err := license.ParseClaims(licenseString, license.GetOfflineKeys())
 			if err != nil {
 				return fmt.Errorf("generated license cannot be parsed: %w", err)
 			}
-			
+
+			if publicKeyFile != "" {
+				// 将公钥写入文件
+				err := license.SaveOfflinePublicKeyToFile(publicKeyFile)
+				if err != nil {
+					return fmt.Errorf("failed to write public key to file: %w", err)
+				}
+				fmt.Fprint(inv.Stderr, "Public key written to %s\n", publicKeyFile)
+			}
+
 			if outputFile == "" {
 				// 输出到标准输出
 				fmt.Fprintln(inv.Stdout, licenseString)
@@ -40,7 +49,7 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 				}
 				fmt.Fprintf(inv.Stderr, "License written to %s\n", outputFile)
 			}
-			
+
 			return nil
 		},
 	}
@@ -52,6 +61,13 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 			Env:           "CODER_LICENSE_OUTPUT",
 			Description:   "Output file path for the license. If not specified, prints to stdout.",
 			Value:         serpent.StringOf(&outputFile),
+		},
+		{
+			Flag:          "public-key",
+			FlagShorthand: "k",
+			Env:           "CODER_LICENSE_PUBLIC_KEY_FILE",
+			Description:   "Output file path for the public key. If specified, also saves the private key with a .private suffix.",
+			Value:         serpent.StringOf(&publicKeyFile),
 		},
 	}
 

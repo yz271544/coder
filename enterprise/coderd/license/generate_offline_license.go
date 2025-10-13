@@ -3,6 +3,9 @@ package license
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
+	"os"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -87,4 +90,25 @@ func GetOfflineKeys() map[string]ed25519.PublicKey {
 func GenerateOfflineLicenseForTesting() string {
 	licenseString, _, _ := GenerateOfflineLicense()
 	return licenseString
+}
+
+// SaveOfflinePublicKeyToFile saves the offline public key to a PEM file
+func SaveOfflinePublicKeyToFile(filename string) error {
+	publicKeyBytes, err := x509.MarshalPKIXPublicKey(offlinePublicKey)
+	if err != nil {
+		return err
+	}
+	
+	publicKeyPEM := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: publicKeyBytes,
+	}
+	
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	
+	return pem.Encode(file, publicKeyPEM)
 }
