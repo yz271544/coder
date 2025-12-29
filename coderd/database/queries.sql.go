@@ -4941,6 +4941,30 @@ func (q *sqlQuerier) GetLicenseByID(ctx context.Context, id int32) (License, err
 	return i, err
 }
 
+const getLicenseByJWT = `-- name: GetLicenseByJWT :one
+SELECT
+	id, uploaded_at, jwt, exp, uuid
+FROM
+	licenses
+WHERE
+	jwt = $1
+LIMIT
+	1
+`
+
+func (q *sqlQuerier) GetLicenseByJWT(ctx context.Context, jwt string) (License, error) {
+	row := q.db.QueryRowContext(ctx, getLicenseByJWT, jwt)
+	var i License
+	err := row.Scan(
+		&i.ID,
+		&i.UploadedAt,
+		&i.JWT,
+		&i.Exp,
+		&i.UUID,
+	)
+	return i, err
+}
+
 const getLicenses = `-- name: GetLicenses :many
 SELECT id, uploaded_at, jwt, exp, uuid
 FROM licenses

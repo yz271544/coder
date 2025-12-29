@@ -4,11 +4,15 @@ package cli
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"time"
@@ -94,6 +98,7 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 		// Check if offline mode is enabled via environment variable
 		offlineMode := os.Getenv("CODER_OFFLINE_MODE") == "true"
 		offlineLicenseFile := os.Getenv("CODER_OFFLINE_LICENSE_FILE")
+		offlinePublicKeyFile := os.Getenv("CODER_OFFLINE_PUBLIC_KEY_FILE")
 
 		if offlineMode {
 			// 在离线模式下，使用一个空的 TrialGenerator，不进行网络调用
@@ -101,31 +106,67 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 				options.Logger.Warn(ctx, "Offline mode enabled, skipping trial license generation")
 				return nil
 			}
-		} else if offlineLicenseFile != "" {
+		} else if offlineLicenseFile != "" && offlinePublicKeyFile != "" {
 			// 如果指定了离线license文件，则读取并插入license
 			licenseData, err := os.ReadFile(offlineLicenseFile)
 			if err != nil {
 				options.Logger.Error(ctx, "Failed to read offline license file", "error", err)
 			} else {
-				_, err := license.ParseClaims(string(licenseData), coderd.Keys)
+				publicKeyContent, err := os.ReadFile(offlinePublicKeyFile)
+				if err != nil {
+					options.Logger.Error(ctx, "读取coder-publickey.pem文件失败: %v", err)
+					return nil, nil, xerrors.Errorf("读取coder-publickey.pem文件失败: %v", err)
+				}
+				// 2. 解析PEM格式的公钥
+				block, _ := pem.Decode(publicKeyContent)
+				if block == nil || block.Type != "PUBLIC KEY" {
+					return nil, nil, xerrors.Errorf("无效的PEM公钥文件: %v", offlinePublicKeyFile)
+				}
+
+				publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
+				if err != nil {
+					return nil, nil, xerrors.Errorf("解析公钥失败: %v", offlinePublicKeyFile)
+				}
+
+				ed25519PublicKey, ok := publicKey.(ed25519.PublicKey)
+				if !ok {
+					return nil, nil, xerrors.Errorf("不是ed25519公钥: %v", offlinePublicKeyFile)
+				}
+
+				keys := license.OfflineKeys
+				keys[license.GetOfflineKeyID()] = ed25519PublicKey
+
+				// 解析license
+				jwt := string(licenseData)
+				_, err = license.ParseClaims(jwt, keys)
 				if err != nil {
 					options.Logger.Error(ctx, "Failed to parse offline license", "error", err)
 				} else {
 					// 插入license到数据库
 					id, _ := uuid.NewRandom()
 					err = options.Database.InTx(func(tx database.Store) error {
-						_, err := tx.InsertLicense(ctx, database.InsertLicenseParams{
-							UploadedAt: dbtime.Now(),
-							JWT:        string(licenseData),
-							Exp:        dbtime.Now().Add(time.Hour * 24 * 365 * 10), // 10 years
-							UUID:       id,
-						})
-						return err
+						licenseByJwt, err := tx.GetLicenseByJWT(ctx, jwt)
+						// License already exists, skip insertion
+						if errors.Is(err, sql.ErrNoRows) {
+							_, err = tx.InsertLicense(ctx, database.InsertLicenseParams{
+								UploadedAt: dbtime.Now(),
+								JWT:        jwt,
+								Exp:        dbtime.Now().Add(time.Hour * 24 * 365 * 10), // 10 years
+								UUID:       id,
+							})
+							return err
+						} else {
+							if err != nil {
+								return xerrors.Errorf("check existing license: %w", err)
+							}
+							options.Logger.Info(ctx, "Offline license already exists in database, skipping insertion", slog.String("id", licenseByJwt.UUID.String()))
+						}
+						return nil
 					}, nil)
 					if err != nil {
 						options.Logger.Error(ctx, "Failed to insert offline license into database", "error", err)
 					} else {
-						options.Logger.Info(ctx, "Successfully loaded offline license from file")
+						options.Logger.Info(ctx, "Successfully loaded offline license from file", slog.String("id", id.String()))
 					}
 				}
 			}

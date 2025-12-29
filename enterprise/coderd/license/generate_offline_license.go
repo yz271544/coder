@@ -98,17 +98,42 @@ func SaveOfflinePublicKeyToFile(filename string) error {
 	if err != nil {
 		return err
 	}
-	
+
 	publicKeyPEM := &pem.Block{
 		Type:  "PUBLIC KEY",
 		Bytes: publicKeyBytes,
 	}
-	
+
 	file, err := os.Create(filename)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	
+
 	return pem.Encode(file, publicKeyPEM)
+}
+
+// SaveOfflinePrivateKeyToFile saves the offline private key to a PEM file
+func SaveOfflinePrivateKeyToFile(filename string) error {
+	privateKeyBytes, err := x509.MarshalPKCS8PrivateKey(offlinePrivateKey)
+	if err != nil {
+		return err
+	}
+
+	privateKeyPEM := &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: privateKeyBytes,
+	}
+
+	file, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	return pem.Encode(file, privateKeyPEM)
+}
+
+func GetOfflineKeyID() string {
+	return offlineKeyID
 }

@@ -24,6 +24,16 @@ WHERE
 LIMIT
 	1;
 
+-- name: GetLicenseByJWT :one
+SELECT
+	id, uploaded_at, jwt, exp, uuid
+FROM
+	licenses
+WHERE
+	jwt = $1
+LIMIT
+	1;
+
 -- name: GetUnexpiredLicenses :many
 SELECT *
 FROM licenses

@@ -8,12 +8,14 @@ import (
 
 	"github.com/coder/coder/v2/enterprise/coderd/license"
 	"github.com/coder/serpent"
+	"gvisor.dev/gvisor/pkg/log"
 )
 
 func (r *RootCmd) generateLicense() *serpent.Command {
 	var (
-		outputFile    string
-		publicKeyFile string
+		outputFile     string
+		publicKeyFile  string
+		privateKeyFile string
 	)
 
 	cmd := &serpent.Command{
@@ -29,13 +31,23 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 				return fmt.Errorf("generated license cannot be parsed: %w", err)
 			}
 
+			log.Infof("publicKeyFile: %s, privateKeyFile: %s, outputFile: %s", publicKeyFile, privateKeyFile, outputFile)
+
 			if publicKeyFile != "" {
 				// 将公钥写入文件
 				err := license.SaveOfflinePublicKeyToFile(publicKeyFile)
 				if err != nil {
 					return fmt.Errorf("failed to write public key to file: %w", err)
 				}
-				fmt.Fprint(inv.Stderr, "Public key written to %s\n", publicKeyFile)
+				fmt.Fprintf(inv.Stderr, "Public key written to %s\n", publicKeyFile)
+			}
+
+			if privateKeyFile != "" {
+				err := license.SaveOfflinePrivateKeyToFile(privateKeyFile)
+				if err != nil {
+					return fmt.Errorf("failed to write private key to file: %w", err)
+				}
+				fmt.Fprintf(inv.Stderr, "Private key written to %s\n", privateKeyFile)
 			}
 
 			if outputFile == "" {
@@ -68,6 +80,13 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 			Env:           "CODER_LICENSE_PUBLIC_KEY_FILE",
 			Description:   "Output file path for the public key. If specified, also saves the private key with a .private suffix.",
 			Value:         serpent.StringOf(&publicKeyFile),
+		},
+		{
+			Flag:          "private-key",
+			FlagShorthand: "p",
+			Env:           "CODER_LICENSE_PRIVATE_KEY_FILE",
+			Description:   "Output file path for the private key. If specified, also saves the private key with a .private suffix.",
+			Value:         serpent.StringOf(&privateKeyFile),
 		},
 	}
 
