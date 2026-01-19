@@ -1020,6 +1020,13 @@ func (m queryMetricsStore) GetLicenseByID(ctx context.Context, id int32) (databa
 	return license, err
 }
 
+func (m queryMetricsStore) GetLicenseByJWT(ctx context.Context, jwt string) (database.License, error) {
+	start := time.Now()
+	r0, r1 := m.s.GetLicenseByJWT(ctx, jwt)
+	m.queryLatencies.WithLabelValues("GetLicenseByJWT").Observe(time.Since(start).Seconds())
+	return r0, r1
+}
+
 func (m queryMetricsStore) GetLicenses(ctx context.Context) ([]database.License, error) {
 	start := time.Now()
 	licenses, err := m.s.GetLicenses(ctx)

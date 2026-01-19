@@ -2349,6 +2349,10 @@ func (q *querier) GetLicenseByID(ctx context.Context, id int32) (database.Licens
 	return fetch(q.log, q.auth, q.db.GetLicenseByID)(ctx, id)
 }
 
+func (q *querier) GetLicenseByJWT(ctx context.Context, jwt string) (database.License, error) {
+	panic("not implemented")
+}
+
 func (q *querier) GetLicenses(ctx context.Context) ([]database.License, error) {
 	fetch := func(ctx context.Context, _ interface{}) ([]database.License, error) {
 		return q.db.GetLicenses(ctx)

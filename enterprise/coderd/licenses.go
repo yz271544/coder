@@ -44,6 +44,10 @@ var key20220812 []byte
 
 var Keys = map[string]ed25519.PublicKey{"2022-08-12": ed25519.PublicKey(key20220812)}
 
+func SetKeys(pubKey []byte) {
+	Keys["2022-08-12"] = pubKey
+}
+
 // postLicense adds a new Enterprise license to the cluster.  We allow multiple different licenses
 // in the cluster at one time for several reasons:
 //

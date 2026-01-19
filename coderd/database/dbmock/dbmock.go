@@ -2129,6 +2129,21 @@ func (mr *MockStoreMockRecorder) GetLicenseByID(ctx, id any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLicenseByID", reflect.TypeOf((*MockStore)(nil).GetLicenseByID), ctx, id)
 }
 
+// GetLicenseByJWT mocks base method.
+func (m *MockStore) GetLicenseByJWT(ctx context.Context, jwt string) (database.License, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetLicenseByJWT", ctx, jwt)
+	ret0, _ := ret[0].(database.License)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GetLicenseByJWT indicates an expected call of GetLicenseByJWT.
+func (mr *MockStoreMockRecorder) GetLicenseByJWT(ctx, jwt any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetLicenseByJWT", reflect.TypeOf((*MockStore)(nil).GetLicenseByJWT), ctx, jwt)
+}
+
 // GetLicenses mocks base method.
 func (m *MockStore) GetLicenses(ctx context.Context) ([]database.License, error) {
 	m.ctrl.T.Helper()

@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/url"
 	"os"
 	"time"
@@ -135,6 +134,7 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 
 				keys := license.OfflineKeys
 				keys[license.GetOfflineKeyID()] = ed25519PublicKey
+				coderd.SetKeys(ed25519PublicKey)
 
 				// 解析license
 				jwt := string(licenseData)
@@ -159,14 +159,14 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 							if err != nil {
 								return xerrors.Errorf("check existing license: %w", err)
 							}
-							options.Logger.Info(ctx, "Offline license already exists in database, skipping insertion", slog.String("id", licenseByJwt.UUID.String()))
+							options.Logger.Info(ctx, "Offline license already exists in database, skipping insertion, id: "+licenseByJwt.UUID.String())
 						}
 						return nil
 					}, nil)
 					if err != nil {
 						options.Logger.Error(ctx, "Failed to insert offline license into database", "error", err)
 					} else {
-						options.Logger.Info(ctx, "Successfully loaded offline license from file", slog.String("id", id.String()))
+						options.Logger.Info(ctx, "Successfully loaded offline license from file, id: "+id.String())
 					}
 				}
 			}
