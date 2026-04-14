@@ -14,12 +14,13 @@ import (
 	"net/url"
 	"os"
 	"time"
-	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 	"tailscale.com/derp"
 	"tailscale.com/types/key"
 
+	"cdr.dev/slog/v3"
 	agplcoderd "github.com/coder/coder/v2/coderd"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
@@ -37,9 +38,6 @@ import (
 	"github.com/coder/coder/v2/tailnet"
 	"github.com/coder/quartz"
 	"github.com/coder/serpent"
-	"github.com/google/uuid"
-
-	agplcoderd "github.com/coder/coder/v2/coderd"
 )
 
 func (r *RootCmd) Server(_ func()) *serpent.Command {
@@ -114,11 +112,11 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 			// 如果指定了离线license文件，则读取并插入license
 			licenseData, err := os.ReadFile(offlineLicenseFile)
 			if err != nil {
-				options.Logger.Error(ctx, "Failed to read offline license file", "error", err)
+				options.Logger.Error(ctx, "Failed to read offline license file", slog.F("error", err))
 			} else {
 				publicKeyContent, err := os.ReadFile(offlinePublicKeyFile)
 				if err != nil {
-					options.Logger.Error(ctx, "读取coder-publickey.pem文件失败: %v", err)
+					options.Logger.Error(ctx, "读取coder-publickey.pem文件失败", slog.Error(err))
 					return nil, nil, xerrors.Errorf("读取coder-publickey.pem文件失败: %v", err)
 				}
 				// 2. 解析PEM格式的公钥
@@ -145,7 +143,7 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 				jwt := string(licenseData)
 				_, err = license.ParseClaims(jwt, keys)
 				if err != nil {
-					options.Logger.Error(ctx, "Failed to parse offline license", "error", err)
+					options.Logger.Error(ctx, "Failed to parse offline license", slog.F("error", err))
 				} else {
 					// 插入license到数据库
 					id, _ := uuid.NewRandom()
@@ -169,7 +167,7 @@ func (r *RootCmd) Server(_ func()) *serpent.Command {
 						return nil
 					}, nil)
 					if err != nil {
-						options.Logger.Error(ctx, "Failed to insert offline license into database", "error", err)
+						options.Logger.Error(ctx, "Failed to insert offline license into database", slog.F("error", err))
 					} else {
 						options.Logger.Info(ctx, "Successfully loaded offline license from file, id: "+id.String())
 					}

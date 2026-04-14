@@ -35,18 +35,18 @@ func init() {
 	}
 }
 
-// GenerateOfflineLicense generates a 10-year license for offline usage
+// GenerateOfflineLicense generates a 30-year license for offline usage
 func GenerateOfflineLicense() (string, ed25519.PrivateKey, ed25519.PublicKey) {
 	now := time.Now()
 	claims := &Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.NewString(),
 			Issuer:    "offline-license-generator",
-			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 10)), // 10 years
+			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 30)), // 30 years
 			NotBefore: jwt.NewNumericDate(now.Add(-time.Hour)),                // 1 hour ago
 			IssuedAt:  jwt.NewNumericDate(now),
 		},
-		LicenseExpires: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 10)), // 10 years
+		LicenseExpires: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 30)), // 30 years
 		AccountType:    AccountTypeSalesforce,
 		AccountID:      "offline-account",
 		Trial:          false,
