@@ -280,12 +280,22 @@ LicenseExpires: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 10)), // 10 ye
    ```
 
 2. **修改生成逻辑**：`enterprise/coderd/license/generate_offline_license.go`
+   - 有效期改为 30 年
+   - 用户数限制改为 999999
+
    ```go
    ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 30)), // 30 years
    LicenseExpires: jwt.NewNumericDate(now.Add(time.Hour * 24 * 365 * 30)), // 30 years
    ```
 
-### 生成新的 License
+   ```go
+   // 设置用户数限制
+   if featureName == codersdk.FeatureUserLimit {
+       claims.Features[codersdk.FeatureUserLimit] = 999999
+   }
+   ```
+
+### 重新生成 License
 
 ```bash
 # 重新生成 license（有效期 5 年）

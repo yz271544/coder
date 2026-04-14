@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	licenseString, claims, err := license.GenerateOfflineLicense()
+	licenseString, claims, err := license.GenerateOfflineLicense(0) // 0 will use default 999999
 	if err != nil {
 		fmt.Printf("Error generating license: %v\n", err)
 		os.Exit(1)

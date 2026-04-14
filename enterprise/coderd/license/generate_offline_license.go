@@ -36,7 +36,11 @@ func init() {
 }
 
 // GenerateOfflineLicense generates a 30-year license for offline usage
-func GenerateOfflineLicense() (string, ed25519.PrivateKey, ed25519.PublicKey) {
+// userLimit: maximum number of users allowed (default 999999)
+func GenerateOfflineLicense(userLimit int) (string, ed25519.PrivateKey, ed25519.PublicKey) {
+	if userLimit <= 0 {
+		userLimit = 999999
+	}
 	now := time.Now()
 	claims := &Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -60,6 +64,9 @@ func GenerateOfflineLicense() (string, ed25519.PrivateKey, ed25519.PublicKey) {
 		if featureName == codersdk.FeatureManagedAgentLimit {
 			claims.Features["managed_agent_limit_soft"] = 1000000
 			claims.Features["managed_agent_limit_hard"] = 2000000
+		} else if featureName == codersdk.FeatureUserLimit {
+			// Set user limit to the specified value
+			claims.Features[codersdk.FeatureUserLimit] = int64(userLimit)
 		} else {
 			claims.Features[featureName] = 1
 		}
@@ -88,7 +95,7 @@ func GetOfflineKeys() map[string]ed25519.PublicKey {
 // GenerateOfflineLicenseForTesting is a test version that can be used in tests
 // Note: This function is kept for backward compatibility with existing tests
 func GenerateOfflineLicenseForTesting() string {
-	licenseString, _, _ := GenerateOfflineLicense()
+	licenseString, _, _ := GenerateOfflineLicense(0) // 0 will use default 999999
 	return licenseString
 }
 

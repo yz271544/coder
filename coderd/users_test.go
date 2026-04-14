@@ -15,15 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/coder/v2/coderd"
-	"github.com/coder/coder/v2/coderd/coderdtest/oidctest"
-	"github.com/coder/coder/v2/coderd/notifications"
-	"github.com/coder/coder/v2/coderd/notifications/notificationstest"
-	"github.com/coder/coder/v2/coderd/rbac/policy"
-	ecoderd "github.com/coder/coder/v2/enterprise/coderd"
-	"github.com/coder/coder/v2/enterprise/coderd/license"
-	"github.com/coder/serpent"
-
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -46,6 +37,8 @@ import (
 	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/coderd/util/slice"
 	"github.com/coder/coder/v2/codersdk"
+	ecoderd "github.com/coder/coder/v2/enterprise/coderd"
+	"github.com/coder/coder/v2/enterprise/coderd/license"
 	"github.com/coder/coder/v2/testutil"
 	"github.com/coder/serpent"
 )
@@ -2421,11 +2414,11 @@ func TestParseLicense(t *testing.T) {
 func TestParseFileLicense(t *testing.T) {
 	t.Parallel()
 
-	// 生成一个本地的10年有效期license，而不是从互联网获取
-	licenseString, _, _ := license.GenerateOfflineLicense()
+	// 生成一个本地的30年有效期license，而不是从互联网获取
+	licenseString, _, _ := license.GenerateOfflineLicense(0) // 0 will use default 999999
 
 	// 使用enterprise/coderd/licenses.go中定义的公钥
-	//keys := ecoderd.Keys
+	// keys := ecoderd.Keys
 	keys := license.OfflineKeys
 	// 使用ParseRaw解析原始claims
 	rawClaims, err := license.ParseRaw(licenseString, keys)
@@ -2456,7 +2449,6 @@ func TestParseFileLicense(t *testing.T) {
 }
 
 func TestParseFileLicense2(t *testing.T) {
-
 	// 1. 从PEM文件读取公钥
 	publicKeyContent, err := os.ReadFile("/lyndon/iData/coder/keys/coder-publickey.pem")
 	if err != nil {
@@ -2519,7 +2511,6 @@ func TestParseFileLicense2(t *testing.T) {
 }
 
 func TestSlog(t *testing.T) {
-
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,
 	}))

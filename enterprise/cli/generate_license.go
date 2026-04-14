@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 
+	"gvisor.dev/gvisor/pkg/log"
+
 	"github.com/coder/coder/v2/enterprise/coderd/license"
 	"github.com/coder/serpent"
-	"gvisor.dev/gvisor/pkg/log"
 )
 
 func (r *RootCmd) generateLicense() *serpent.Command {
@@ -16,15 +17,26 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 		outputFile     string
 		publicKeyFile  string
 		privateKeyFile string
+		userLimit      string
 	)
 
 	cmd := &serpent.Command{
 		Use:   "generate-license",
 		Short: "Generate an offline license for Coder",
-		Long:  "Generate a 10-year offline license for use in air-gapped environments.",
+		Long:  "Generate a 30-year offline license for use in air-gapped environments.",
 		Handler: func(inv *serpent.Invocation) error {
 			fmt.Fprintf(inv.Stderr, "Generating offline license...\n")
-			licenseString, _, _ := license.GenerateOfflineLicense()
+
+			// Parse user limit, default to 999999
+			limit := 999999
+			if userLimit != "" {
+				_, err := fmt.Sscanf(userLimit, "%d", &limit)
+				if err != nil {
+					return fmt.Errorf("invalid user-limit value: %w", err)
+				}
+			}
+
+			licenseString, _, _ := license.GenerateOfflineLicense(limit)
 			// 验证生成的license可以被正确解析
 			_, err := license.ParseClaims(licenseString, license.GetOfflineKeys())
 			if err != nil {
@@ -55,7 +67,7 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 				fmt.Fprintln(inv.Stdout, licenseString)
 			} else {
 				// 输出到文件
-				err := os.WriteFile(outputFile, []byte(licenseString), 0644)
+				err := os.WriteFile(outputFile, []byte(licenseString), 0o644)
 				if err != nil {
 					return fmt.Errorf("failed to write license to file: %w", err)
 				}
@@ -87,6 +99,12 @@ func (r *RootCmd) generateLicense() *serpent.Command {
 			Env:           "CODER_LICENSE_PRIVATE_KEY_FILE",
 			Description:   "Output file path for the private key. If specified, also saves the private key with a .private suffix.",
 			Value:         serpent.StringOf(&privateKeyFile),
+		},
+		{
+			Flag:        "user-limit",
+			Env:         "CODER_LICENSE_USER_LIMIT",
+			Description: "Maximum number of users allowed. Default is 999999.",
+			Value:       serpent.StringOf(&userLimit),
 		},
 	}
 
