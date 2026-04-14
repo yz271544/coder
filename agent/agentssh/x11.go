@@ -21,7 +21,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 )
 
 const (
@@ -57,6 +57,7 @@ type x11Forwarder struct {
 	x11HandlerErrors *prometheus.CounterVec
 	fs               afero.Fs
 	displayOffset    int
+	maxPort          int
 
 	// network creates X11 listener sockets. Defaults to osNet{}.
 	network X11Network
@@ -176,7 +177,7 @@ func (x *x11Forwarder) listenForConnections(
 		var originPort uint32
 
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			if tcpAddr, ok := tcpConn.LocalAddr().(*net.TCPAddr); ok {
+			if tcpAddr, ok := tcpConn.LocalAddr().(*net.TCPAddr); ok && tcpAddr != nil {
 				originAddr = tcpAddr.IP.String()
 				// #nosec G115 - Safe conversion as TCP port numbers are within uint32 range (0-65535)
 				originPort = uint32(tcpAddr.Port)
@@ -314,7 +315,7 @@ func (x *x11Forwarder) evictLeastRecentlyUsedSession() {
 // the next available port starting from X11StartPort and displayOffset.
 func (x *x11Forwarder) createX11Listener(ctx context.Context) (ln net.Listener, display int, err error) {
 	// Look for an open port to listen on.
-	for port := X11StartPort + x.displayOffset; port <= X11MaxPort; port++ {
+	for port := X11StartPort + x.displayOffset; port <= x.maxPort; port++ {
 		if ctx.Err() != nil {
 			return nil, -1, ctx.Err()
 		}

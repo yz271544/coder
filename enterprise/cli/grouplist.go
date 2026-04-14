@@ -43,16 +43,16 @@ func (r *RootCmd) groupList() *serpent.Command {
 				return xerrors.Errorf("get groups: %w", err)
 			}
 
-			if len(groups) == 0 {
-				_, _ = fmt.Fprintf(inv.Stderr, "%s No groups found in %s! Create one:\n\n", agpl.Caret, color.HiWhiteString(org.Name))
-				_, _ = fmt.Fprintln(inv.Stderr, color.HiMagentaString("  $ coder groups create <name>\n"))
-				return nil
-			}
-
 			rows := groupsToRows(groups...)
 			out, err := formatter.Format(inv.Context(), rows)
 			if err != nil {
 				return xerrors.Errorf("display groups: %w", err)
+			}
+
+			if out == "" {
+				_, _ = fmt.Fprintf(inv.Stderr, "%s No groups found in %s! Create one:\n\n", agpl.Caret, color.HiWhiteString(org.Name))
+				_, _ = fmt.Fprintln(inv.Stderr, color.HiMagentaString("  $ coder groups create <name>\n"))
+				return nil
 			}
 
 			_, _ = fmt.Fprintln(inv.Stdout, out)
@@ -67,7 +67,7 @@ func (r *RootCmd) groupList() *serpent.Command {
 
 type groupTableRow struct {
 	// For json output:
-	Group codersdk.Group `table:"-"`
+	codersdk.Group `table:"-"`
 
 	// For table output:
 	Name           string    `json:"-" table:"name,default_sort"`
@@ -85,6 +85,7 @@ func groupsToRows(groups ...codersdk.Group) []groupTableRow {
 			members = append(members, member.Email)
 		}
 		rows = append(rows, groupTableRow{
+			Group:          group,
 			Name:           group.Name,
 			DisplayName:    group.DisplayName,
 			OrganizationID: group.OrganizationID,

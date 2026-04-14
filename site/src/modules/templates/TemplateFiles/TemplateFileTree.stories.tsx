@@ -1,15 +1,22 @@
-import { chromatic } from "testHelpers/chromatic";
 import { useTheme } from "@emotion/react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import type { FileTree } from "utils/filetree";
+import { chromatic } from "#/testHelpers/chromatic";
+import type { FileTree } from "#/utils/filetree";
 import { TemplateFileTree } from "./TemplateFileTree";
 
 const fileTree: FileTree = {
 	"main.tf": "resource aws_instance my_instance {}",
 	"variables.tf": "variable my_var {}",
 	"outputs.tf": "output my_output {}",
+	"README.md": "# Example\n\nThis is an example.",
+	"install.sh": "#!/bin/bash\necho 'Installing...'",
+	"config.json": '{"name": "example"}',
+	"docker-compose.yml": "version: '3'",
+	Dockerfile: "FROM ubuntu:latest",
+	"app.py": "print('Hello')",
 	folder: {
 		"nested.tf": "resource aws_instance my_instance {}",
+		"data.csv": "col1,col2\n1,2",
 	},
 };
 

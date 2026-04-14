@@ -1,6 +1,7 @@
 package database
 
 import (
+	"database/sql"
 	"encoding/hex"
 	"slices"
 	"sort"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sqlc-dev/pqtype"
 	"golang.org/x/exp/maps"
 	"golang.org/x/oauth2"
 	"golang.org/x/xerrors"
@@ -132,6 +134,63 @@ func (w ConnectionLog) RBACObject() rbac.Object {
 	return obj
 }
 
+// TaskTable converts a Task to it's reduced version.
+// A more generalized solution is to use json marshaling to
+// consistently keep these two structs in sync.
+// That would be a lot of overhead, and a more costly unit test is
+// written to make sure these match up.
+func (t Task) TaskTable() TaskTable {
+	return TaskTable{
+		ID:                 t.ID,
+		OrganizationID:     t.OrganizationID,
+		OwnerID:            t.OwnerID,
+		Name:               t.Name,
+		DisplayName:        t.DisplayName,
+		WorkspaceID:        t.WorkspaceID,
+		TemplateVersionID:  t.TemplateVersionID,
+		TemplateParameters: t.TemplateParameters,
+		Prompt:             t.Prompt,
+		CreatedAt:          t.CreatedAt,
+		DeletedAt:          t.DeletedAt,
+	}
+}
+
+func (t Task) RBACObject() rbac.Object {
+	obj := rbac.ResourceTask.
+		WithID(t.ID).
+		WithOwner(t.OwnerID.String()).
+		InOrg(t.OrganizationID)
+
+	if rbac.WorkspaceACLDisabled() {
+		return obj
+	}
+
+	if t.WorkspaceGroupACL != nil {
+		obj = obj.WithGroupACL(t.WorkspaceGroupACL.RBACACL())
+	}
+	if t.WorkspaceUserACL != nil {
+		obj = obj.WithACLUserList(t.WorkspaceUserACL.RBACACL())
+	}
+
+	return obj
+}
+
+func (c Chat) RBACObject() rbac.Object {
+	return rbac.ResourceChat.WithID(c.ID).WithOwner(c.OwnerID.String()).InOrg(c.OrganizationID)
+}
+
+func (r GetChatsRow) RBACObject() rbac.Object {
+	return r.Chat.RBACObject()
+}
+
+func (c ChatFile) RBACObject() rbac.Object {
+	return rbac.ResourceChat.WithID(c.ID).WithOwner(c.OwnerID.String()).InOrg(c.OrganizationID)
+}
+
+func (c GetChatFileMetadataByChatIDRow) RBACObject() rbac.Object {
+	return rbac.ResourceChat.WithID(c.ID).WithOwner(c.OwnerID.String()).InOrg(c.OrganizationID)
+}
+
 func (s APIKeyScope) ToRBAC() rbac.ScopeName {
 	switch s {
 	case ApiKeyScopeCoderAll:
@@ -176,8 +235,8 @@ func (s APIKeyScopes) expandRBACScope() (rbac.Scope, error) {
 		// Identifier is informational; not used in policy evaluation.
 		Identifier: rbac.RoleIdentifier{Name: "Scope_Multiple"},
 		Site:       nil,
-		Org:        map[string][]rbac.Permission{},
 		User:       nil,
+		ByOrgID:    map[string]rbac.OrgPermissions{},
 	}
 
 	// Collect allow lists for a union after expanding all scopes.
@@ -191,8 +250,11 @@ func (s APIKeyScopes) expandRBACScope() (rbac.Scope, error) {
 
 		// Merge role permissions: union by simple concatenation.
 		merged.Site = append(merged.Site, expanded.Site...)
-		for orgID, perms := range expanded.Org {
-			merged.Org[orgID] = append(merged.Org[orgID], perms...)
+		for orgID, perms := range expanded.ByOrgID {
+			orgPerms := merged.ByOrgID[orgID]
+			orgPerms.Org = append(orgPerms.Org, perms.Org...)
+			orgPerms.Member = append(orgPerms.Member, perms.Member...)
+			merged.ByOrgID[orgID] = orgPerms
 		}
 		merged.User = append(merged.User, expanded.User...)
 
@@ -201,10 +263,12 @@ func (s APIKeyScopes) expandRBACScope() (rbac.Scope, error) {
 
 	// De-duplicate permissions across Site/Org/User
 	merged.Site = rbac.DeduplicatePermissions(merged.Site)
-	for orgID, perms := range merged.Org {
-		merged.Org[orgID] = rbac.DeduplicatePermissions(perms)
-	}
 	merged.User = rbac.DeduplicatePermissions(merged.User)
+	for orgID, perms := range merged.ByOrgID {
+		perms.Org = rbac.DeduplicatePermissions(perms.Org)
+		perms.Member = rbac.DeduplicatePermissions(perms.Member)
+		merged.ByOrgID[orgID] = perms
+	}
 
 	union, err := rbac.UnionAllowLists(allowLists...)
 	if err != nil {
@@ -278,6 +342,14 @@ func (t GetFileTemplatesRow) RBACObject() rbac.Object {
 		WithGroupACL(t.GroupACL)
 }
 
+// RBACObject for a workspace build's provisioner state requires Update access of the template.
+func (t GetWorkspaceBuildProvisionerStateByIDRow) RBACObject() rbac.Object {
+	return rbac.ResourceTemplate.WithID(t.TemplateID).
+		InOrg(t.TemplateOrganizationID).
+		WithACLUserList(t.UserACL).
+		WithGroupACL(t.GroupACL)
+}
+
 func (t Template) DeepCopy() Template {
 	cpy := t
 	cpy.UserACL = maps.Clone(t.UserACL)
@@ -327,6 +399,10 @@ func (g GetGroupsRow) RBACObject() rbac.Object {
 }
 
 func (gm GroupMember) RBACObject() rbac.Object {
+	return rbac.ResourceGroupMember.WithID(gm.UserID).InOrg(gm.OrganizationID).WithOwner(gm.UserID.String())
+}
+
+func (gm GetGroupMembersByGroupIDPaginatedRow) RBACObject() rbac.Object {
 	return rbac.ResourceGroupMember.WithID(gm.UserID).InOrg(gm.OrganizationID).WithOwner(gm.UserID.String())
 }
 
@@ -392,9 +468,16 @@ func (w WorkspaceTable) RBACObject() rbac.Object {
 		return w.DormantRBAC()
 	}
 
-	return rbac.ResourceWorkspace.WithID(w.ID).
+	obj := rbac.ResourceWorkspace.
+		WithID(w.ID).
 		InOrg(w.OrganizationID).
-		WithOwner(w.OwnerID.String()).
+		WithOwner(w.OwnerID.String())
+
+	if rbac.WorkspaceACLDisabled() {
+		return obj
+	}
+
+	return obj.
 		WithGroupACL(w.GroupACL.RBACACL()).
 		WithACLUserList(w.UserACL.RBACACL())
 }
@@ -593,27 +676,28 @@ func ConvertUserRows(rows []GetUsersRow) []User {
 	users := make([]User, len(rows))
 	for i, r := range rows {
 		users[i] = User{
-			ID:             r.ID,
-			Email:          r.Email,
-			Username:       r.Username,
-			Name:           r.Name,
-			HashedPassword: r.HashedPassword,
-			CreatedAt:      r.CreatedAt,
-			UpdatedAt:      r.UpdatedAt,
-			Status:         r.Status,
-			RBACRoles:      r.RBACRoles,
-			LoginType:      r.LoginType,
-			AvatarURL:      r.AvatarURL,
-			Deleted:        r.Deleted,
-			LastSeenAt:     r.LastSeenAt,
-			IsSystem:       r.IsSystem,
+			ID:               r.ID,
+			Email:            r.Email,
+			Username:         r.Username,
+			Name:             r.Name,
+			HashedPassword:   r.HashedPassword,
+			CreatedAt:        r.CreatedAt,
+			UpdatedAt:        r.UpdatedAt,
+			Status:           r.Status,
+			RBACRoles:        r.RBACRoles,
+			LoginType:        r.LoginType,
+			AvatarURL:        r.AvatarURL,
+			Deleted:          r.Deleted,
+			LastSeenAt:       r.LastSeenAt,
+			IsSystem:         r.IsSystem,
+			IsServiceAccount: r.IsServiceAccount,
 		}
 	}
 
 	return users
 }
 
-func ConvertWorkspaceRows(rows []GetWorkspacesRow) []Workspace {
+func ConvertWorkspaceRows(rows []GetWorkspacesRow) ([]Workspace, error) {
 	workspaces := make([]Workspace, len(rows))
 	for i, r := range rows {
 		workspaces[i] = Workspace{
@@ -634,6 +718,7 @@ func ConvertWorkspaceRows(rows []GetWorkspacesRow) []Workspace {
 			Favorite:                r.Favorite,
 			OwnerAvatarUrl:          r.OwnerAvatarUrl,
 			OwnerUsername:           r.OwnerUsername,
+			OwnerName:               r.OwnerName,
 			OrganizationName:        r.OrganizationName,
 			OrganizationDisplayName: r.OrganizationDisplayName,
 			OrganizationIcon:        r.OrganizationIcon,
@@ -643,10 +728,33 @@ func ConvertWorkspaceRows(rows []GetWorkspacesRow) []Workspace {
 			TemplateIcon:            r.TemplateIcon,
 			TemplateDescription:     r.TemplateDescription,
 			NextStartAt:             r.NextStartAt,
+			TaskID:                  r.TaskID,
+		}
+
+		var err error
+
+		err = workspaces[i].UserACL.Scan(r.UserACL)
+		if err != nil {
+			return nil, xerrors.Errorf("scan user ACL %q: %w", r.UserACL, err)
+		}
+		err = workspaces[i].GroupACL.Scan(r.GroupACL)
+		if err != nil {
+			return nil, xerrors.Errorf("scan group ACL %q: %w", r.GroupACL, err)
+		}
+
+		err = workspaces[i].UserACLDisplayInfo.Scan(r.UserACLDisplayInfo)
+		if err != nil {
+			return nil, xerrors.Errorf("scan user ACL display info %q: %w",
+				r.UserACLDisplayInfo, err)
+		}
+		err = workspaces[i].GroupACLDisplayInfo.Scan(r.GroupACLDisplayInfo)
+		if err != nil {
+			return nil, xerrors.Errorf("scan group ACL display info %q: %w",
+				r.GroupACLDisplayInfo, err)
 		}
 	}
 
-	return workspaces
+	return workspaces, nil
 }
 
 func (g Group) IsEveryone() bool {
@@ -757,4 +865,91 @@ func (s UserSecret) RBACObject() rbac.Object {
 
 func (s AIBridgeInterception) RBACObject() rbac.Object {
 	return rbac.ResourceAibridgeInterception.WithOwner(s.InitiatorID.String())
+}
+
+// WorkspaceIdentity contains the minimal workspace fields needed for agent API metadata/stats reporting
+// and RBAC checks, without requiring a full database.Workspace object.
+type WorkspaceIdentity struct {
+	// Add any other fields needed for IsPrebuild() if it relies on workspace fields
+	// Identity fields
+	ID             uuid.UUID
+	OwnerID        uuid.UUID
+	OrganizationID uuid.UUID
+	TemplateID     uuid.UUID
+
+	// Display fields for logging/metrics
+	Name          string
+	OwnerUsername string
+	TemplateName  string
+
+	// Lifecycle fields needed for stats reporting
+	AutostartSchedule sql.NullString
+}
+
+func (w WorkspaceIdentity) RBACObject() rbac.Object {
+	return Workspace{
+		ID:                w.ID,
+		OwnerID:           w.OwnerID,
+		OrganizationID:    w.OrganizationID,
+		TemplateID:        w.TemplateID,
+		Name:              w.Name,
+		OwnerUsername:     w.OwnerUsername,
+		TemplateName:      w.TemplateName,
+		AutostartSchedule: w.AutostartSchedule,
+	}.RBACObject()
+}
+
+// IsPrebuild returns true if the workspace is a prebuild workspace.
+// A workspace is considered a prebuild if its owner is the prebuild system user.
+func (w WorkspaceIdentity) IsPrebuild() bool {
+	return w.OwnerID == PrebuildsSystemUserID
+}
+
+func (w WorkspaceIdentity) Equal(w2 WorkspaceIdentity) bool {
+	return w.ID == w2.ID && w.OwnerID == w2.OwnerID && w.OrganizationID == w2.OrganizationID &&
+		w.TemplateID == w2.TemplateID && w.Name == w2.Name && w.OwnerUsername == w2.OwnerUsername &&
+		w.TemplateName == w2.TemplateName && w.AutostartSchedule == w2.AutostartSchedule
+}
+
+func WorkspaceIdentityFromWorkspace(w Workspace) WorkspaceIdentity {
+	return WorkspaceIdentity{
+		ID:                w.ID,
+		OwnerID:           w.OwnerID,
+		OrganizationID:    w.OrganizationID,
+		TemplateID:        w.TemplateID,
+		Name:              w.Name,
+		OwnerUsername:     w.OwnerUsername,
+		TemplateName:      w.TemplateName,
+		AutostartSchedule: w.AutostartSchedule,
+	}
+}
+
+// A workspace agent belongs to the owner of the associated workspace.
+func (r GetWorkspaceAgentAndWorkspaceByIDRow) RBACObject() rbac.Object {
+	return r.WorkspaceTable.RBACObject()
+}
+
+// UpsertConnectionLogParams contains the parameters for upserting a
+// connection log entry. This struct is hand-maintained (not generated
+// by sqlc) because the single-row UpsertConnectionLog query was
+// removed in favor of BatchUpsertConnectionLogs, but the struct is
+// still used as the canonical connection log event type throughout
+// the codebase.
+type UpsertConnectionLogParams struct {
+	ID               uuid.UUID        `db:"id" json:"id"`
+	OrganizationID   uuid.UUID        `db:"organization_id" json:"organization_id"`
+	WorkspaceOwnerID uuid.UUID        `db:"workspace_owner_id" json:"workspace_owner_id"`
+	WorkspaceID      uuid.UUID        `db:"workspace_id" json:"workspace_id"`
+	WorkspaceName    string           `db:"workspace_name" json:"workspace_name"`
+	AgentName        string           `db:"agent_name" json:"agent_name"`
+	Type             ConnectionType   `db:"type" json:"type"`
+	Code             sql.NullInt32    `db:"code" json:"code"`
+	IP               pqtype.Inet      `db:"ip" json:"ip"`
+	UserAgent        sql.NullString   `db:"user_agent" json:"user_agent"`
+	UserID           uuid.NullUUID    `db:"user_id" json:"user_id"`
+	SlugOrPort       sql.NullString   `db:"slug_or_port" json:"slug_or_port"`
+	ConnectionID     uuid.NullUUID    `db:"connection_id" json:"connection_id"`
+	DisconnectReason sql.NullString   `db:"disconnect_reason" json:"disconnect_reason"`
+	Time             time.Time        `db:"time" json:"time"`
+	ConnectionStatus ConnectionStatus `db:"connection_status" json:"connection_status"`
 }

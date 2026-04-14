@@ -1,22 +1,30 @@
+import type { FC } from "react";
 import {
 	type TerminalFontName,
 	TerminalFontNames,
 	type UpdateUserAppearanceSettingsRequest,
-} from "api/typesGenerated";
-import { ErrorAlert } from "components/Alert/ErrorAlert";
-import { PreviewBadge } from "components/Badges/Badges";
-import { Label } from "components/Label/Label";
-import { RadioGroup, RadioGroupItem } from "components/RadioGroup/RadioGroup";
-import { Spinner } from "components/Spinner/Spinner";
-import type { FC } from "react";
-import { DEFAULT_THEME } from "theme";
+} from "#/api/typesGenerated";
+import { ErrorAlert } from "#/components/Alert/ErrorAlert";
+import { PreviewBadge } from "#/components/Badges/Badges";
+import { Label } from "#/components/Label/Label";
+import { RadioGroup, RadioGroupItem } from "#/components/RadioGroup/RadioGroup";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { DEFAULT_THEME } from "#/theme";
 import {
 	DEFAULT_TERMINAL_FONT,
 	terminalFontLabels,
 	terminalFonts,
-} from "theme/constants";
-import { cn } from "utils/cn";
+} from "#/theme/constants";
+import { cn } from "#/utils/cn";
 import { Section } from "../Section";
+
+// Display Geist Mono (the default monospace font) first, then the rest
+// alphabetically. TerminalFontNames is auto-generated in alphabetical
+// order, so we reorder here for a better UX.
+const sortedTerminalFontNames = [
+	"geist-mono" as TerminalFontName,
+	...TerminalFontNames.filter((name) => name !== "" && name !== "geist-mono"),
+];
 
 interface AppearanceFormProps {
 	isUpdating?: boolean;
@@ -107,7 +115,7 @@ export const AppearanceForm: FC<AppearanceFormProps> = ({
 						onChangeTerminalFont(toTerminalFontName(value))
 					}
 				>
-					{TerminalFontNames.filter((name) => name !== "").map((name) => (
+					{sortedTerminalFontNames.map((name) => (
 						<div key={name} className="flex items-center space-x-2">
 							<RadioGroupItem value={name} id={name} />
 							<Label
@@ -179,6 +187,10 @@ const AutoThemePreviewButton: FC<AutoThemePreviewButtonProps> = ({
 					preview={preview}
 					displayName={displayName}
 					theme={rightTheme}
+					style={{
+						// Slightly past the bounding box to avoid cutting off the outline
+						clipPath: "polygon(50% -5%, 105% -5%, 105% 105%, 50% 105%)",
+					}}
 				/>
 			</label>
 		</>
@@ -248,7 +260,7 @@ const ThemePreview: FC<ThemePreviewProps> = ({
 				style={style}
 			>
 				<div className="bg-surface-primary text-content-primary">
-					<div className="bg-surface-secondary flex items-center justify-between px-2.5 py-1.5 mb-2 border-0 border-b border-border border-solid">
+					<div className="bg-surface-primary flex items-center justify-between px-2.5 py-1.5 mb-2 border-0 border-b border-border border-solid">
 						<div className="flex items-center gap-1.5">
 							<div className="bg-content-primary h-1.5 w-5 rounded" />
 							<div className="bg-content-secondary h-1.5 w-5 rounded" />

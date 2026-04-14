@@ -25,10 +25,12 @@ LIMIT
 SELECT * FROM api_keys WHERE last_used > $1;
 
 -- name: GetAPIKeysByLoginType :many
-SELECT * FROM api_keys WHERE login_type = $1;
+SELECT * FROM api_keys WHERE login_type = $1
+AND (@include_expired::bool OR expires_at > now());
 
 -- name: GetAPIKeysByUserID :many
-SELECT * FROM api_keys WHERE login_type = $1 AND user_id = $2;
+SELECT * FROM api_keys WHERE login_type = $1 AND user_id = $2
+AND (@include_expired::bool OR expires_at > now());
 
 -- name: InsertAPIKey :one
 INSERT INTO
@@ -84,6 +86,21 @@ DELETE FROM
 	api_keys
 WHERE
 	user_id = $1;
+
+-- name: DeleteExpiredAPIKeys :execrows
+WITH expired_keys AS (
+	SELECT id
+	FROM api_keys
+	-- expired keys only
+	WHERE expires_at < @before::timestamptz
+	LIMIT @limit_count
+)
+DELETE FROM
+	api_keys
+USING
+	expired_keys
+WHERE
+	api_keys.id = expired_keys.id;
 
 -- name: ExpirePrebuildsAPIKeys :exec
 -- Firstly, collect api_keys owned by the prebuilds user that correlate

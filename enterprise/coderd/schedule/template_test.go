@@ -13,9 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbfake"
@@ -243,73 +242,35 @@ func TestTemplateUpdateBuildDeadlines(t *testing.T) {
 			t.Log("newMaxDeadline", c.newMaxDeadline)
 			t.Log("ttl", c.ttl)
 
-			var (
-				template = dbgen.Template(t, db, database.Template{
-					OrganizationID:  organizationID,
-					ActiveVersionID: templateVersion.ID,
-					CreatedBy:       user.ID,
-				})
-				ws = dbgen.Workspace(t, db, database.WorkspaceTable{
-					OrganizationID: organizationID,
-					OwnerID:        user.ID,
-					TemplateID:     template.ID,
-				})
-				job = dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
-					OrganizationID: organizationID,
-					FileID:         file.ID,
-					InitiatorID:    user.ID,
-					Provisioner:    database.ProvisionerTypeEcho,
-					Tags: database.StringMap{
-						c.name: "yeah",
-					},
-				})
-				wsBuild = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
-					WorkspaceID:       ws.ID,
-					BuildNumber:       1,
-					JobID:             job.ID,
-					InitiatorID:       user.ID,
-					TemplateVersionID: templateVersion.ID,
-					ProvisionerState:  []byte(must(cryptorand.String(64))),
-				})
-			)
+			template := dbgen.Template(t, db, database.Template{
+				OrganizationID:  organizationID,
+				ActiveVersionID: templateVersion.ID,
+				CreatedBy:       user.ID,
+			})
+			buildResp := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+				OrganizationID: organizationID,
+				OwnerID:        user.ID,
+				TemplateID:     template.ID,
+			}).Seed(database.WorkspaceBuild{
+				TemplateVersionID: templateVersion.ID,
+			}).ProvisionerState([]byte(must(cryptorand.String(64)))).Succeeded(dbfake.WithJobCompletedAt(buildTime)).Do()
 
 			// Assert test invariant: workspace build state must not be empty
-			require.NotEmpty(t, wsBuild.ProvisionerState, "provisioner state must not be empty")
-
-			acquiredJob, err := db.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
-				OrganizationID: job.OrganizationID,
-				StartedAt: sql.NullTime{
-					Time:  buildTime,
-					Valid: true,
-				},
-				WorkerID: uuid.NullUUID{
-					UUID:  uuid.New(),
-					Valid: true,
-				},
-				Types:           []database.ProvisionerType{database.ProvisionerTypeEcho},
-				ProvisionerTags: json.RawMessage(fmt.Sprintf(`{%q: "yeah"}`, c.name)),
-			})
+			var buildProvisionerState []byte
+			buildProvisionerStateRow, err := db.GetWorkspaceBuildProvisionerStateByID(ctx, buildResp.Build.ID)
 			require.NoError(t, err)
-			require.Equal(t, job.ID, acquiredJob.ID)
-			err = db.UpdateProvisionerJobWithCompleteByID(ctx, database.UpdateProvisionerJobWithCompleteByIDParams{
-				ID: job.ID,
-				CompletedAt: sql.NullTime{
-					Time:  buildTime,
-					Valid: true,
-				},
-				UpdatedAt: buildTime,
-			})
-			require.NoError(t, err)
+			buildProvisionerState = buildProvisionerStateRow.ProvisionerState
+			require.NotEmpty(t, buildProvisionerState, "provisioner state must not be empty")
 
 			err = db.UpdateWorkspaceBuildDeadlineByID(ctx, database.UpdateWorkspaceBuildDeadlineByIDParams{
-				ID:          wsBuild.ID,
+				ID:          buildResp.Build.ID,
 				UpdatedAt:   buildTime,
 				Deadline:    c.deadline,
 				MaxDeadline: c.maxDeadline,
 			})
 			require.NoError(t, err)
 
-			wsBuild, err = db.GetWorkspaceBuildByID(ctx, wsBuild.ID)
+			wsBuild, err := db.GetWorkspaceBuildByID(ctx, buildResp.Build.ID)
 			require.NoError(t, err)
 
 			logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug)
@@ -352,7 +313,9 @@ func TestTemplateUpdateBuildDeadlines(t *testing.T) {
 			require.WithinDuration(t, c.newMaxDeadline, newBuild.MaxDeadline, time.Second, "max_deadline")
 
 			// Check that the new build has the same state as before.
-			require.Equal(t, wsBuild.ProvisionerState, newBuild.ProvisionerState, "provisioner state mismatch")
+			newBuildProvisionerStateRow, err := db.GetWorkspaceBuildProvisionerStateByID(ctx, newBuild.ID)
+			require.NoError(t, err)
+			require.Equal(t, buildProvisionerState, newBuildProvisionerStateRow.ProvisionerState, "provisioner state mismatch")
 		})
 	}
 }
@@ -430,7 +393,8 @@ func TestTemplateUpdateBuildDeadlinesSkip(t *testing.T) {
 		shouldBeUpdated bool
 
 		// Set below:
-		wsBuild database.WorkspaceBuild
+		wsBuild                 database.WorkspaceBuild
+		wsBuildProvisionerState []byte
 	}{
 		{
 			name:            "DifferentTemplate",
@@ -525,19 +489,25 @@ func TestTemplateUpdateBuildDeadlinesSkip(t *testing.T) {
 			},
 			OrganizationID: templateJob.OrganizationID,
 		})
+		wsBuildProvisionerState := []byte(must(cryptorand.String(64)))
 		wsBuild := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
 			WorkspaceID:       wsID,
 			BuildNumber:       b.buildNumber,
 			JobID:             job.ID,
 			InitiatorID:       user.ID,
 			TemplateVersionID: templateVersion.ID,
-			ProvisionerState:  []byte(must(cryptorand.String(64))),
 		})
+		err = db.UpdateWorkspaceBuildProvisionerStateByID(ctx, database.UpdateWorkspaceBuildProvisionerStateByIDParams{
+			ID:               wsBuild.ID,
+			UpdatedAt:        wsBuild.UpdatedAt,
+			ProvisionerState: wsBuildProvisionerState,
+		})
+		require.NoError(t, err)
 
 		// Assert test invariant: workspace build state must not be empty
-		require.NotEmpty(t, wsBuild.ProvisionerState, "provisioner state must not be empty")
+		require.NotEmpty(t, wsBuildProvisionerState, "provisioner state must not be empty")
 
-		err := db.UpdateWorkspaceBuildDeadlineByID(ctx, database.UpdateWorkspaceBuildDeadlineByIDParams{
+		err = db.UpdateWorkspaceBuildDeadlineByID(ctx, database.UpdateWorkspaceBuildDeadlineByIDParams{
 			ID:          wsBuild.ID,
 			UpdatedAt:   buildTime,
 			Deadline:    originalMaxDeadline,
@@ -549,8 +519,9 @@ func TestTemplateUpdateBuildDeadlinesSkip(t *testing.T) {
 		require.NoError(t, err)
 
 		// Assert test invariant: workspace build state must not be empty
-		require.NotEmpty(t, wsBuild.ProvisionerState, "provisioner state must not be empty")
+		require.NotEmpty(t, wsBuildProvisionerState, "provisioner state must not be empty")
 
+		builds[i].wsBuildProvisionerState = wsBuildProvisionerState
 		builds[i].wsBuild = wsBuild
 
 		if !b.buildStarted {
@@ -637,7 +608,9 @@ func TestTemplateUpdateBuildDeadlinesSkip(t *testing.T) {
 			assert.WithinDuration(t, originalMaxDeadline, newBuild.MaxDeadline, time.Second, msg)
 		}
 
-		assert.Equal(t, builds[i].wsBuild.ProvisionerState, newBuild.ProvisionerState, "provisioner state mismatch")
+		newBuildProvisionerStateRow, err := db.GetWorkspaceBuildProvisionerStateByID(ctx, newBuild.ID)
+		require.NoError(t, err)
+		assert.Equal(t, builds[i].wsBuildProvisionerState, newBuildProvisionerStateRow.ProvisionerState, "provisioner state mismatch")
 	}
 }
 
@@ -736,6 +709,191 @@ func TestNotifications(t *testing.T) {
 			require.Contains(t, sent[i].Targets, dormantWs.OrganizationID)
 			require.Contains(t, sent[i].Targets, dormantWs.OwnerID)
 		}
+	})
+
+	// Regression test for https://github.com/coder/coder/issues/20913
+	// Deleted workspaces should not receive dormancy notifications.
+	t.Run("DeletedWorkspacesNotNotified", func(t *testing.T) {
+		t.Parallel()
+
+		var (
+			db, _ = dbtestutil.NewDB(t)
+			ctx   = testutil.Context(t, testutil.WaitLong)
+			user  = dbgen.User(t, db, database.User{})
+			file  = dbgen.File(t, db, database.File{
+				CreatedBy: user.ID,
+			})
+			templateJob = dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+				FileID:      file.ID,
+				InitiatorID: user.ID,
+				Tags: database.StringMap{
+					"foo": "bar",
+				},
+			})
+			timeTilDormant  = time.Minute * 2
+			templateVersion = dbgen.TemplateVersion(t, db, database.TemplateVersion{
+				CreatedBy:      user.ID,
+				JobID:          templateJob.ID,
+				OrganizationID: templateJob.OrganizationID,
+			})
+			template = dbgen.Template(t, db, database.Template{
+				ActiveVersionID:          templateVersion.ID,
+				CreatedBy:                user.ID,
+				OrganizationID:           templateJob.OrganizationID,
+				TimeTilDormant:           int64(timeTilDormant),
+				TimeTilDormantAutoDelete: int64(timeTilDormant),
+			})
+		)
+
+		// Create a dormant workspace that is NOT deleted.
+		activeDormantWorkspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        user.ID,
+			TemplateID:     template.ID,
+			OrganizationID: templateJob.OrganizationID,
+			LastUsedAt:     time.Now().Add(-time.Hour),
+		})
+		_, err := db.UpdateWorkspaceDormantDeletingAt(ctx, database.UpdateWorkspaceDormantDeletingAtParams{
+			ID: activeDormantWorkspace.ID,
+			DormantAt: sql.NullTime{
+				Time:  activeDormantWorkspace.LastUsedAt.Add(timeTilDormant),
+				Valid: true,
+			},
+		})
+		require.NoError(t, err)
+
+		// Create a dormant workspace that IS deleted.
+		deletedDormantWorkspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        user.ID,
+			TemplateID:     template.ID,
+			OrganizationID: templateJob.OrganizationID,
+			LastUsedAt:     time.Now().Add(-time.Hour),
+			Deleted:        true, // Mark as deleted
+		})
+		_, err = db.UpdateWorkspaceDormantDeletingAt(ctx, database.UpdateWorkspaceDormantDeletingAtParams{
+			ID: deletedDormantWorkspace.ID,
+			DormantAt: sql.NullTime{
+				Time:  deletedDormantWorkspace.LastUsedAt.Add(timeTilDormant),
+				Valid: true,
+			},
+		})
+		require.NoError(t, err)
+
+		// Setup dependencies
+		notifyEnq := notificationstest.NewFakeEnqueuer()
+		logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug)
+		const userQuietHoursSchedule = "CRON_TZ=UTC 0 0 * * *" // midnight UTC
+		userQuietHoursStore, err := schedule.NewEnterpriseUserQuietHoursScheduleStore(userQuietHoursSchedule, true)
+		require.NoError(t, err)
+		userQuietHoursStorePtr := &atomic.Pointer[agplschedule.UserQuietHoursScheduleStore]{}
+		userQuietHoursStorePtr.Store(&userQuietHoursStore)
+		templateScheduleStore := schedule.NewEnterpriseTemplateScheduleStore(userQuietHoursStorePtr, notifyEnq, logger, nil)
+
+		// Lower the dormancy TTL to ensure the schedule recalculates deadlines and
+		// triggers notifications.
+		_, err = templateScheduleStore.Set(dbauthz.AsNotifier(ctx), db, template, agplschedule.TemplateScheduleOptions{
+			TimeTilDormant:           timeTilDormant / 2,
+			TimeTilDormantAutoDelete: timeTilDormant / 2,
+		})
+		require.NoError(t, err)
+
+		// We should only receive a notification for the non-deleted dormant workspace.
+		sent := notifyEnq.Sent()
+		require.Len(t, sent, 1, "expected exactly 1 notification for the non-deleted workspace")
+		require.Equal(t, sent[0].UserID, activeDormantWorkspace.OwnerID)
+		require.Equal(t, sent[0].TemplateID, notifications.TemplateWorkspaceMarkedForDeletion)
+		require.Contains(t, sent[0].Targets, activeDormantWorkspace.ID)
+
+		// Ensure the deleted workspace was NOT notified
+		for _, notification := range sent {
+			require.NotContains(t, notification.Targets, deletedDormantWorkspace.ID,
+				"deleted workspace should not receive notifications")
+		}
+	})
+
+	// Disabling dormancy auto-deletion should not send "marked for deletion" notifications.
+	t.Run("DisablingAutoDeleteSendsNoNotifications", func(t *testing.T) {
+		t.Parallel()
+
+		var (
+			db, _ = dbtestutil.NewDB(t)
+			user  = dbgen.User(t, db, database.User{})
+			file  = dbgen.File(t, db, database.File{
+				CreatedBy: user.ID,
+			})
+			templateJob = dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+				FileID:      file.ID,
+				InitiatorID: user.ID,
+				Tags: database.StringMap{
+					"foo": "bar",
+				},
+			})
+			timeTilDormant           = time.Minute * 2
+			timeTilDormantAutoDelete = time.Minute * 4
+			templateVersion          = dbgen.TemplateVersion(t, db, database.TemplateVersion{
+				CreatedBy:      user.ID,
+				JobID:          templateJob.ID,
+				OrganizationID: templateJob.OrganizationID,
+			})
+			template = dbgen.Template(t, db, database.Template{
+				ActiveVersionID: templateVersion.ID,
+				CreatedBy:       user.ID,
+				OrganizationID:  templateJob.OrganizationID,
+			})
+		)
+
+		// Given: Dormancy auto deletion is enabled
+		ctx := testutil.Context(t, testutil.WaitShort)
+		err := db.UpdateTemplateScheduleByID(ctx, database.UpdateTemplateScheduleByIDParams{
+			ID:                       template.ID,
+			UpdatedAt:                dbtime.Now(),
+			TimeTilDormant:           int64(timeTilDormant),
+			TimeTilDormantAutoDelete: int64(timeTilDormantAutoDelete),
+		})
+		require.NoError(t, err)
+
+		// Given: A workspace that is marked as dormant
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        user.ID,
+			TemplateID:     template.ID,
+			OrganizationID: templateJob.OrganizationID,
+			LastUsedAt:     time.Now().Add(-time.Hour),
+		})
+		dormantAt := workspace.LastUsedAt.Add(timeTilDormant)
+		workspace, err = db.UpdateWorkspaceDormantDeletingAt(ctx, database.UpdateWorkspaceDormantDeletingAtParams{
+			ID: workspace.ID,
+			DormantAt: sql.NullTime{
+				Time:  dormantAt,
+				Valid: true,
+			},
+		})
+		require.NoError(t, err)
+		require.True(t, workspace.DeletingAt.Valid, "deleting_at should be set when marking workspace dormant")
+
+		// Setup dependencies
+		notifyEnq := notificationstest.NewFakeEnqueuer()
+		logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).Leveled(slog.LevelDebug)
+		const userQuietHoursSchedule = "CRON_TZ=UTC 0 0 * * *" // midnight UTC
+		userQuietHoursStore, err := schedule.NewEnterpriseUserQuietHoursScheduleStore(userQuietHoursSchedule, true)
+		require.NoError(t, err)
+		userQuietHoursStorePtr := &atomic.Pointer[agplschedule.UserQuietHoursScheduleStore]{}
+		userQuietHoursStorePtr.Store(&userQuietHoursStore)
+		templateScheduleStore := schedule.NewEnterpriseTemplateScheduleStore(userQuietHoursStorePtr, notifyEnq, logger, nil)
+
+		// When: We disable dormancy auto-delete
+		_, err = templateScheduleStore.Set(dbauthz.AsNotifier(ctx), db, template, agplschedule.TemplateScheduleOptions{
+			TimeTilDormant:           timeTilDormant,
+			TimeTilDormantAutoDelete: 0,
+		})
+		require.NoError(t, err)
+
+		// Then: We expect deleting_at to be removed
+		updated, err := db.GetWorkspaceByID(ctx, workspace.ID)
+		require.NoError(t, err)
+		require.False(t, updated.DeletingAt.Valid, "deleting_at should be cleared when auto-deletion is disabled")
+
+		// Then: We expect no notifications to have been sent
+		sent := notifyEnq.Sent()
+		require.Len(t, sent, 0, "no notifications should be sent when disabling dormancy auto-deletion")
 	})
 }
 
@@ -1125,7 +1283,6 @@ func TestTemplateUpdatePrebuilds(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -1177,9 +1334,8 @@ func TestTemplateUpdatePrebuilds(t *testing.T) {
 			}).Do()
 
 			// Mark the prebuilt workspace's agent as ready so the prebuild can be claimed
-			// nolint:gocritic
-			agentCtx := dbauthz.AsSystemRestricted(testutil.Context(t, testutil.WaitLong))
-			agent, err := db.GetWorkspaceAgentAndLatestBuildByAuthToken(agentCtx, uuid.MustParse(workspaceBuild.AgentToken))
+			agentCtx := testutil.Context(t, testutil.WaitLong)
+			agent, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(agentCtx, uuid.MustParse(workspaceBuild.AgentToken))
 			require.NoError(t, err)
 			err = db.UpdateWorkspaceAgentLifecycleStateByID(agentCtx, database.UpdateWorkspaceAgentLifecycleStateByIDParams{
 				ID:             agent.WorkspaceAgent.ID,

@@ -1,23 +1,26 @@
 import type { Interpolation, Theme } from "@emotion/react";
-import IconButton from "@mui/material/IconButton";
 import Link, { type LinkProps } from "@mui/material/Link";
-import Tooltip from "@mui/material/Tooltip";
-import { visuallyHidden } from "@mui/utils";
-import { getErrorMessage } from "api/errors";
+import dayjs, { type Dayjs } from "dayjs";
+import { ClockIcon, MinusIcon, PlusIcon } from "lucide-react";
+import { type FC, type ReactNode, useRef, useState } from "react";
+import { useMutation, useQueryClient } from "react-query";
+import { Link as RouterLink } from "react-router";
+import { toast } from "sonner";
+import { getErrorDetail, getErrorMessage } from "#/api/errors";
 import {
 	updateDeadline,
 	workspaceByOwnerAndNameKey,
-} from "api/queries/workspaces";
-import type { Template, Workspace } from "api/typesGenerated";
-import { TopbarData, TopbarIcon } from "components/FullPageLayout/Topbar";
-import { displayError, displaySuccess } from "components/GlobalSnackbar/utils";
-import dayjs, { type Dayjs } from "dayjs";
-import { useTime } from "hooks/useTime";
-import { ClockIcon, MinusIcon, PlusIcon } from "lucide-react";
-import { getWorkspaceActivityStatus } from "modules/workspaces/activity";
-import { type FC, forwardRef, type ReactNode, useRef, useState } from "react";
-import { useMutation, useQueryClient } from "react-query";
-import { Link as RouterLink } from "react-router";
+} from "#/api/queries/workspaces";
+import type { Template, Workspace } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
+import { TopbarData, TopbarIcon } from "#/components/FullPageLayout/Topbar";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
+import { useTime } from "#/hooks/useTime";
+import { getWorkspaceActivityStatus } from "#/modules/workspaces/activity";
 import {
 	autostartDisplay,
 	autostopDisplay,
@@ -25,8 +28,8 @@ import {
 	getMaxDeadline,
 	getMaxDeadlineChange,
 	getMinDeadline,
-} from "utils/schedule";
-import { isWorkspaceOn } from "utils/workspace";
+} from "#/utils/schedule";
+import { isWorkspaceOn } from "#/utils/workspace";
 
 interface WorkspaceScheduleContainerProps {
 	children?: ReactNode;
@@ -45,19 +48,22 @@ const WorkspaceScheduleContainer: FC<WorkspaceScheduleContainerProps> = ({
 
 	return (
 		<TopbarData>
-			<Tooltip title="Schedule">
-				{onClickIcon ? (
-					<button
-						type="button"
-						data-testid="schedule-icon-button"
-						onClick={onClickIcon}
-						css={styles.scheduleIconButton}
-					>
-						{icon}
-					</button>
-				) : (
-					icon
-				)}
+			<Tooltip>
+				<TooltipTrigger asChild>
+					{onClickIcon ? (
+						<button
+							type="button"
+							data-testid="schedule-icon-button"
+							onClick={onClickIcon}
+							css={styles.scheduleIconButton}
+						>
+							{icon}
+						</button>
+					) : (
+						icon
+					)}
+				</TooltipTrigger>
+				<TooltipContent side="bottom">Schedule</TooltipContent>
 			</Tooltip>
 			{children}
 		</TopbarData>
@@ -137,15 +143,20 @@ const AutostopDisplay: FC<AutostopDisplayProps> = ({
 	const updateDeadlineMutation = useMutation({
 		...updateDeadline(workspace),
 		onSuccess: (_, updatedDeadline) => {
-			displaySuccess("Workspace shutdown time has been successfully updated.");
+			toast.success(
+				`Shutdown time for "${workspace.name}" updated successfully.`,
+			);
 			lastStableDeadline.current = updatedDeadline;
 		},
 		onError: (error) => {
-			displayError(
+			toast.error(
 				getErrorMessage(
 					error,
-					"We couldn't update your workspace shutdown time. Please try again.",
+					`Failed to update shutdown time for "${workspace.name}". Please try again.`,
 				),
+				{
+					description: getErrorDetail(error),
+				},
 			);
 			updateWorkspaceDeadlineQueryData(lastStableDeadline.current);
 		},
@@ -200,31 +211,39 @@ const AutostopDisplay: FC<AutostopDisplayProps> = ({
 
 	const controls = canUpdateSchedule && canEditDeadline(workspace) && (
 		<div css={styles.scheduleControls}>
-			<Tooltip title="Subtract 1 hour from deadline">
-				<IconButton
-					disabled={!deadlineMinusEnabled}
-					size="small"
-					css={styles.scheduleButton}
-					onClick={() => {
-						handleDeadlineChange(deadline.subtract(1, "h"));
-					}}
-				>
-					<MinusIcon className="size-icon-xs" />
-					<span style={visuallyHidden}>Subtract 1 hour</span>
-				</IconButton>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<Button
+						disabled={!deadlineMinusEnabled}
+						variant="outline"
+						size="icon"
+						onClick={() => {
+							handleDeadlineChange(deadline.subtract(1, "h"));
+						}}
+					>
+						<MinusIcon />
+						<span className="sr-only">Subtract 1 hour from deadline</span>
+					</Button>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">
+					Subtract 1 hour from deadline
+				</TooltipContent>
 			</Tooltip>
-			<Tooltip title="Add 1 hour to deadline">
-				<IconButton
-					disabled={!deadlinePlusEnabled}
-					size="small"
-					css={styles.scheduleButton}
-					onClick={() => {
-						handleDeadlineChange(deadline.add(1, "h"));
-					}}
-				>
-					<PlusIcon className="size-icon-xs" />
-					<span style={visuallyHidden}>Add 1 hour</span>
-				</IconButton>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<Button
+						disabled={!deadlinePlusEnabled}
+						variant="outline"
+						size="icon"
+						onClick={() => {
+							handleDeadlineChange(deadline.add(1, "h"));
+						}}
+					>
+						<PlusIcon />
+						<span className="sr-only">Add 1 hour to deadline</span>
+					</Button>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">Add 1 hour to deadline</TooltipContent>
 			</Tooltip>
 		</div>
 	);
@@ -232,7 +251,12 @@ const AutostopDisplay: FC<AutostopDisplayProps> = ({
 	if (tooltip) {
 		return (
 			<WorkspaceScheduleContainer onClickIcon={onClickScheduleIcon}>
-				<Tooltip title={tooltip}>{display}</Tooltip>
+				<Tooltip>
+					<TooltipTrigger asChild>{display}</TooltipTrigger>
+					<TooltipContent side="bottom" className="max-w-xs">
+						{tooltip}
+					</TooltipContent>
+				</Tooltip>
 				{controls}
 			</WorkspaceScheduleContainer>
 		);
@@ -246,24 +270,16 @@ const AutostopDisplay: FC<AutostopDisplayProps> = ({
 	);
 };
 
-const ScheduleSettingsLink = forwardRef<HTMLAnchorElement, LinkProps>(
-	(props, ref) => {
-		return (
-			<Link
-				ref={ref}
-				component={RouterLink}
-				to="settings/schedule"
-				css={{
-					color: "inherit",
-					"&:first-letter": {
-						textTransform: "uppercase",
-					},
-				}}
-				{...props}
-			/>
-		);
-	},
-);
+const ScheduleSettingsLink: React.FC<LinkProps> = ({ ...props }) => {
+	return (
+		<Link
+			component={RouterLink}
+			to="settings/schedule"
+			className="text-inherit [&::first-letter]:uppercase"
+			{...props}
+		/>
+	);
+};
 
 const hasDeadline = (workspace: Workspace): boolean => {
 	return Boolean(workspace.latest_build.deadline);
@@ -307,16 +323,4 @@ const styles = {
 		alignItems: "center",
 		gap: 4,
 	},
-
-	scheduleButton: (theme) => ({
-		border: `1px solid ${theme.palette.divider}`,
-		borderRadius: 4,
-		width: 20,
-		height: 20,
-
-		"& svg.MuiSvgIcon-root": {
-			width: 12,
-			height: 12,
-		},
-	}),
 } satisfies Record<string, Interpolation<Theme>>;

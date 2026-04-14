@@ -12,8 +12,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/codersdk/toolsdk"
@@ -136,6 +135,12 @@ func mcpFromSDK(sdkTool toolsdk.GenericTool, tb toolsdk.Deps) server.ServerTool 
 				Type:       "object",
 				Properties: sdkTool.Schema.Properties,
 				Required:   sdkTool.Schema.Required,
+			},
+			Annotations: mcp.ToolAnnotation{
+				ReadOnlyHint:    mcp.ToBoolPtr(sdkTool.MCPAnnotations.ReadOnlyHint),
+				DestructiveHint: mcp.ToBoolPtr(sdkTool.MCPAnnotations.DestructiveHint),
+				IdempotentHint:  mcp.ToBoolPtr(sdkTool.MCPAnnotations.IdempotentHint),
+				OpenWorldHint:   mcp.ToBoolPtr(sdkTool.MCPAnnotations.OpenWorldHint),
 			},
 		},
 		Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {

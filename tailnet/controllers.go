@@ -7,6 +7,7 @@ import (
 	"io"
 	"maps"
 	"math"
+	"net"
 	"net/netip"
 	"slices"
 	"strings"
@@ -21,13 +22,12 @@ import (
 	"tailscale.com/tailcfg"
 	"tailscale.com/util/dnsname"
 
-	"cdr.dev/slog"
-	"github.com/coder/quartz"
-	"github.com/coder/retry"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/tailnet/proto"
+	"github.com/coder/quartz"
+	"github.com/coder/retry"
 )
 
 // A Controller connects to the tailnet control plane, and then uses the control protocols to
@@ -1430,8 +1430,13 @@ func (c *Controller) Run(ctx context.Context) {
 
 			tailnetClients, err := c.Dialer.Dial(c.ctx, c.ResumeTokenCtrl)
 			if err != nil {
-				if xerrors.Is(err, context.Canceled) || xerrors.Is(err, context.DeadlineExceeded) {
+				if c.ctx.Err() != nil {
 					return
+				}
+
+				if errors.Is(err, net.ErrClosed) {
+					c.logger.Warn(c.ctx, "control plane connection closed, retrying", slog.Error(err))
+					continue
 				}
 
 				// If the database is unreachable by the control plane, there's not much we can do, so we'll just retry later.

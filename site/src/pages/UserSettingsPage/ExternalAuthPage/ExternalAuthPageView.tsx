@@ -1,23 +1,25 @@
 import { useTheme } from "@emotion/react";
-import Tooltip from "@mui/material/Tooltip";
-import { externalAuthProvider } from "api/queries/externalAuth";
+import { EllipsisVertical, RefreshCcwIcon } from "lucide-react";
+import { type FC, useCallback, useEffect, useState } from "react";
+import { useQuery } from "react-query";
+import { externalAuthProvider } from "#/api/queries/externalAuth";
 import type {
 	ExternalAuthLink,
 	ExternalAuthLinkProvider,
 	ListUserExternalAuthResponse,
-} from "api/typesGenerated";
-import { ErrorAlert } from "components/Alert/ErrorAlert";
-import { Avatar } from "components/Avatar/Avatar";
-import { Button } from "components/Button/Button";
+} from "#/api/typesGenerated";
+import { ErrorAlert } from "#/components/Alert/ErrorAlert";
+import { Avatar } from "#/components/Avatar/Avatar";
+import { Button } from "#/components/Button/Button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
-} from "components/DropdownMenu/DropdownMenu";
-import { Loader } from "components/Loader/Loader";
-import { Spinner } from "components/Spinner/Spinner";
-import { Stack } from "components/Stack/Stack";
+} from "#/components/DropdownMenu/DropdownMenu";
+import { Loader } from "#/components/Loader/Loader";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { Stack } from "#/components/Stack/Stack";
 import {
 	Table,
 	TableBody,
@@ -25,12 +27,14 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
-} from "components/Table/Table";
-import { TableEmpty } from "components/TableEmpty/TableEmpty";
-import type { ExternalAuthPollingState } from "hooks/useExternalAuth";
-import { EllipsisVertical, RefreshCcwIcon } from "lucide-react";
-import { type FC, useCallback, useEffect, useState } from "react";
-import { useQuery } from "react-query";
+} from "#/components/Table/Table";
+import { TableEmpty } from "#/components/TableEmpty/TableEmpty";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
+import type { ExternalAuthPollingState } from "#/hooks/useExternalAuth";
 
 type ExternalAuthPageViewProps = {
 	isLoading: boolean;
@@ -55,7 +59,7 @@ export const ExternalAuthPageView: FC<ExternalAuthPageViewProps> = ({
 	}
 
 	if (isLoading || !auths) {
-		return <Loader fullscreen />;
+		return <Loader />;
 	}
 
 	return (
@@ -136,11 +140,13 @@ const ExternalAuthRow: FC<ExternalAuthRowProps> = ({
 					 * attempt to authenticate when the token expires.
 					 */}
 					{link?.has_refresh_token && authenticated && (
-						<Tooltip
-							title="Authentication token will automatically refresh when expired."
-							placement="right"
-						>
-							<RefreshCcwIcon className="size-3" />
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<RefreshCcwIcon className="size-3" />
+							</TooltipTrigger>
+							<TooltipContent side="right" className="max-w-xs">
+								Authentication token will automatically refresh when expired.
+							</TooltipContent>
 						</Tooltip>
 					)}
 
@@ -156,7 +162,7 @@ const ExternalAuthRow: FC<ExternalAuthRowProps> = ({
 					)}
 				</Stack>
 			</TableCell>
-			<TableCell css={{ textAlign: "right" }}>
+			<TableCell className="text-right">
 				<Button
 					disabled={authenticated || externalAuthPollingState === "polling"}
 					onClick={() => {

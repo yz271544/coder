@@ -36,6 +36,7 @@ Coder — A tool for provisioning self-hosted development environments with Terr
 | [<code>publickey</code>](./publickey.md)                     | Output your Coder public key used for Git operations                                                                         |
 | [<code>reset-password</code>](./reset-password.md)           | Directly connect to the database to reset a user's password                                                                  |
 | [<code>state</code>](./state.md)                             | Manually manage Terraform state to fix broken workspaces                                                                     |
+| [<code>task</code>](./task.md)                               | Manage tasks                                                                                                                 |
 | [<code>templates</code>](./templates.md)                     | Manage templates                                                                                                             |
 | [<code>tokens</code>](./tokens.md)                           | Manage personal access tokens                                                                                                |
 | [<code>users</code>](./users.md)                             | Manage users                                                                                                                 |
@@ -46,6 +47,7 @@ Coder — A tool for provisioning self-hosted development environments with Terr
 | [<code>delete</code>](./delete.md)                           | Delete a workspace                                                                                                           |
 | [<code>favorite</code>](./favorite.md)                       | Add a workspace to your favorites                                                                                            |
 | [<code>list</code>](./list.md)                               | List workspaces                                                                                                              |
+| [<code>logs</code>](./logs.md)                               | View logs for a workspace                                                                                                    |
 | [<code>open</code>](./open.md)                               | Open a workspace                                                                                                             |
 | [<code>ping</code>](./ping.md)                               | Ping a workspace                                                                                                             |
 | [<code>rename</code>](./rename.md)                           | Rename a workspace                                                                                                           |
@@ -63,11 +65,13 @@ Coder — A tool for provisioning self-hosted development environments with Terr
 | [<code>support</code>](./support.md)                         | Commands for troubleshooting issues with a Coder deployment.                                                                 |
 | [<code>server</code>](./server.md)                           | Start a Coder server                                                                                                         |
 | [<code>provisioner</code>](./provisioner.md)                 | View and manage provisioner daemons and jobs                                                                                 |
+| [<code>boundary</code>](./boundary.md)                       | Network isolation tool for monitoring and restricting HTTP/HTTPS requests                                                    |
 | [<code>features</code>](./features.md)                       | List Enterprise features                                                                                                     |
 | [<code>licenses</code>](./licenses.md)                       | Add, delete, and list licenses                                                                                               |
 | [<code>groups</code>](./groups.md)                           | Manage groups                                                                                                                |
 | [<code>prebuilds</code>](./prebuilds.md)                     | Manage Coder prebuilds                                                                                                       |
 | [<code>external-workspaces</code>](./external-workspaces.md) | Create or manage external workspaces                                                                                         |
+| [<code>aibridge</code>](./aibridge.md)                       | Manage AI Bridge.                                                                                                            |
 
 ## Options
 
@@ -168,6 +172,16 @@ Disable direct (P2P) connections to workspaces.
 | Environment | <code>$CODER_DISABLE_NETWORK_TELEMETRY</code> |
 
 Disable network telemetry. Network telemetry is collected when connecting to workspaces using the CLI, and is forwarded to the server. If telemetry is also enabled on the server, it may be sent to Coder. Network telemetry is used to measure network quality and detect regressions.
+
+### --use-keyring
+
+|             |                                 |
+|-------------|---------------------------------|
+| Type        | <code>bool</code>               |
+| Environment | <code>$CODER_USE_KEYRING</code> |
+| Default     | <code>true</code>               |
+
+Store and retrieve session tokens using the operating system keyring. This flag is ignored and file-based storage is used when --global-config is set or keyring usage is not supported on the current platform. Set to false to force file-based storage on supported platforms.
 
 ### --global-config
 

@@ -3,39 +3,26 @@ package httpapi
 import (
 	"context"
 	"errors"
+	"net"
 	"time"
 
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
+	"github.com/coder/quartz"
 	"github.com/coder/websocket"
 )
 
 const HeartbeatInterval time.Duration = 15 * time.Second
 
-// Heartbeat loops to ping a WebSocket to keep it alive.
-// Default idle connection timeouts are typically 60 seconds.
-// See: https://docs.aws.amazon.com/elasticloadbalancing/latest/application/application-load-balancers.html#connection-idle-timeout
-func Heartbeat(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(HeartbeatInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		err := conn.Ping(ctx)
-		if err != nil {
-			return
-		}
-	}
+// HeartbeatClose loops to ping a WebSocket to keep it alive.
+// It calls `exit` on ping failure.
+func HeartbeatClose(ctx context.Context, logger slog.Logger, exit func(), conn *websocket.Conn) {
+	heartbeatCloseWith(ctx, logger, exit, conn, quartz.NewReal(), HeartbeatInterval)
 }
 
-// Heartbeat loops to ping a WebSocket to keep it alive. It calls `exit` on ping
-// failure.
-func HeartbeatClose(ctx context.Context, logger slog.Logger, exit func(), conn *websocket.Conn) {
-	ticker := time.NewTicker(HeartbeatInterval)
+func heartbeatCloseWith(ctx context.Context, logger slog.Logger, exit func(), conn *websocket.Conn, clk quartz.Clock, interval time.Duration) {
+	ticker := clk.NewTicker(interval, "HeartbeatClose")
 	defer ticker.Stop()
 
 	for {
@@ -44,10 +31,23 @@ func HeartbeatClose(ctx context.Context, logger slog.Logger, exit func(), conn *
 			return
 		case <-ticker.C:
 		}
-		err := pingWithTimeout(ctx, conn, HeartbeatInterval)
+		err := pingWithTimeout(ctx, conn, interval)
 		if err != nil {
-			// context.DeadlineExceeded is expected when the client disconnects without sending a close frame
-			if !errors.Is(err, context.DeadlineExceeded) {
+			// These errors are all expected during normal connection
+			// teardown and should not be logged at error level:
+			//   - context.DeadlineExceeded: client disconnected
+			//     without sending a close frame.
+			//   - context.Canceled: request context was canceled.
+			//   - net.ErrClosed: connection was already closed by
+			//     another goroutine (e.g. handler returned).
+			//   - websocket.CloseError: a close frame was
+			//     received or sent.
+			if errors.Is(err, context.DeadlineExceeded) ||
+				errors.Is(err, context.Canceled) ||
+				errors.Is(err, net.ErrClosed) ||
+				websocket.CloseStatus(err) != -1 {
+				logger.Debug(ctx, "heartbeat ping stopped", slog.Error(err))
+			} else {
 				logger.Error(ctx, "failed to heartbeat ping", slog.Error(err))
 			}
 			_ = conn.Close(websocket.StatusGoingAway, "Ping failed")

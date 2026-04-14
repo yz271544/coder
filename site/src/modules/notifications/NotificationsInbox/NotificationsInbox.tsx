@@ -1,13 +1,12 @@
-import { watchInboxNotifications } from "api/api";
-import { getErrorDetail, getErrorMessage } from "api/errors";
+import { type FC, useEffect, useEffectEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "react-query";
+import { toast } from "sonner";
+import { watchInboxNotifications } from "#/api/api";
+import { getErrorDetail, getErrorMessage } from "#/api/errors";
 import type {
 	ListInboxNotificationsResponse,
 	UpdateInboxNotificationReadStatusResponse,
-} from "api/typesGenerated";
-import { displayError } from "components/GlobalSnackbar/utils";
-import { useEffectEvent } from "hooks/hookPolyfills";
-import { type FC, useEffect } from "react";
-import { useMutation, useQuery, useQueryClient } from "react-query";
+} from "#/api/typesGenerated";
 import { InboxPopover } from "./InboxPopover";
 
 const NOTIFICATIONS_QUERY_KEY = ["notifications"];
@@ -79,14 +78,14 @@ export const NotificationsInbox: FC<NotificationsInboxProps> = ({
 		});
 
 		socket.addEventListener("error", () => {
-			displayError(
-				"Unable to retrieve latest inbox notifications. Please try refreshing the browser.",
-			);
+			toast.error("Unable to retrieve latest inbox notifications.", {
+				description: "Please try refreshing the browser.",
+			});
 			socket.close();
 		});
 
 		return () => socket.close();
-	}, [updateNotificationsCache]);
+	}, []);
 
 	const {
 		mutate: loadMoreNotifications,
@@ -107,10 +106,9 @@ export const NotificationsInbox: FC<NotificationsInboxProps> = ({
 			});
 		},
 		onError: (error) => {
-			displayError(
-				getErrorMessage(error, "Error loading more notifications"),
-				getErrorDetail(error),
-			);
+			toast.error(getErrorMessage(error, "Error loading more notifications."), {
+				description: getErrorDetail(error),
+			});
 		},
 	});
 
@@ -128,9 +126,9 @@ export const NotificationsInbox: FC<NotificationsInboxProps> = ({
 			});
 		},
 		onError: (error) => {
-			displayError(
-				getErrorMessage(error, "Error on marking all notifications as read"),
-				getErrorDetail(error),
+			toast.error(
+				getErrorMessage(error, "Error on marking all notifications as read."),
+				{ description: getErrorDetail(error) },
 			);
 		},
 	});
@@ -151,9 +149,9 @@ export const NotificationsInbox: FC<NotificationsInboxProps> = ({
 			});
 		},
 		onError: (error) => {
-			displayError(
-				getErrorMessage(error, "Error on marking notification as read"),
-				getErrorDetail(error),
+			toast.error(
+				getErrorMessage(error, "Error on marking notification as read."),
+				{ description: getErrorDetail(error) },
 			);
 		},
 	});

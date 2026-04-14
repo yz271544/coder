@@ -1,26 +1,26 @@
-import { getErrorMessage } from "api/errors";
-import { groupsByOrganization } from "api/queries/groups";
+import { type FC, useEffect, useState } from "react";
+import { useMutation, useQueries, useQuery, useQueryClient } from "react-query";
+import { useParams, useSearchParams } from "react-router";
+import { toast } from "sonner";
+import { getErrorDetail, getErrorMessage } from "#/api/errors";
+import { groupsByOrganization } from "#/api/queries/groups";
 import {
 	groupIdpSyncSettings,
 	organizationIdpSyncClaimFieldValues,
 	patchGroupSyncSettings,
 	patchRoleSyncSettings,
 	roleIdpSyncSettings,
-} from "api/queries/organizations";
-import { organizationRoles } from "api/queries/roles";
-import { ChooseOne, Cond } from "components/Conditionals/ChooseOne";
-import { EmptyState } from "components/EmptyState/EmptyState";
-import { displayError, displaySuccess } from "components/GlobalSnackbar/utils";
-import { Link } from "components/Link/Link";
-import { Paywall } from "components/Paywall/Paywall";
-import { useFeatureVisibility } from "modules/dashboard/useFeatureVisibility";
-import { useOrganizationSettings } from "modules/management/OrganizationSettingsLayout";
-import { RequirePermission } from "modules/permissions/RequirePermission";
-import { type FC, useEffect, useState } from "react";
-import { useMutation, useQueries, useQuery, useQueryClient } from "react-query";
-import { useParams, useSearchParams } from "react-router";
-import { docs } from "utils/docs";
-import { pageTitle } from "utils/page";
+} from "#/api/queries/organizations";
+import { organizationRoles } from "#/api/queries/roles";
+import { ChooseOne, Cond } from "#/components/Conditionals/ChooseOne";
+import { EmptyState } from "#/components/EmptyState/EmptyState";
+import { Link } from "#/components/Link/Link";
+import { PaywallPremium } from "#/components/Paywall/PaywallPremium";
+import { useFeatureVisibility } from "#/modules/dashboard/useFeatureVisibility";
+import { useOrganizationSettings } from "#/modules/management/OrganizationSettingsLayout";
+import { RequirePermission } from "#/modules/permissions/RequirePermission";
+import { docs } from "#/utils/docs";
+import { pageTitle } from "#/utils/page";
 import IdpSyncPageView from "./IdpSyncPageView";
 
 const IdpSyncPage: FC = () => {
@@ -70,7 +70,7 @@ const IdpSyncPage: FC = () => {
 
 	const fieldValuesQuery = useQuery({
 		...organizationIdpSyncClaimFieldValues(organizationName, field),
-		enabled: !!field,
+		enabled: Boolean(field),
 	});
 
 	const patchGroupSyncSettingsMutation = useMutation(
@@ -130,9 +130,9 @@ const IdpSyncPage: FC = () => {
 				</header>
 				<ChooseOne>
 					<Cond condition={!isIdpSyncEnabled}>
-						<Paywall
+						<PaywallPremium
 							message="IdP Sync"
-							description="Configure group and role mappings to manage permissions outside of Coder. You need an Premium license to use this feature."
+							description="Configure group and role mappings to manage permissions outside of Coder. You need a Premium license to use this feature."
 							documentationLink={docs("/admin/users/idp-sync")}
 						/>
 					</Cond>
@@ -150,28 +150,33 @@ const IdpSyncPage: FC = () => {
 							onRoleSyncFieldChange={setRoleField}
 							error={error}
 							onSubmitGroupSyncSettings={async (data) => {
-								try {
-									await patchGroupSyncSettingsMutation.mutateAsync(data);
-									displaySuccess("IdP Group sync settings updated.");
-								} catch (error) {
-									displayError(
-										getErrorMessage(
+								const mutation =
+									patchGroupSyncSettingsMutation.mutateAsync(data);
+								toast.promise(mutation, {
+									loading: "Updating IdP group sync settings...",
+									success: "IdP group sync settings updated.",
+									error: (error) => ({
+										message: getErrorMessage(
 											error,
-											"Failed to update IdP group sync settings",
+											"Failed to update IdP group sync settings.",
 										),
-									);
-								}
+										description: getErrorDetail(error),
+									}),
+								});
 							}}
 							onSubmitRoleSyncSettings={async (data) => {
 								try {
 									await patchRoleSyncSettingsMutation.mutateAsync(data);
-									displaySuccess("IdP Role sync settings updated.");
+									toast.success("IdP Role sync settings updated.");
 								} catch (error) {
-									displayError(
+									toast.error(
 										getErrorMessage(
 											error,
-											"Failed to update IdP role sync settings",
+											"Failed to update IdP role sync settings.",
 										),
+										{
+											description: getErrorDetail(error),
+										},
 									);
 								}
 							}}

@@ -1,14 +1,14 @@
-import { MockTemplate, MockWorkspace } from "testHelpers/entities";
-import { render } from "testHelpers/renderHelpers";
-import { server } from "testHelpers/server";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { API } from "api/api";
-import { workspaceByOwnerAndName } from "api/queries/workspaces";
 import dayjs from "dayjs";
 import { HttpResponse, http } from "msw";
 import type { FC } from "react";
 import { useQuery } from "react-query";
+import { API } from "#/api/api";
+import { workspaceByOwnerAndName } from "#/api/queries/workspaces";
+import { MockTemplate, MockWorkspace } from "#/testHelpers/entities";
+import { render } from "#/testHelpers/renderHelpers";
+import { server } from "#/testHelpers/server";
 import { WorkspaceScheduleControls } from "./WorkspaceScheduleControls";
 
 const Wrapper: FC = () => {
@@ -50,7 +50,7 @@ const renderScheduleControls = async () => {
 
 test("add 3 hours to deadline", async () => {
 	const user = userEvent.setup();
-	const updateDeadlineSpy = jest
+	const updateDeadlineSpy = vi
 		.spyOn(API, "putWorkspaceExtension")
 		.mockResolvedValue();
 
@@ -63,7 +63,7 @@ test("add 3 hours to deadline", async () => {
 	await user.click(addButton);
 	await user.click(addButton);
 	await screen.findByText(
-		"Workspace shutdown time has been successfully updated.",
+		`Shutdown time for "Test-Workspace" updated successfully.`,
 	);
 	expect(await screen.findByText("Stop in 6 hours")).toBeInTheDocument();
 
@@ -79,7 +79,7 @@ test("add 3 hours to deadline", async () => {
 
 test("remove 2 hours to deadline", async () => {
 	const user = userEvent.setup();
-	const updateDeadlineSpy = jest
+	const updateDeadlineSpy = vi
 		.spyOn(API, "putWorkspaceExtension")
 		.mockResolvedValue();
 
@@ -91,7 +91,7 @@ test("remove 2 hours to deadline", async () => {
 	await user.click(subButton);
 	await user.click(subButton);
 	await screen.findByText(
-		"Workspace shutdown time has been successfully updated.",
+		`Shutdown time for "Test-Workspace" updated successfully.`,
 	);
 	expect(await screen.findByText("Stop in an hour")).toBeInTheDocument();
 
@@ -108,7 +108,7 @@ test("remove 2 hours to deadline", async () => {
 test("rollback to previous deadline on error", async () => {
 	const user = userEvent.setup();
 	const initialScheduleMessage = "Stop in 3 hours";
-	jest.spyOn(API, "putWorkspaceExtension").mockRejectedValue({});
+	vi.spyOn(API, "putWorkspaceExtension").mockRejectedValue({});
 
 	await renderScheduleControls();
 
@@ -119,7 +119,7 @@ test("rollback to previous deadline on error", async () => {
 	await user.click(addButton);
 	await user.click(addButton);
 	await screen.findByText(
-		"We couldn't update your workspace shutdown time. Please try again.",
+		`Failed to update shutdown time for "Test-Workspace". Please try again.`,
 	);
 	// In case of an error, the schedule message should remain unchanged
 	expect(screen.getByText(initialScheduleMessage)).toBeInTheDocument();
@@ -127,7 +127,7 @@ test("rollback to previous deadline on error", async () => {
 
 test("request is only sent once when clicking multiple times", async () => {
 	const user = userEvent.setup();
-	const updateDeadlineSpy = jest
+	const updateDeadlineSpy = vi
 		.spyOn(API, "putWorkspaceExtension")
 		.mockResolvedValue();
 
@@ -140,7 +140,7 @@ test("request is only sent once when clicking multiple times", async () => {
 	await user.click(addButton);
 	await user.click(addButton);
 	await screen.findByText(
-		"Workspace shutdown time has been successfully updated.",
+		`Shutdown time for "Test-Workspace" updated successfully.`,
 	);
 	expect(updateDeadlineSpy).toHaveBeenCalledTimes(1);
 });

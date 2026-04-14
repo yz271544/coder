@@ -12,7 +12,7 @@ import (
 	"golang.org/x/xerrors"
 	"tailscale.com/tailcfg"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/httpmw"
 	"github.com/coder/coder/v2/coderd/workspaceapps"
 	"github.com/coder/coder/v2/codersdk"
@@ -404,15 +404,19 @@ func (l *RegisterWorkspaceProxyLoop) Start(ctx context.Context) (RegisterWorkspa
 
 // RegisterNow asks the registration loop to register immediately. A timeout of
 // 2x the attempt timeout is used to wait for the response.
-func (l *RegisterWorkspaceProxyLoop) RegisterNow() (RegisterWorkspaceProxyResponse, error) {
+func (l *RegisterWorkspaceProxyLoop) RegisterNow(ctx context.Context) (RegisterWorkspaceProxyResponse, error) {
 	// The channel is closed by the loop after sending the response.
 	respCh := make(chan RegisterWorkspaceProxyResponse, 1)
 	select {
+	case <-ctx.Done():
+		return RegisterWorkspaceProxyResponse{}, ctx.Err()
 	case <-l.done:
 		return RegisterWorkspaceProxyResponse{}, xerrors.New("proxy registration loop closed")
 	case l.runLoopNow <- respCh:
 	}
 	select {
+	case <-ctx.Done():
+		return RegisterWorkspaceProxyResponse{}, ctx.Err()
 	case <-l.done:
 		return RegisterWorkspaceProxyResponse{}, xerrors.New("proxy registration loop closed")
 	case resp := <-respCh:
@@ -449,6 +453,7 @@ func (l *RegisterWorkspaceProxyLoop) failureFn(err error) {
 	if deregisterErr != nil {
 		l.opts.Logger.Error(context.Background(),
 			"failed to deregister workspace proxy with Coder primary (it will be automatically deregistered shortly)",
+			slog.F("root_error", err.Error()),
 			slog.Error(deregisterErr),
 		)
 	}

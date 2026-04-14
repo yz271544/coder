@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -20,7 +21,6 @@ import (
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
-	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/codersdk"
 )
@@ -35,7 +35,10 @@ func TestProvisioners_Golden(t *testing.T) {
 		provisioners, err := coderdAPI.Database.GetProvisionerDaemons(systemCtx)
 		require.NoError(t, err)
 		slices.SortFunc(provisioners, func(a, b database.ProvisionerDaemon) int {
-			return a.CreatedAt.Compare(b.CreatedAt)
+			return cmp.Or(
+				a.CreatedAt.Compare(b.CreatedAt),
+				bytes.Compare(a.ID[:], b.ID[:]),
+			)
 		})
 		pIdx := 0
 		for _, p := range provisioners {
@@ -47,7 +50,10 @@ func TestProvisioners_Golden(t *testing.T) {
 		jobs, err := coderdAPI.Database.GetProvisionerJobsCreatedAfter(systemCtx, time.Time{})
 		require.NoError(t, err)
 		slices.SortFunc(jobs, func(a, b database.ProvisionerJob) int {
-			return a.CreatedAt.Compare(b.CreatedAt)
+			return cmp.Or(
+				a.CreatedAt.Compare(b.CreatedAt),
+				bytes.Compare(a.ID[:], b.ID[:]),
+			)
 		})
 		jIdx := 0
 		for _, j := range jobs {
@@ -76,11 +82,15 @@ func TestProvisioners_Golden(t *testing.T) {
 	firstProvisioner := coderdtest.NewTaggedProvisionerDaemon(t, coderdAPI, "default-provisioner", map[string]string{"owner": "", "scope": "organization"})
 	t.Cleanup(func() { _ = firstProvisioner.Close() })
 	version := coderdtest.CreateTemplateVersion(t, client, owner.OrganizationID, completeWithAgent())
-	coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+	version = coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+	require.Equal(t, codersdk.ProvisionerJobSucceeded, version.Job.Status,
+		"template version import should succeed, got error: %s", version.Job.Error)
 	template := coderdtest.CreateTemplate(t, client, owner.OrganizationID, version.ID)
 
 	workspace := coderdtest.CreateWorkspace(t, client, template.ID)
-	coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
+	wb := coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
+	require.Equal(t, codersdk.ProvisionerJobSucceeded, wb.Job.Status,
+		"workspace build job should succeed, got error: %s", wb.Job.Error)
 
 	// Stop the provisioner so it doesn't grab any more jobs.
 	firstProvisioner.Close()
@@ -89,10 +99,22 @@ func TestProvisioners_Golden(t *testing.T) {
 	replace[version.ID.String()] = "00000000-0000-0000-cccc-000000000000"
 	replace[workspace.LatestBuild.ID.String()] = "00000000-0000-0000-dddd-000000000000"
 
+	// Base synthetic times off the latest real job's CreatedAt, not the
+	// wall clock. Using dbtime.Now() here is racy because NTP clock
+	// steps can make it return a time before the real jobs' CreatedAt.
+	systemCtx := dbauthz.AsSystemRestricted(context.Background())
+	existingJobs, err := coderdAPI.Database.GetProvisionerJobsCreatedAfter(systemCtx, time.Time{})
+	require.NoError(t, err)
+	require.NotEmpty(t, existingJobs, "expected at least one provisioner job")
+	latestJob := slices.MaxFunc(existingJobs, func(a, b database.ProvisionerJob) int {
+		return a.CreatedAt.Compare(b.CreatedAt)
+	})
+	now := latestJob.CreatedAt.Add(time.Second)
+
 	// Create a provisioner that's working on a job.
 	pd1 := dbgen.ProvisionerDaemon(t, coderdAPI.Database, database.ProvisionerDaemon{
 		Name:       "provisioner-1",
-		CreatedAt:  dbtime.Now().Add(1 * time.Second),
+		CreatedAt:  now.Add(time.Second),
 		LastSeenAt: sql.NullTime{Time: coderdAPI.Clock.Now().Add(time.Hour), Valid: true}, // Stale interval can't be adjusted, keep online.
 		KeyID:      codersdk.ProvisionerKeyUUIDBuiltIn,
 		Tags:       database.StringMap{"owner": "", "scope": "organization", "foo": "bar"},
@@ -100,12 +122,13 @@ func TestProvisioners_Golden(t *testing.T) {
 	w1 := dbgen.Workspace(t, coderdAPI.Database, database.WorkspaceTable{
 		OwnerID:    member.ID,
 		TemplateID: template.ID,
+		CreatedAt:  now.Add(time.Second),
 	})
 	wb1ID := uuid.MustParse("00000000-0000-0000-dddd-000000000001")
 	job1 := dbgen.ProvisionerJob(t, db, coderdAPI.Pubsub, database.ProvisionerJob{
 		WorkerID:  uuid.NullUUID{UUID: pd1.ID, Valid: true},
 		Input:     json.RawMessage(`{"workspace_build_id":"` + wb1ID.String() + `"}`),
-		CreatedAt: dbtime.Now().Add(2 * time.Second),
+		CreatedAt: now.Add(time.Second),
 		StartedAt: sql.NullTime{Time: coderdAPI.Clock.Now(), Valid: true},
 		Tags:      database.StringMap{"owner": "", "scope": "organization", "foo": "bar"},
 	})
@@ -114,12 +137,13 @@ func TestProvisioners_Golden(t *testing.T) {
 		JobID:             job1.ID,
 		WorkspaceID:       w1.ID,
 		TemplateVersionID: version.ID,
+		CreatedAt:         now.Add(time.Second),
 	})
 
 	// Create a provisioner that completed a job previously and is offline.
 	pd2 := dbgen.ProvisionerDaemon(t, coderdAPI.Database, database.ProvisionerDaemon{
 		Name:       "provisioner-2",
-		CreatedAt:  dbtime.Now().Add(2 * time.Second),
+		CreatedAt:  now.Add(2 * time.Second),
 		LastSeenAt: sql.NullTime{Time: coderdAPI.Clock.Now().Add(-time.Hour), Valid: true},
 		KeyID:      codersdk.ProvisionerKeyUUIDBuiltIn,
 		Tags:       database.StringMap{"owner": "", "scope": "organization"},
@@ -127,12 +151,13 @@ func TestProvisioners_Golden(t *testing.T) {
 	w2 := dbgen.Workspace(t, coderdAPI.Database, database.WorkspaceTable{
 		OwnerID:    member.ID,
 		TemplateID: template.ID,
+		CreatedAt:  now.Add(2 * time.Second),
 	})
 	wb2ID := uuid.MustParse("00000000-0000-0000-dddd-000000000002")
 	job2 := dbgen.ProvisionerJob(t, db, coderdAPI.Pubsub, database.ProvisionerJob{
 		WorkerID:    uuid.NullUUID{UUID: pd2.ID, Valid: true},
 		Input:       json.RawMessage(`{"workspace_build_id":"` + wb2ID.String() + `"}`),
-		CreatedAt:   dbtime.Now().Add(3 * time.Second),
+		CreatedAt:   now.Add(2 * time.Second),
 		StartedAt:   sql.NullTime{Time: coderdAPI.Clock.Now().Add(-2 * time.Hour), Valid: true},
 		CompletedAt: sql.NullTime{Time: coderdAPI.Clock.Now().Add(-time.Hour), Valid: true},
 		Tags:        database.StringMap{"owner": "", "scope": "organization"},
@@ -142,17 +167,19 @@ func TestProvisioners_Golden(t *testing.T) {
 		JobID:             job2.ID,
 		WorkspaceID:       w2.ID,
 		TemplateVersionID: version.ID,
+		CreatedAt:         now.Add(2 * time.Second),
 	})
 
 	// Create a pending job.
 	w3 := dbgen.Workspace(t, coderdAPI.Database, database.WorkspaceTable{
 		OwnerID:    member.ID,
 		TemplateID: template.ID,
+		CreatedAt:  now.Add(3 * time.Second),
 	})
 	wb3ID := uuid.MustParse("00000000-0000-0000-dddd-000000000003")
 	job3 := dbgen.ProvisionerJob(t, db, coderdAPI.Pubsub, database.ProvisionerJob{
 		Input:     json.RawMessage(`{"workspace_build_id":"` + wb3ID.String() + `"}`),
-		CreatedAt: dbtime.Now().Add(4 * time.Second),
+		CreatedAt: now.Add(3 * time.Second),
 		Tags:      database.StringMap{"owner": "", "scope": "organization"},
 	})
 	dbgen.WorkspaceBuild(t, coderdAPI.Database, database.WorkspaceBuild{
@@ -160,12 +187,13 @@ func TestProvisioners_Golden(t *testing.T) {
 		JobID:             job3.ID,
 		WorkspaceID:       w3.ID,
 		TemplateVersionID: version.ID,
+		CreatedAt:         now.Add(3 * time.Second),
 	})
 
 	// Create a provisioner that is idle.
 	_ = dbgen.ProvisionerDaemon(t, coderdAPI.Database, database.ProvisionerDaemon{
 		Name:       "provisioner-3",
-		CreatedAt:  dbtime.Now().Add(3 * time.Second),
+		CreatedAt:  now.Add(4 * time.Second),
 		LastSeenAt: sql.NullTime{Time: coderdAPI.Clock.Now().Add(time.Hour), Valid: true}, // Stale interval can't be adjusted, keep online.
 		KeyID:      codersdk.ProvisionerKeyUUIDBuiltIn,
 		Tags:       database.StringMap{"owner": "", "scope": "organization"},

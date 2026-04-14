@@ -1,6 +1,7 @@
 package rbac
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/google/uuid"
@@ -33,10 +34,11 @@ func BenchmarkRBACValueAllocation(b *testing.B) {
 			uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
 			uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
 			uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
-		}).WithACLUserList(map[string][]policy.Action{
-		uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
-		uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
-	})
+		}).
+		WithACLUserList(map[string][]policy.Action{
+			uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
+			uuid.NewString(): {policy.ActionRead, policy.ActionCreate},
+		})
 
 	jsonSubject := authSubject{
 		ID:     actor.ID,
@@ -73,7 +75,7 @@ func TestRegoInputValue(t *testing.T) {
 	// Expand all roles and make sure we have a good copy.
 	// This is because these tests modify the roles, and we don't want to
 	// modify the original roles.
-	roles, err := RoleIdentifiers{ScopedRoleOrgMember(uuid.New()), ScopedRoleOrgAdmin(uuid.New()), RoleMember()}.Expand()
+	roles, err := RoleIdentifiers{ScopedRoleOrgAuditor(uuid.New()), ScopedRoleOrgAdmin(uuid.New()), RoleMember()}.Expand()
 	require.NoError(t, err, "failed to expand roles")
 	for i := range roles {
 		// If all cached values are nil, then the role will not use
@@ -107,7 +109,7 @@ func TestRegoInputValue(t *testing.T) {
 		t.Parallel()
 
 		// This is the input that would be passed to the rego policy.
-		jsonInput := map[string]interface{}{
+		jsonInput := map[string]any{
 			"subject": authSubject{
 				ID:     actor.ID,
 				Roles:  must(actor.Roles.Expand()),
@@ -138,7 +140,7 @@ func TestRegoInputValue(t *testing.T) {
 		t.Parallel()
 
 		// This is the input that would be passed to the rego policy.
-		jsonInput := map[string]interface{}{
+		jsonInput := map[string]any{
 			"subject": authSubject{
 				ID:     actor.ID,
 				Roles:  must(actor.Roles.Expand()),
@@ -146,7 +148,7 @@ func TestRegoInputValue(t *testing.T) {
 				Scope:  must(actor.Scope.Expand()),
 			},
 			"action": action,
-			"object": map[string]interface{}{
+			"object": map[string]any{
 				"type": obj.Type,
 			},
 		}
@@ -223,9 +225,9 @@ func TestRoleByName(t *testing.T) {
 			{Role: builtInRoles[orgAdmin](uuid.New())},
 			{Role: builtInRoles[orgAdmin](uuid.New())},
 
-			{Role: builtInRoles[orgMember](uuid.New())},
-			{Role: builtInRoles[orgMember](uuid.New())},
-			{Role: builtInRoles[orgMember](uuid.New())},
+			{Role: builtInRoles[orgAuditor](uuid.New())},
+			{Role: builtInRoles[orgAuditor](uuid.New())},
+			{Role: builtInRoles[orgAuditor](uuid.New())},
 		}
 
 		for _, c := range testCases {
@@ -270,17 +272,74 @@ func TestDeduplicatePermissions(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
-// SameAs compares 2 roles for equality.
+func TestPermissionsEqual(t *testing.T) {
+	t.Parallel()
+
+	a := []Permission{
+		{ResourceType: ResourceWorkspace.Type, Action: policy.ActionRead},
+		{ResourceType: ResourceTemplate.Type, Action: policy.ActionUpdate},
+		{ResourceType: ResourceWorkspace.Type, Action: policy.ActionShare, Negate: true},
+	}
+
+	t.Run("Order", func(t *testing.T) {
+		t.Parallel()
+
+		b := []Permission{
+			a[2],
+			a[0],
+			a[1],
+		}
+		require.True(t, PermissionsEqual(a, b))
+	})
+
+	t.Run("SubsetAndSuperset", func(t *testing.T) {
+		t.Parallel()
+
+		require.False(t, PermissionsEqual(a, a[:2]))
+
+		b := append(slices.Clone(a), Permission{ResourceType: ResourceWorkspace.Type, Action: policy.ActionUpdate})
+		require.False(t, PermissionsEqual(a, b))
+	})
+
+	t.Run("Negate", func(t *testing.T) {
+		t.Parallel()
+
+		b := slices.Clone(a)
+		b[0] = Permission{
+			ResourceType: ResourceWorkspace.Type, Action: policy.ActionRead, Negate: true,
+		}
+		require.False(t, PermissionsEqual(a, b))
+	})
+
+	t.Run("Duplicates", func(t *testing.T) {
+		t.Parallel()
+
+		b := append(slices.Clone(a), a[0])
+		require.True(t, PermissionsEqual(a, b), "equal sets with duplicates should compare equal even without pre-deduplication")
+	})
+
+	t.Run("NilEmpty", func(t *testing.T) {
+		t.Parallel()
+
+		var nilSlice []Permission
+		emptySlice := []Permission{}
+		require.True(t, PermissionsEqual(nilSlice, emptySlice))
+		require.True(t, PermissionsEqual(emptySlice, nilSlice))
+	})
+}
+
+// equalRoles compares 2 roles for equality.
 func equalRoles(t *testing.T, a, b Role) {
 	require.Equal(t, a.Identifier, b.Identifier, "role names")
 	require.Equal(t, a.DisplayName, b.DisplayName, "role display names")
 	require.ElementsMatch(t, a.Site, b.Site, "site permissions")
 	require.ElementsMatch(t, a.User, b.User, "user permissions")
-	require.Equal(t, len(a.Org), len(b.Org), "same number of org roles")
+	require.Equal(t, len(a.ByOrgID), len(b.ByOrgID), "same number of org roles")
 
-	for ak, av := range a.Org {
-		bv, ok := b.Org[ak]
+	for ak, av := range a.ByOrgID {
+		bv, ok := b.ByOrgID[ak]
 		require.True(t, ok, "org permissions missing: %s", ak)
-		require.ElementsMatchf(t, av, bv, "org %s permissions", ak)
+		require.ElementsMatchf(t, av.Org, bv.Org, "org %s permissions", ak)
+		require.ElementsMatchf(t, av.Member, bv.Member, "member %s permissions", ak)
 	}
 }

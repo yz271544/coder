@@ -1,15 +1,12 @@
 package dynamicparameters
 
 import (
-	"archive/tar"
 	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
-	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -17,9 +14,10 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/cryptorand"
+	"github.com/coder/coder/v2/scaletest/loadtestutil"
 	"github.com/coder/quartz"
 )
 
@@ -89,48 +87,6 @@ func GetModuleFiles() map[string][]byte {
 	}
 }
 
-func createTarFromFiles(files map[string][]byte) ([]byte, error) {
-	buf := new(bytes.Buffer)
-	writer := tar.NewWriter(buf)
-	dirs := []string{}
-	for name, content := range files {
-		// We need to add directories before any files that use them. But, we only need to do this
-		// once.
-		dir := filepath.Dir(name)
-		if dir != "." && !slices.Contains(dirs, dir) {
-			dirs = append(dirs, dir)
-			err := writer.WriteHeader(&tar.Header{
-				Name:     dir,
-				Mode:     0o755,
-				Typeflag: tar.TypeDir,
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-
-		err := writer.WriteHeader(&tar.Header{
-			Name: name,
-			Size: int64(len(content)),
-			Mode: 0o644,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		_, err = writer.Write(content)
-		if err != nil {
-			return nil, err
-		}
-	}
-	// `writer.Close()` function flushes the writer buffer, and adds extra padding to create a legal tarball.
-	err := writer.Close()
-	if err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
 func TemplateTarData() ([]byte, error) {
 	mainTF, err := TemplateContent()
 	if err != nil {
@@ -144,7 +100,7 @@ func TemplateTarData() ([]byte, error) {
 	for k, v := range moduleFiles {
 		files[k] = v
 	}
-	tarData, err := createTarFromFiles(files)
+	tarData, err := loadtestutil.CreateTarFromFiles(files)
 	if err != nil {
 		return nil, xerrors.Errorf("failed to create tarball: %w", err)
 	}
@@ -168,12 +124,13 @@ type SDKForDynamicParametersSetup interface {
 // partitioner is an internal struct to hold context and arguments for partition setup
 // and to provide methods for all sub-steps.
 type partitioner struct {
-	ctx          context.Context
-	client       SDKForDynamicParametersSetup
-	orgID        uuid.UUID
-	templateName string
-	numEvals     int64
-	logger       slog.Logger
+	ctx             context.Context
+	client          SDKForDynamicParametersSetup
+	orgID           uuid.UUID
+	templateName    string
+	provisionerTags map[string]string
+	numEvals        int64
+	logger          slog.Logger
 
 	// for testing
 	clock quartz.Clock
@@ -181,17 +138,19 @@ type partitioner struct {
 
 func SetupPartitions(
 	ctx context.Context, client SDKForDynamicParametersSetup,
-	orgID uuid.UUID, templateName string, numEvals int64,
+	orgID uuid.UUID, templateName string, provisionerTags map[string]string,
+	numEvals int64,
 	logger slog.Logger,
 ) ([]Partition, error) {
 	p := &partitioner{
-		ctx:          ctx,
-		client:       client,
-		orgID:        orgID,
-		templateName: templateName,
-		numEvals:     numEvals,
-		logger:       logger,
-		clock:        quartz.NewReal(),
+		ctx:             ctx,
+		client:          client,
+		orgID:           orgID,
+		templateName:    templateName,
+		provisionerTags: provisionerTags,
+		numEvals:        numEvals,
+		logger:          logger,
+		clock:           quartz.NewReal(),
 	}
 	return p.run()
 }
@@ -272,11 +231,12 @@ func (p *partitioner) createTemplateVersion(templateID uuid.UUID) (codersdk.Temp
 
 	// Create template version
 	versionReq := codersdk.CreateTemplateVersionRequest{
-		TemplateID:    templateID,
-		FileID:        uploadResp.ID,
-		Message:       "Initial version for scaletest dynamic parameters",
-		StorageMethod: codersdk.ProvisionerStorageMethodFile,
-		Provisioner:   codersdk.ProvisionerTypeTerraform,
+		TemplateID:      templateID,
+		FileID:          uploadResp.ID,
+		Message:         "Initial version for scaletest dynamic parameters",
+		StorageMethod:   codersdk.ProvisionerStorageMethodFile,
+		Provisioner:     codersdk.ProvisionerTypeTerraform,
+		ProvisionerTags: p.provisionerTags,
 	}
 	version, err := p.client.CreateTemplateVersion(p.ctx, p.orgID, versionReq)
 	if err != nil {

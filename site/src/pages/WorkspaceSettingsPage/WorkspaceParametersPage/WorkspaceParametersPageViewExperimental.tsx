@@ -1,23 +1,25 @@
+import { useFormik } from "formik";
+import type { FC } from "react";
 import type {
 	PreviewParameter,
 	Workspace,
 	WorkspaceBuildParameter,
-} from "api/typesGenerated";
-import { Alert } from "components/Alert/Alert";
-import { Button } from "components/Button/Button";
-import { Label } from "components/Label/Label";
-import { Link } from "components/Link/Link";
-import { Spinner } from "components/Spinner/Spinner";
-import { useFormik } from "formik";
-import { useSyncFormParameters } from "modules/hooks/useSyncFormParameters";
+} from "#/api/typesGenerated";
+import { Alert } from "#/components/Alert/Alert";
+import { Button } from "#/components/Button/Button";
+import { Label } from "#/components/Label/Label";
+import { Link } from "#/components/Link/Link";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { useDebouncedFunction } from "#/hooks/debounce";
+import { useSyncFormParameters } from "#/modules/hooks/useSyncFormParameters";
 import {
 	DynamicParameter,
 	getInitialParameterValues,
 	useValidationSchemaForDynamicParameters,
-} from "modules/workspaces/DynamicParameter/DynamicParameter";
-import type { FC } from "react";
-import { docs } from "utils/docs";
-import type { AutofillBuildParameter } from "utils/richParameters";
+} from "#/modules/workspaces/DynamicParameter/DynamicParameter";
+import { cn } from "#/utils/cn";
+import { docs } from "#/utils/docs";
+import type { AutofillBuildParameter } from "#/utils/richParameters";
 
 type WorkspaceParametersPageViewExperimentalProps = {
 	workspace: Workspace;
@@ -26,6 +28,7 @@ type WorkspaceParametersPageViewExperimentalProps = {
 	diagnostics: PreviewParameter["diagnostics"];
 	canChangeVersions: boolean;
 	isSubmitting: boolean;
+	submitLabel: string;
 	onCancel: () => void;
 	onSubmit: (values: {
 		rich_parameter_values: WorkspaceBuildParameter[];
@@ -43,23 +46,12 @@ export const WorkspaceParametersPageViewExperimental: FC<
 	diagnostics,
 	canChangeVersions,
 	isSubmitting,
+	submitLabel,
 	onSubmit,
 	sendMessage,
 	onCancel,
 	templateVersionId,
 }) => {
-	const autofillByName = Object.fromEntries(
-		autofillParameters.map((param) => [param.name, param]),
-	);
-	const initialTouched = parameters.reduce(
-		(touched, parameter) => {
-			if (autofillByName[parameter.name] !== undefined) {
-				touched[parameter.name] = true;
-			}
-			return touched;
-		},
-		{} as Record<string, boolean>,
-	);
 	const form = useFormik({
 		onSubmit,
 		initialValues: {
@@ -68,7 +60,6 @@ export const WorkspaceParametersPageViewExperimental: FC<
 				autofillParameters,
 			),
 		},
-		initialTouched,
 		validationSchema: useValidationSchemaForDynamicParameters(parameters),
 		enableReinitialize: false,
 		validateOnChange: true,
@@ -80,6 +71,23 @@ export const WorkspaceParametersPageViewExperimental: FC<
 		workspace.template_require_active_version &&
 		!canChangeVersions;
 
+	// Debounce websocket sends to avoid stale responses overwriting
+	// the form while the user is still typing.
+	const { debounced: sendDynamicParamsRequest } = useDebouncedFunction(
+		(parameter: PreviewParameter, value: string) => {
+			const formInputs: Record<string, string> = {};
+			const formParameters = form.values.rich_parameter_values ?? [];
+			for (const param of formParameters) {
+				if (param?.name && param?.value) {
+					formInputs[param.name] = param.value;
+				}
+			}
+			formInputs[parameter.name] = value;
+			sendMessage(formInputs);
+		},
+		500,
+	);
+
 	const handleChange = async (
 		parameter: PreviewParameter,
 		parameterField: string,
@@ -89,29 +97,7 @@ export const WorkspaceParametersPageViewExperimental: FC<
 			name: parameter.name,
 			value,
 		});
-		form.setFieldTouched(parameter.name, true);
 		sendDynamicParamsRequest(parameter, value);
-	};
-
-	// Send the changed parameter and all touched parameters to the websocket
-	const sendDynamicParamsRequest = (
-		parameter: PreviewParameter,
-		value: string,
-	) => {
-		const formInputs: Record<string, string> = {};
-		formInputs[parameter.name] = value;
-		const parameters = form.values.rich_parameter_values ?? [];
-
-		for (const [fieldName, isTouched] of Object.entries(form.touched)) {
-			if (isTouched && fieldName !== parameter.name) {
-				const param = parameters.find((p) => p.name === fieldName);
-				if (param?.value) {
-					formInputs[fieldName] = param.value;
-				}
-			}
-		}
-
-		sendMessage(formInputs);
 	};
 
 	useSyncFormParameters({
@@ -119,6 +105,21 @@ export const WorkspaceParametersPageViewExperimental: FC<
 		formValues: form.values.rich_parameter_values ?? [],
 		setFieldValue: form.setFieldValue,
 	});
+
+	// True when the form holds values the backend hasn't evaluated
+	// yet (debounce pending or WS round-trip in flight).
+	const hasUnsyncedParameters = (form.values.rich_parameter_values ?? []).some(
+		(formParam) => {
+			const responseParam = parameters.find((p) => p.name === formParam.name);
+			if (!responseParam) {
+				return true;
+			}
+			const responseValue = responseParam.value.valid
+				? responseParam.value.value
+				: "";
+			return formParam.value !== responseValue;
+		},
+	);
 
 	const hasIncompatibleParameters = parameters.some((parameter) => {
 		if (!parameter.mutable && parameter.diagnostics.length > 0) {
@@ -130,15 +131,15 @@ export const WorkspaceParametersPageViewExperimental: FC<
 	return (
 		<>
 			{disabled && (
-				<Alert severity="warning" className="mb-8">
+				<Alert severity="warning" className="mb-8" prominent>
 					The template for this workspace requires automatic updates. Update the
 					workspace to edit parameters.
 				</Alert>
 			)}
 
 			{hasIncompatibleParameters && (
-				<Alert severity="error">
-					<p className="text-lg leading-tight font-bold m-0">
+				<Alert severity="error" prominent>
+					<p className="text-lg leading-normal font-bold m-0">
 						Workspace update blocked
 					</p>
 					<p className="mb-0">
@@ -173,12 +174,12 @@ export const WorkspaceParametersPageViewExperimental: FC<
 					{diagnostics.map((diagnostic, index) => (
 						<div
 							key={`diagnostic-${diagnostic.summary}-${index}`}
-							className={`text-xs flex flex-col rounded-md border px-4 pb-3 border-solid
-								${
-									diagnostic.severity === "error"
-										? " text-content-destructive border-border-destructive"
-										: " text-content-warning border-border-warning"
-								}`}
+							className={cn(
+								"text-xs flex flex-col rounded-md border px-4 pb-3 border-solid",
+								diagnostic.severity === "error"
+									? " text-content-destructive border-border-destructive"
+									: " text-content-warning border-border-warning",
+							)}
 						>
 							<div className="flex items-center m-0">
 								<p className="font-medium">{diagnostic.summary}</p>
@@ -258,7 +259,7 @@ export const WorkspaceParametersPageViewExperimental: FC<
 				)}
 
 				<div className="flex justify-end gap-2">
-					<Button onClick={onCancel} variant="outline">
+					<Button onClick={onCancel} variant="outline" disabled={isSubmitting}>
 						Cancel
 					</Button>
 					<Button
@@ -266,6 +267,7 @@ export const WorkspaceParametersPageViewExperimental: FC<
 						disabled={
 							isSubmitting ||
 							disabled ||
+							hasUnsyncedParameters ||
 							diagnostics.some(
 								(diagnostic) => diagnostic.severity === "error",
 							) ||
@@ -277,7 +279,7 @@ export const WorkspaceParametersPageViewExperimental: FC<
 						}
 					>
 						<Spinner loading={isSubmitting} />
-						Update and restart
+						{submitLabel}
 					</Button>
 				</div>
 			</form>

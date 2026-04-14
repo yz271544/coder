@@ -433,7 +433,7 @@ func convertDockerInspect(raw []byte) ([]codersdk.WorkspaceAgentContainer, []str
 		}
 		portKeys := maps.Keys(in.NetworkSettings.Ports)
 		// Sort the ports for deterministic output.
-		sort.Strings(portKeys)
+		slices.Sort(portKeys)
 		// If we see the same port bound to both ipv4 and ipv6 loopback or unspecified
 		// interfaces to the same container port, there is no point in adding it multiple times.
 		loopbackHostPortContainerPorts := make(map[int]uint16, 0)
@@ -581,6 +581,22 @@ func (dcli *dockerCLI) ExecAs(ctx context.Context, containerName, uid string, ar
 		return nil, xerrors.Errorf("exec in container %s as user %s: %w: %s", containerName, uid, err, stderr)
 	}
 	return stdout, nil
+}
+
+func (dcli *dockerCLI) Stop(ctx context.Context, containerName string) error {
+	_, stderr, err := runCmd(ctx, dcli.execer, "docker", "stop", containerName)
+	if err != nil {
+		return xerrors.Errorf("stop %s: %w: %s", containerName, err, stderr)
+	}
+	return nil
+}
+
+func (dcli *dockerCLI) Remove(ctx context.Context, containerName string) error {
+	_, stderr, err := runCmd(ctx, dcli.execer, "docker", "rm", containerName)
+	if err != nil {
+		return xerrors.Errorf("remove %s: %w: %s", containerName, err, stderr)
+	}
+	return nil
 }
 
 // runCmd is a helper function that runs a command with the given

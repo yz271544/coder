@@ -1,11 +1,10 @@
-import { MockTemplate } from "testHelpers/entities";
-import { render } from "testHelpers/renderHelpers";
 import { screen } from "@testing-library/react";
-import { API } from "api/api";
-import { defaultSchedule } from "pages/WorkspaceSettingsPage/WorkspaceSchedulePage/schedule";
-import { timeZones } from "utils/timeZones";
+import { API } from "#/api/api";
+import { defaultSchedule } from "#/pages/WorkspaceSettingsPage/WorkspaceSchedulePage/schedule";
+import { MockTemplate } from "#/testHelpers/entities";
+import { render } from "#/testHelpers/renderHelpers";
+import { timeZones } from "#/utils/timeZones";
 import {
-	Language,
 	ttlShutdownAt,
 	validationSchema,
 	WorkspaceScheduleForm,
@@ -71,7 +70,9 @@ describe("validationSchema", () => {
 			saturday: false,
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorNoDayOfWeek);
+		expect(validate).toThrow(
+			"Must set at least one day of week if autostart is enabled.",
+		);
 	});
 
 	it("disallows empty startTime when autostart is enabled", () => {
@@ -87,7 +88,9 @@ describe("validationSchema", () => {
 			startTime: "",
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorNoTime);
+		expect(validate).toThrow(
+			"Start time is required when autostart is enabled.",
+		);
 	});
 
 	it("allows startTime 16:20", () => {
@@ -105,7 +108,7 @@ describe("validationSchema", () => {
 			startTime: "9:30",
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorTime);
+		expect(validate).toThrow("Time must be in HH:mm format.");
 	});
 
 	it("disallows startTime to be HH:m", () => {
@@ -114,7 +117,7 @@ describe("validationSchema", () => {
 			startTime: "09:5",
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorTime);
+		expect(validate).toThrow("Time must be in HH:mm format.");
 	});
 
 	it("disallows an invalid startTime 24:01", () => {
@@ -123,7 +126,7 @@ describe("validationSchema", () => {
 			startTime: "24:01",
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorTime);
+		expect(validate).toThrow("Time must be in HH:mm format.");
 	});
 
 	it("disallows an invalid startTime 09:60", () => {
@@ -132,7 +135,7 @@ describe("validationSchema", () => {
 			startTime: "09:60",
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorTime);
+		expect(validate).toThrow("Time must be in HH:mm format.");
 	});
 
 	it("disallows an invalid timezone Canada/North", () => {
@@ -141,20 +144,19 @@ describe("validationSchema", () => {
 			timezone: "Canada/North",
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorTimezone);
+		expect(validate).toThrow("Invalid timezone.");
 	});
 
-	it.each<[string]>(timeZones.map((zone) => [zone]))(
-		"validation passes for tz=%p",
-		(zone) => {
+	it("validation passes for all timezones", () => {
+		for (const zone of timeZones) {
 			const values: WorkspaceScheduleFormValues = {
 				...valid,
 				timezone: zone,
 			};
 			const validate = () => validationSchema.validateSync(values);
 			expect(validate).not.toThrow();
-		},
-	);
+		}
+	});
 
 	it("allows a ttl of 7 days", () => {
 		const values: WorkspaceScheduleFormValues = {
@@ -180,7 +182,9 @@ describe("validationSchema", () => {
 			ttl: 24 * 30 + 1,
 		};
 		const validate = () => validationSchema.validateSync(values);
-		expect(validate).toThrow(Language.errorTtlMax);
+		expect(validate).toThrow(
+			"Please enter a limit that is less than or equal to 30 days (720 hours).",
+		);
 	});
 
 	it("allows a ttl of 1.2 hours", () => {
@@ -271,7 +275,7 @@ const defaultFormProps: WorkspaceScheduleFormProps = {
 
 describe("templateInheritance", () => {
 	it("disables the entire autostart feature appropriately", async () => {
-		jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+		vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 		const props = {
 			...defaultFormProps,
 			template: {
@@ -290,8 +294,7 @@ describe("templateInheritance", () => {
 		expect(startTimeInput).toBeDisabled();
 
 		const timezoneInput = await screen.findByLabelText("Timezone");
-		// MUI's input is wrapped in a div so we look at the aria-attribute instead
-		expect(timezoneInput).toHaveAttribute("aria-disabled");
+		expect(timezoneInput).toBeDisabled();
 
 		for (const label of autoStartDayLabels) {
 			const checkbox = await screen.findByLabelText(label);
@@ -301,7 +304,7 @@ describe("templateInheritance", () => {
 	it("disables the autostart days of the week appropriately", async () => {
 		const enabledDayLabels = ["Sat", "Sun"];
 
-		jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+		vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 		const props = {
 			...defaultFormProps,
 			template: {
@@ -324,8 +327,7 @@ describe("templateInheritance", () => {
 		expect(startTimeInput).toBeEnabled();
 
 		const timezoneInput = await screen.findByLabelText("Timezone");
-		// MUI's input is wrapped in a div so we look at the aria-attribute instead
-		expect(timezoneInput).not.toHaveAttribute("aria-disabled");
+		expect(timezoneInput).toBeEnabled();
 
 		for (const label of enabledDayLabels) {
 			const checkbox = await screen.findByLabelText(label);
@@ -347,7 +349,7 @@ describe("templateInheritance", () => {
 				allow_user_autostop: false,
 			},
 		};
-		jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+		vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 		render(<WorkspaceScheduleForm {...props} />);
 
 		const autoStopToggle = await screen.findByLabelText("Enable Autostop", {
@@ -361,7 +363,7 @@ describe("templateInheritance", () => {
 		expect(ttlInput).toBeDisabled();
 	});
 	it("disables secondary autostart fields if main feature switch is toggled off", async () => {
-		jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+		vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 		render(
 			<WorkspaceScheduleForm
 				{...defaultFormProps}
@@ -376,8 +378,7 @@ describe("templateInheritance", () => {
 		expect(startTimeInput).toBeDisabled();
 
 		const timezoneInput = await screen.findByLabelText("Timezone");
-		// MUI's input is wrapped in a div so we look at the aria-attribute instead
-		expect(timezoneInput).toHaveAttribute("aria-disabled");
+		expect(timezoneInput).toBeDisabled();
 
 		for (const label of autoStartDayLabels) {
 			const checkbox = await screen.findByLabelText(label);
@@ -385,7 +386,7 @@ describe("templateInheritance", () => {
 		}
 	});
 	it("disables secondary autostop fields if main feature switch is toggled off", async () => {
-		jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+		vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 		render(
 			<WorkspaceScheduleForm
 				{...defaultFormProps}
@@ -404,7 +405,7 @@ describe("templateInheritance", () => {
 });
 
 test("form should be enabled when both auto stop and auto start features are disabled, given that the template permits these actions", async () => {
-	jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+	vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 	render(
 		<WorkspaceScheduleForm
 			{...defaultFormProps}
@@ -431,7 +432,7 @@ test("form should be disabled when both auto stop and auto start features are di
 			allow_user_autostop: false,
 		},
 	};
-	jest.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
+	vi.spyOn(API, "getTemplateByName").mockResolvedValue(MockTemplate);
 	render(<WorkspaceScheduleForm {...props} />);
 
 	const submitButton = await screen.findByRole("button", {

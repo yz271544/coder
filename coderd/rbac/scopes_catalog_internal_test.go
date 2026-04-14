@@ -1,7 +1,7 @@
 package rbac
 
 import (
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,7 +16,7 @@ func TestExternalScopeNames(t *testing.T) {
 
 	// Ensure sorted ascending
 	sorted := append([]string(nil), names...)
-	sort.Strings(sorted)
+	slices.Sort(sorted)
 	require.Equal(t, sorted, names)
 
 	// Ensure each entry expands to site-only
@@ -36,7 +36,7 @@ func TestExternalScopeNames(t *testing.T) {
 			expected, ok := CompositeSitePermissions(ScopeName(name))
 			require.Truef(t, ok, "expected composite scope definition: %s", name)
 			require.ElementsMatchf(t, expected, s.Site, "unexpected expanded permissions for %s", name)
-			require.Empty(t, s.Org)
+			require.Empty(t, s.ByOrgID)
 			require.Empty(t, s.User)
 			continue
 		}
@@ -50,7 +50,7 @@ func TestExternalScopeNames(t *testing.T) {
 		require.Len(t, s.Site, 1)
 		require.Equal(t, res, s.Site[0].ResourceType)
 		require.Equal(t, act, s.Site[0].Action)
-		require.Empty(t, s.Org)
+		require.Empty(t, s.ByOrgID)
 		require.Empty(t, s.User)
 	}
 }
@@ -62,6 +62,7 @@ func TestIsExternalScope(t *testing.T) {
 	require.True(t, IsExternalScope("template:use"))
 	require.True(t, IsExternalScope("workspace:*"))
 	require.True(t, IsExternalScope("coder:workspaces.create"))
+	require.True(t, IsExternalScope("user:read"))
 	require.False(t, IsExternalScope("debug_info:read")) // internal-only
 	require.False(t, IsExternalScope("unknown:read"))
 }

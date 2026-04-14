@@ -1,14 +1,13 @@
 import type { Interpolation, Theme } from "@emotion/react";
-import { Button } from "components/Button/Button";
+import { EyeIcon, EyeOffIcon } from "lucide-react";
+import { type FC, useState } from "react";
+import { Button } from "#/components/Button/Button";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import { EyeIcon, EyeOffIcon } from "lucide-react";
-import { type FC, useState } from "react";
-import { MONOSPACE_FONT_FAMILY } from "theme/constants";
+} from "#/components/Tooltip/Tooltip";
+import { MONOSPACE_FONT_FAMILY } from "#/theme/constants";
 import { CopyButton } from "../CopyButton/CopyButton";
 
 interface CodeExampleProps {
@@ -77,21 +76,19 @@ export const CodeExample: FC<CodeExampleProps> = ({
 
 			<div className="flex items-center gap-1">
 				{showRevealButton && redactPattern && !secret && (
-					<TooltipProvider>
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									size="icon"
-									variant="subtle"
-									onClick={() => setShowFullValue(!showFullValue)}
-								>
-									{icon}
-									<span className="sr-only">{showButtonLabel}</span>
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent>{showButtonLabel}</TooltipContent>
-						</Tooltip>
-					</TooltipProvider>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								size="icon"
+								variant="subtle"
+								onClick={() => setShowFullValue(!showFullValue)}
+							>
+								{icon}
+								<span className="sr-only">{showButtonLabel}</span>
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>{showButtonLabel}</TooltipContent>
+					</Tooltip>
 				)}
 				<CopyButton text={code} label="Copy code" />
 			</div>

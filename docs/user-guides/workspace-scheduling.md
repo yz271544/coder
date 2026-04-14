@@ -39,6 +39,9 @@ workspace if you're still using it. It will wait for the user to become inactive
 before checking connections again (1 hour by default). Template admins can
 modify this duration with the **activity bump** template setting.
 
+> [!NOTE]
+> Autostop must be enabled on the template prior to workspace creation, it is not applied to existing running workspaces.
+
 ![Autostop UI](../images/workspaces/autostop.png)
 
 ## Activity detection
@@ -55,6 +58,8 @@ A workspace is considered "active" when Coder detects one or more active session
 - **JetBrains IDE sessions**: Using JetBrains Gateway or remote IDE plugins
 - **Terminal sessions**: Using the web terminal (including reconnecting to the web terminal)
 - **SSH sessions**: Connecting via `coder ssh` or SSH config integration
+- **AI agent task status**: When a coding agent reports "working" status via
+  [Coder Tasks](../ai-coder/tasks.md), the workspace deadline is extended
 
 Activity is only detected when there is at least one active session. An open session will keep your workspace marked as active and prevent automatic shutdown.
 
@@ -64,7 +69,8 @@ The following actions do **not** count as workspace activity:
 - Viewing or editing workspace settings
 - Viewing build logs or audit logs
 - Accessing ports through direct URLs without an active session
-- Background agent statistics reporting
+- Background agent statistics reporting (note: AI agent _task status_
+  reporting is different and does count as activity, see above)
 
 To avoid unexpected cloud costs, close your connections, this includes IDE windows, SSH sessions, and others, when you finish using your workspace.
 

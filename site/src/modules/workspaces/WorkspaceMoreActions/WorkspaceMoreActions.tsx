@@ -1,31 +1,37 @@
-import { MissingBuildParameters, ParameterValidationError } from "api/api";
-import { type ApiError, getErrorMessage, isApiError } from "api/errors";
-import {
-	changeVersion,
-	deleteWorkspace,
-	workspacePermissions,
-} from "api/queries/workspaces";
-import type { Workspace } from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import {
-	DropdownMenu,
-	DropdownMenuContent,
-	DropdownMenuItem,
-	DropdownMenuSeparator,
-	DropdownMenuTrigger,
-} from "components/DropdownMenu/DropdownMenu";
-import { displayError } from "components/GlobalSnackbar/utils";
 import {
 	CopyIcon,
 	DownloadIcon,
 	EllipsisVertical,
 	HistoryIcon,
 	SettingsIcon,
+	SquareIcon,
 	TrashIcon,
 } from "lucide-react";
 import { type FC, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "react-query";
 import { Link as RouterLink } from "react-router";
+import { toast } from "sonner";
+import { MissingBuildParameters, ParameterValidationError } from "#/api/api";
+import {
+	type ApiError,
+	getErrorDetail,
+	getErrorMessage,
+	isApiError,
+} from "#/api/errors";
+import {
+	changeVersion,
+	deleteWorkspace,
+	workspacePermissions,
+} from "#/api/queries/workspaces";
+import type { Workspace } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+	DropdownMenuTrigger,
+} from "#/components/DropdownMenu/DropdownMenu";
 import { WorkspaceErrorDialog } from "../ErrorDialog/WorkspaceErrorDialog";
 import { ChangeWorkspaceVersionDialog } from "./ChangeWorkspaceVersionDialog";
 import { DownloadLogsDialog } from "./DownloadLogsDialog";
@@ -37,11 +43,17 @@ import { WorkspaceDeleteDialog } from "./WorkspaceDeleteDialog";
 type WorkspaceMoreActionsProps = {
 	workspace: Workspace;
 	disabled: boolean;
+	onStop?: () => void;
+	isStopping?: boolean;
+	onActionSuccess?: () => Promise<void> | void;
 };
 
 export const WorkspaceMoreActions: FC<WorkspaceMoreActionsProps> = ({
 	workspace,
 	disabled,
+	onStop,
+	isStopping,
+	onActionSuccess,
 }) => {
 	const queryClient = useQueryClient();
 
@@ -73,14 +85,27 @@ export const WorkspaceMoreActions: FC<WorkspaceMoreActionsProps> = ({
 				error: error,
 			});
 		} else {
-			displayError(getErrorMessage(error, "Failed to delete workspace."));
+			toast.error(
+				getErrorMessage(
+					error,
+					`Failed to delete workspace "${workspace.name}".`,
+				),
+				{
+					description: getErrorDetail(error),
+				},
+			);
 		}
 	};
 
 	// Delete
 	const [isConfirmingDelete, setIsConfirmingDelete] = useState(false);
+	const deleteWorkspaceOptions = deleteWorkspace(workspace, queryClient);
 	const deleteWorkspaceMutation = useMutation({
-		...deleteWorkspace(workspace, queryClient),
+		...deleteWorkspaceOptions,
+		onSuccess: async (build) => {
+			await deleteWorkspaceOptions.onSuccess?.(build);
+			await onActionSuccess?.();
+		},
 		onError: (error: unknown) => {
 			handleError(error);
 		},
@@ -115,6 +140,13 @@ export const WorkspaceMoreActions: FC<WorkspaceMoreActionsProps> = ({
 				</DropdownMenuTrigger>
 
 				<DropdownMenuContent id="workspace-options" align="end">
+					{onStop && (
+						<DropdownMenuItem onClick={onStop} disabled={isStopping}>
+							<SquareIcon />
+							Stop&hellip;
+						</DropdownMenuItem>
+					)}
+
 					<DropdownMenuItem asChild>
 						<RouterLink
 							to={`/@${workspace.owner_name}/${workspace.name}/settings`}
@@ -224,7 +256,7 @@ export const WorkspaceMoreActions: FC<WorkspaceMoreActionsProps> = ({
 
 			<WorkspaceDeleteDialog
 				workspace={workspace}
-				canDeleteFailedWorkspace={!!permissions?.deleteFailedWorkspace}
+				canDeleteFailedWorkspace={Boolean(permissions?.deleteFailedWorkspace)}
 				isOpen={isConfirmingDelete}
 				onCancel={() => {
 					setIsConfirmingDelete(false);

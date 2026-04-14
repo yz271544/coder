@@ -1,38 +1,37 @@
-import { useTheme } from "@emotion/react";
-import visuallyHidden from "@mui/utils/visuallyHidden";
-import { API } from "api/api";
+import { useFormik } from "formik";
+import { type FC, useState } from "react";
+import { useQuery } from "react-query";
+import { richParameters } from "#/api/queries/templates";
+import { workspaceBuildParameters } from "#/api/queries/workspaceBuilds";
 import type {
 	TemplateVersionParameter,
 	Workspace,
 	WorkspaceBuildParameter,
-} from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import { FormFields } from "components/Form/Form";
-import { TopbarButton } from "components/FullPageLayout/Topbar";
+} from "#/api/typesGenerated";
+import { ChevronDownIcon } from "#/components/AnimatedIcons/ChevronDown";
+import { Button } from "#/components/Button/Button";
+import { FormFields } from "#/components/Form/Form";
+import { TopbarButton } from "#/components/FullPageLayout/Topbar";
 import {
-	HelpTooltipLink,
-	HelpTooltipLinksGroup,
-	HelpTooltipText,
-	HelpTooltipTitle,
-} from "components/HelpTooltip/HelpTooltip";
-import { Link } from "components/Link/Link";
-import { Loader } from "components/Loader/Loader";
+	HelpPopoverLink,
+	HelpPopoverLinksGroup,
+	HelpPopoverText,
+	HelpPopoverTitle,
+} from "#/components/HelpPopover/HelpPopover";
+import { Link } from "#/components/Link/Link";
+import { Loader } from "#/components/Loader/Loader";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
-} from "components/Popover/Popover";
-import { RichParameterInput } from "components/RichParameterInput/RichParameterInput";
-import { useFormik } from "formik";
-import { ChevronDownIcon } from "lucide-react";
-import { type FC, useState } from "react";
-import { useQuery } from "react-query";
-import { docs } from "utils/docs";
-import { getFormHelpers } from "utils/formUtils";
+} from "#/components/Popover/Popover";
+import { RichParameterInput } from "#/components/RichParameterInput/RichParameterInput";
+import { docs } from "#/utils/docs";
+import { getFormHelpers } from "#/utils/formUtils";
 import {
 	type AutofillBuildParameter,
 	getInitialRichParameterValues,
-} from "utils/richParameters";
+} from "#/utils/richParameters";
 
 interface BuildParametersPopoverProps {
 	workspace: Workspace;
@@ -48,12 +47,15 @@ export const BuildParametersPopover: FC<BuildParametersPopoverProps> = ({
 	onSubmit,
 }) => {
 	const [isOpen, setIsOpen] = useState(false);
-	const { data: parameters } = useQuery({
-		queryKey: ["workspace", workspace.id, "parameters"],
-		queryFn: () => API.getWorkspaceParameters(workspace),
-	});
-	const ephemeralParameters = parameters
-		? parameters.templateVersionRichParameters.filter((p) => p.ephemeral)
+	const build = workspace.latest_build;
+	const { data: templateVersionParameters } = useQuery(
+		richParameters(build.template_version_id),
+	);
+	const { data: buildParameters } = useQuery(
+		workspaceBuildParameters(build.id),
+	);
+	const ephemeralParameters = templateVersionParameters
+		? templateVersionParameters.filter((p) => p.ephemeral)
 		: undefined;
 
 	return (
@@ -65,7 +67,7 @@ export const BuildParametersPopover: FC<BuildParametersPopoverProps> = ({
 					className="min-w-fit"
 				>
 					<ChevronDownIcon />
-					<span css={{ ...visuallyHidden }}>{label}</span>
+					<span className="sr-only">{label}</span>
 				</TopbarButton>
 			</PopoverTrigger>
 			<PopoverContent
@@ -75,7 +77,7 @@ export const BuildParametersPopover: FC<BuildParametersPopoverProps> = ({
 				<BuildParametersPopoverContent
 					workspace={workspace}
 					ephemeralParameters={ephemeralParameters}
-					buildParameters={parameters?.buildParameters}
+					buildParameters={buildParameters}
 					onSubmit={onSubmit}
 					setIsOpen={setIsOpen}
 				/>
@@ -99,8 +101,6 @@ const BuildParametersPopoverContent: FC<BuildParametersPopoverContentProps> = ({
 	onSubmit,
 	setIsOpen,
 }) => {
-	const theme = useTheme();
-
 	if (
 		!workspace.template_use_classic_parameter_flow &&
 		ephemeralParameters &&
@@ -145,20 +145,14 @@ const BuildParametersPopoverContent: FC<BuildParametersPopoverContentProps> = ({
 		<>
 			{buildParameters && ephemeralParameters ? (
 				ephemeralParameters.length > 0 ? (
-					<>
-						<div
-							css={{
-								color: theme.palette.text.secondary,
-								padding: 20,
-								borderBottom: `1px solid ${theme.palette.divider}`,
-							}}
-						>
-							<HelpTooltipTitle>Build Options</HelpTooltipTitle>
-							<HelpTooltipText>
+					<div className="divide-y">
+						<div className="p-5 text-content-secondary">
+							<HelpPopoverTitle>Build Options</HelpPopoverTitle>
+							<HelpPopoverText>
 								These parameters only apply for a single workspace start.
-							</HelpTooltipText>
+							</HelpPopoverText>
 						</div>
-						<div css={{ padding: 20 }}>
+						<div className="border-0 border-solid p-5">
 							<Form
 								onSubmit={(buildParameters) => {
 									onSubmit(buildParameters);
@@ -173,28 +167,22 @@ const BuildParametersPopoverContent: FC<BuildParametersPopoverContentProps> = ({
 								)}
 							/>
 						</div>
-					</>
+					</div>
 				) : (
-					<div
-						css={{
-							color: theme.palette.text.secondary,
-							padding: 20,
-							borderBottom: `1px solid ${theme.palette.divider}`,
-						}}
-					>
-						<HelpTooltipTitle>Build Options</HelpTooltipTitle>
-						<HelpTooltipText>
+					<div className="p-5 text-content-secondary">
+						<HelpPopoverTitle>Build Options</HelpPopoverTitle>
+						<HelpPopoverText>
 							This template has no ephemeral build options.
-						</HelpTooltipText>
-						<HelpTooltipLinksGroup>
-							<HelpTooltipLink
+						</HelpPopoverText>
+						<HelpPopoverLinksGroup>
+							<HelpPopoverLink
 								href={docs(
 									"/admin/templates/extending-templates/parameters#ephemeral-parameters",
 								)}
 							>
 								Read the docs
-							</HelpTooltipLink>
-						</HelpTooltipLinksGroup>
+							</HelpPopoverLink>
+						</HelpPopoverLinksGroup>
 					</div>
 				)
 			) : (
@@ -248,11 +236,11 @@ const Form: FC<FormProps> = ({
 					);
 				})}
 			</FormFields>
-			<div css={{ paddingTop: "24px", paddingBottom: "8px" }}>
+			<div className="pb-2 pt-6">
 				<Button
 					data-testid="build-parameters-submit"
 					type="submit"
-					css={{ width: "100%" }}
+					className="w-full"
 				>
 					Build workspace
 				</Button>

@@ -65,3 +65,21 @@ type DRPCAgentClient26 interface {
 	DeleteSubAgent(ctx context.Context, in *DeleteSubAgentRequest) (*DeleteSubAgentResponse, error)
 	ListSubAgents(ctx context.Context, in *ListSubAgentsRequest) (*ListSubAgentsResponse, error)
 }
+
+// DRPCAgentClient27 is the Agent API at v2.7. It adds the ReportBoundaryLogs
+// RPC for forwarding boundary audit logs to coderd. Compatible with Coder v2.30+
+type DRPCAgentClient27 interface {
+	DRPCAgentClient26
+	ReportBoundaryLogs(ctx context.Context, in *ReportBoundaryLogsRequest) (*ReportBoundaryLogsResponse, error)
+}
+
+// DRPCAgentClient28 is the Agent API at v2.8. It adds
+//   - a SubagentId field to the WorkspaceAgentDevcontainer message
+//   - an Id field to the CreateSubAgentRequest message.
+//   - UpdateAppStatus RPC.
+//
+// Compatible with Coder v2.31+
+type DRPCAgentClient28 interface {
+	DRPCAgentClient27
+	UpdateAppStatus(ctx context.Context, in *UpdateAppStatusRequest) (*UpdateAppStatusResponse, error)
+}

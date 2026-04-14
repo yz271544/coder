@@ -10,23 +10,21 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
-	"github.com/coder/coder/v2/coderd/database"
-	"github.com/coder/coder/v2/coderd/database/dbgen"
-	"github.com/coder/coder/v2/coderd/database/pubsub"
-	"github.com/coder/quartz"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/coder/coder/v2/cli/clitest"
 	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
+	"github.com/coder/coder/v2/coderd/database/pubsub"
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/pty/ptytest"
 	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/quartz"
 )
 
 func TestDelete(t *testing.T) {
@@ -185,9 +183,6 @@ func TestDelete(t *testing.T) {
 
 	t.Run("WarnNoProvisioners", func(t *testing.T) {
 		t.Parallel()
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("this test requires postgres")
-		}
 
 		store, ps, db := dbtestutil.NewDBWithSQLDB(t)
 		client, closeDaemon := coderdtest.NewWithProvisionerCloser(t, &coderdtest.Options{
@@ -228,9 +223,6 @@ func TestDelete(t *testing.T) {
 
 	t.Run("Prebuilt workspace delete permissions", func(t *testing.T) {
 		t.Parallel()
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("this test requires postgres")
-		}
 
 		// Setup
 		db, pb := dbtestutil.NewDB(t, dbtestutil.WithDumpOnFailure())

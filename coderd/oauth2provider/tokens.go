@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"golang.org/x/oauth2"
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/v2/coderd/apikey"
@@ -21,7 +20,6 @@ import (
 	"github.com/coder/coder/v2/coderd/httpapi"
 	"github.com/coder/coder/v2/coderd/httpmw"
 	"github.com/coder/coder/v2/coderd/rbac"
-	"github.com/coder/coder/v2/coderd/userpassword"
 	"github.com/coder/coder/v2/codersdk"
 )
 
@@ -36,48 +34,76 @@ var (
 	errInvalidPKCE = xerrors.New("invalid code_verifier")
 	// errInvalidResource means the resource parameter validation failed.
 	errInvalidResource = xerrors.New("invalid resource parameter")
+	// errConflictingClientAuth means the client provided credentials in both the
+	// request body and HTTP Basic, but they did not match.
+	errConflictingClientAuth = xerrors.New("conflicting client authentication")
 )
 
-type tokenParams struct {
-	clientID     string
-	clientSecret string
-	code         string
-	grantType    codersdk.OAuth2ProviderGrantType
-	redirectURL  *url.URL
-	refreshToken string
-	codeVerifier string // PKCE verifier
-	resource     string // RFC 8707 resource for token binding
-}
-
-func extractTokenParams(r *http.Request, callbackURL *url.URL) (tokenParams, []codersdk.ValidationError, error) {
+func extractTokenRequest(r *http.Request, callbackURL *url.URL) (codersdk.OAuth2TokenRequest, []codersdk.ValidationError, error) {
 	p := httpapi.NewQueryParamParser()
 	err := r.ParseForm()
 	if err != nil {
-		return tokenParams{}, nil, xerrors.Errorf("parse form: %w", err)
+		return codersdk.OAuth2TokenRequest{}, nil, xerrors.Errorf("parse form: %w", err)
 	}
 
 	vals := r.Form
 	p.RequiredNotEmpty("grant_type")
 	grantType := httpapi.ParseCustom(p, vals, "", "grant_type", httpapi.ParseEnum[codersdk.OAuth2ProviderGrantType])
+
+	// Grant-type specific validation - must be called before parsing values.
 	switch grantType {
 	case codersdk.OAuth2ProviderGrantTypeRefreshToken:
 		p.RequiredNotEmpty("refresh_token")
 	case codersdk.OAuth2ProviderGrantTypeAuthorizationCode:
-		p.RequiredNotEmpty("client_secret", "client_id", "code")
+		p.RequiredNotEmpty("code")
 	}
 
-	params := tokenParams{
-		clientID:     p.String(vals, "", "client_id"),
-		clientSecret: p.String(vals, "", "client_secret"),
-		code:         p.String(vals, "", "code"),
-		grantType:    grantType,
-		redirectURL:  p.RedirectURL(vals, callbackURL, "redirect_uri"),
-		refreshToken: p.String(vals, "", "refresh_token"),
-		codeVerifier: p.String(vals, "", "code_verifier"),
-		resource:     p.String(vals, "", "resource"),
+	req := codersdk.OAuth2TokenRequest{
+		GrantType:    grantType,
+		ClientID:     p.String(vals, "", "client_id"),
+		ClientSecret: p.String(vals, "", "client_secret"),
+		Code:         p.String(vals, "", "code"),
+		RedirectURI:  p.String(vals, "", "redirect_uri"),
+		RefreshToken: p.String(vals, "", "refresh_token"),
+		CodeVerifier: p.String(vals, "", "code_verifier"),
+		Resource:     p.String(vals, "", "resource"),
+		Scope:        p.String(vals, "", "scope"),
 	}
-	// Validate resource parameter syntax (RFC 8707): must be absolute URI without fragment
-	if err := validateResourceParameter(params.resource); err != nil {
+
+	// RFC 6749 §2.3.1: confidential clients may authenticate via HTTP Basic.
+	if user, pass, ok := r.BasicAuth(); ok && user != "" {
+		if req.ClientID != "" && req.ClientID != user {
+			return codersdk.OAuth2TokenRequest{}, nil, errConflictingClientAuth
+		}
+		if req.ClientSecret != "" && req.ClientSecret != pass {
+			return codersdk.OAuth2TokenRequest{}, nil, errConflictingClientAuth
+		}
+
+		req.ClientID = user
+		req.ClientSecret = pass
+	}
+
+	// Grant-specific required checks that can be satisfied via HTTP Basic.
+	if req.GrantType == codersdk.OAuth2ProviderGrantTypeAuthorizationCode {
+		if req.ClientID == "" {
+			p.Errors = append(p.Errors, codersdk.ValidationError{
+				Field:  "client_id",
+				Detail: "Parameter \"client_id\" is required and cannot be empty",
+			})
+		}
+		if req.ClientSecret == "" {
+			p.Errors = append(p.Errors, codersdk.ValidationError{
+				Field:  "client_secret",
+				Detail: "Parameter \"client_secret\" is required and cannot be empty",
+			})
+		}
+	}
+
+	// Validate redirect URI - errors are added to p.Errors.
+	_ = p.RedirectURL(vals, callbackURL, "redirect_uri")
+
+	// Validate resource parameter syntax (RFC 8707): must be absolute URI without fragment.
+	if err := validateResourceParameter(req.Resource); err != nil {
 		p.Errors = append(p.Errors, codersdk.ValidationError{
 			Field:  "resource",
 			Detail: "must be an absolute URI without fragment",
@@ -86,9 +112,9 @@ func extractTokenParams(r *http.Request, callbackURL *url.URL) (tokenParams, []c
 
 	p.ErrorExcessParams(vals)
 	if len(p.Errors) > 0 {
-		return tokenParams{}, p.Errors, xerrors.Errorf("invalid query params: %w", p.Errors)
+		return codersdk.OAuth2TokenRequest{}, p.Errors, xerrors.Errorf("invalid query params: %w", p.Errors)
 	}
-	return params, nil, nil
+	return req, nil, nil
 }
 
 // Tokens
@@ -108,13 +134,18 @@ func Tokens(db database.Store, lifetimes codersdk.SessionLifetime) http.HandlerF
 			return
 		}
 
-		params, validationErrs, err := extractTokenParams(r, callbackURL)
+		req, validationErrs, err := extractTokenRequest(r, callbackURL)
 		if err != nil {
+			if errors.Is(err, errConflictingClientAuth) {
+				httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidRequest, "Conflicting client credentials between Authorization header and request body")
+				return
+			}
+
 			// Check for specific validation errors in priority order
 			if slices.ContainsFunc(validationErrs, func(validationError codersdk.ValidationError) bool {
 				return validationError.Field == "grant_type"
 			}) {
-				httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "unsupported_grant_type", "The grant type is missing or unsupported")
+				httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeUnsupportedGrantType, "The grant type is missing or unsupported")
 				return
 			}
 
@@ -123,47 +154,47 @@ func Tokens(db database.Store, lifetimes codersdk.SessionLifetime) http.HandlerF
 				if slices.ContainsFunc(validationErrs, func(validationError codersdk.ValidationError) bool {
 					return validationError.Field == field
 				}) {
-					httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_request", fmt.Sprintf("Missing required parameter: %s", field))
+					httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidRequest, fmt.Sprintf("Missing required parameter: %s", field))
 					return
 				}
 			}
 			// Generic invalid request for other validation errors
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_request", "The request is missing required parameters or is otherwise malformed")
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidRequest, "The request is missing required parameters or is otherwise malformed")
 			return
 		}
 
-		var token oauth2.Token
+		var token codersdk.OAuth2TokenResponse
 		//nolint:gocritic,revive // More cases will be added later.
-		switch params.grantType {
+		switch req.GrantType {
 		// TODO: Client creds, device code.
 		case codersdk.OAuth2ProviderGrantTypeRefreshToken:
-			token, err = refreshTokenGrant(ctx, db, app, lifetimes, params)
+			token, err = refreshTokenGrant(ctx, db, app, lifetimes, req)
 		case codersdk.OAuth2ProviderGrantTypeAuthorizationCode:
-			token, err = authorizationCodeGrant(ctx, db, app, lifetimes, params)
+			token, err = authorizationCodeGrant(ctx, db, app, lifetimes, req)
 		default:
 			// This should handle truly invalid grant types
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "unsupported_grant_type", fmt.Sprintf("The grant type %q is not supported", params.grantType))
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeUnsupportedGrantType, fmt.Sprintf("The grant type %q is not supported", req.GrantType))
 			return
 		}
 
 		if errors.Is(err, errBadSecret) {
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusUnauthorized, "invalid_client", "The client credentials are invalid")
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusUnauthorized, codersdk.OAuth2ErrorCodeInvalidClient, "The client credentials are invalid")
 			return
 		}
 		if errors.Is(err, errBadCode) {
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_grant", "The authorization code is invalid or expired")
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidGrant, "The authorization code is invalid or expired")
 			return
 		}
 		if errors.Is(err, errInvalidPKCE) {
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_grant", "The PKCE code verifier is invalid")
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidGrant, "The PKCE code verifier is invalid")
 			return
 		}
 		if errors.Is(err, errInvalidResource) {
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_target", "The resource parameter is invalid")
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidTarget, "The resource parameter is invalid")
 			return
 		}
 		if errors.Is(err, errBadToken) {
-			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_grant", "The refresh token is invalid or expired")
+			httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidGrant, "The refresh token is invalid or expired")
 			return
 		}
 		if err != nil {
@@ -180,82 +211,90 @@ func Tokens(db database.Store, lifetimes codersdk.SessionLifetime) http.HandlerF
 	}
 }
 
-func authorizationCodeGrant(ctx context.Context, db database.Store, app database.OAuth2ProviderApp, lifetimes codersdk.SessionLifetime, params tokenParams) (oauth2.Token, error) {
+func authorizationCodeGrant(ctx context.Context, db database.Store, app database.OAuth2ProviderApp, lifetimes codersdk.SessionLifetime, req codersdk.OAuth2TokenRequest) (codersdk.OAuth2TokenResponse, error) {
 	// Validate the client secret.
-	secret, err := parseFormattedSecret(params.clientSecret)
+	secret, err := ParseFormattedSecret(req.ClientSecret)
 	if err != nil {
-		return oauth2.Token{}, errBadSecret
+		return codersdk.OAuth2TokenResponse{}, errBadSecret
 	}
-	//nolint:gocritic // Users cannot read secrets so we must use the system.
-	dbSecret, err := db.GetOAuth2ProviderAppSecretByPrefix(dbauthz.AsSystemRestricted(ctx), []byte(secret.prefix))
+	//nolint:gocritic // OAuth2 system context — users cannot read secrets
+	dbSecret, err := db.GetOAuth2ProviderAppSecretByPrefix(dbauthz.AsSystemOAuth2(ctx), []byte(secret.Prefix))
 	if errors.Is(err, sql.ErrNoRows) {
-		return oauth2.Token{}, errBadSecret
+		return codersdk.OAuth2TokenResponse{}, errBadSecret
 	}
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
-	equal, err := userpassword.Compare(string(dbSecret.HashedSecret), secret.secret)
-	if err != nil {
-		return oauth2.Token{}, xerrors.Errorf("unable to compare secret: %w", err)
-	}
-	if !equal {
-		return oauth2.Token{}, errBadSecret
+
+	equalSecret := apikey.ValidateHash(dbSecret.HashedSecret, secret.Secret)
+	if !equalSecret {
+		return codersdk.OAuth2TokenResponse{}, errBadSecret
 	}
 
 	// Validate the authorization code.
-	code, err := parseFormattedSecret(params.code)
+	code, err := ParseFormattedSecret(req.Code)
 	if err != nil {
-		return oauth2.Token{}, errBadCode
+		return codersdk.OAuth2TokenResponse{}, errBadCode
 	}
-	//nolint:gocritic // There is no user yet so we must use the system.
-	dbCode, err := db.GetOAuth2ProviderAppCodeByPrefix(dbauthz.AsSystemRestricted(ctx), []byte(code.prefix))
+	//nolint:gocritic // OAuth2 system context — no authenticated user during token exchange
+	dbCode, err := db.GetOAuth2ProviderAppCodeByPrefix(dbauthz.AsSystemOAuth2(ctx), []byte(code.Prefix))
 	if errors.Is(err, sql.ErrNoRows) {
-		return oauth2.Token{}, errBadCode
+		return codersdk.OAuth2TokenResponse{}, errBadCode
 	}
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
-	equal, err = userpassword.Compare(string(dbCode.HashedSecret), code.secret)
-	if err != nil {
-		return oauth2.Token{}, xerrors.Errorf("unable to compare code: %w", err)
-	}
-	if !equal {
-		return oauth2.Token{}, errBadCode
+	equalCode := apikey.ValidateHash(dbCode.HashedSecret, code.Secret)
+	if !equalCode {
+		return codersdk.OAuth2TokenResponse{}, errBadCode
 	}
 
 	// Ensure the code has not expired.
 	if dbCode.ExpiresAt.Before(dbtime.Now()) {
-		return oauth2.Token{}, errBadCode
+		return codersdk.OAuth2TokenResponse{}, errBadCode
 	}
 
-	// Verify PKCE challenge if present
-	if dbCode.CodeChallenge.Valid && dbCode.CodeChallenge.String != "" {
-		if params.codeVerifier == "" {
-			return oauth2.Token{}, errInvalidPKCE
+	// Verify redirect_uri matches the one used during authorization
+	// (RFC 6749 §4.1.3).
+	if dbCode.RedirectUri.Valid && dbCode.RedirectUri.String != "" {
+		if req.RedirectURI != dbCode.RedirectUri.String {
+			return codersdk.OAuth2TokenResponse{}, errBadCode
 		}
-		if !VerifyPKCE(dbCode.CodeChallenge.String, params.codeVerifier) {
-			return oauth2.Token{}, errInvalidPKCE
-		}
+	}
+
+	// PKCE is mandatory for all authorization code flows
+	// (OAuth 2.1). Verify the code verifier against the stored
+	// challenge.
+	if req.CodeVerifier == "" {
+		return codersdk.OAuth2TokenResponse{}, errInvalidPKCE
+	}
+	if !dbCode.CodeChallenge.Valid || dbCode.CodeChallenge.String == "" {
+		// Code was issued without a challenge — should not happen
+		// with authorize endpoint enforcement, but defend in depth.
+		return codersdk.OAuth2TokenResponse{}, errInvalidPKCE
+	}
+	if !VerifyPKCE(dbCode.CodeChallenge.String, req.CodeVerifier) {
+		return codersdk.OAuth2TokenResponse{}, errInvalidPKCE
 	}
 
 	// Verify resource parameter consistency (RFC 8707)
 	if dbCode.ResourceUri.Valid && dbCode.ResourceUri.String != "" {
 		// Resource was specified during authorization - it must match in token request
-		if params.resource == "" {
-			return oauth2.Token{}, errInvalidResource
+		if req.Resource == "" {
+			return codersdk.OAuth2TokenResponse{}, errInvalidResource
 		}
-		if params.resource != dbCode.ResourceUri.String {
-			return oauth2.Token{}, errInvalidResource
+		if req.Resource != dbCode.ResourceUri.String {
+			return codersdk.OAuth2TokenResponse{}, errInvalidResource
 		}
-	} else if params.resource != "" {
+	} else if req.Resource != "" {
 		// Resource was not specified during authorization but is now provided
-		return oauth2.Token{}, errInvalidResource
+		return codersdk.OAuth2TokenResponse{}, errInvalidResource
 	}
 
 	// Generate a refresh token.
 	refreshToken, err := GenerateSecret()
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
 	// Generate the API key we will swap for the code.
@@ -269,13 +308,13 @@ func authorizationCodeGrant(ctx context.Context, db database.Store, app database
 		TokenName: tokenName,
 	})
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
 	// Grab the user roles so we can perform the exchange as the user.
 	actor, _, err := httpmw.UserRBACSubject(ctx, db, dbCode.UserID, rbac.ScopeAll)
 	if err != nil {
-		return oauth2.Token{}, xerrors.Errorf("fetch user actor: %w", err)
+		return codersdk.OAuth2TokenResponse{}, xerrors.Errorf("fetch user actor: %w", err)
 	}
 
 	// Do the actual token exchange in the database.
@@ -315,7 +354,7 @@ func authorizationCodeGrant(ctx context.Context, db database.Store, app database
 			CreatedAt:   dbtime.Now(),
 			ExpiresAt:   refreshExpiresAt,
 			HashPrefix:  []byte(refreshToken.Prefix),
-			RefreshHash: []byte(refreshToken.Hashed),
+			RefreshHash: refreshToken.Hashed,
 			AppSecretID: dbSecret.ID,
 			APIKeyID:    newKey.ID,
 			UserID:      dbCode.UserID,
@@ -327,69 +366,66 @@ func authorizationCodeGrant(ctx context.Context, db database.Store, app database
 		return nil
 	}, nil)
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
-	return oauth2.Token{
+	return codersdk.OAuth2TokenResponse{
 		AccessToken:  sessionToken,
-		TokenType:    "Bearer",
+		TokenType:    codersdk.OAuth2TokenTypeBearer,
 		RefreshToken: refreshToken.Formatted,
-		Expiry:       key.ExpiresAt,
 		ExpiresIn:    int64(time.Until(key.ExpiresAt).Seconds()),
+		Expiry:       &key.ExpiresAt,
 	}, nil
 }
 
-func refreshTokenGrant(ctx context.Context, db database.Store, app database.OAuth2ProviderApp, lifetimes codersdk.SessionLifetime, params tokenParams) (oauth2.Token, error) {
+func refreshTokenGrant(ctx context.Context, db database.Store, app database.OAuth2ProviderApp, lifetimes codersdk.SessionLifetime, req codersdk.OAuth2TokenRequest) (codersdk.OAuth2TokenResponse, error) {
 	// Validate the token.
-	token, err := parseFormattedSecret(params.refreshToken)
+	token, err := ParseFormattedSecret(req.RefreshToken)
 	if err != nil {
-		return oauth2.Token{}, errBadToken
+		return codersdk.OAuth2TokenResponse{}, errBadToken
 	}
-	//nolint:gocritic // There is no user yet so we must use the system.
-	dbToken, err := db.GetOAuth2ProviderAppTokenByPrefix(dbauthz.AsSystemRestricted(ctx), []byte(token.prefix))
+	//nolint:gocritic // OAuth2 system context — no authenticated user during refresh
+	dbToken, err := db.GetOAuth2ProviderAppTokenByPrefix(dbauthz.AsSystemOAuth2(ctx), []byte(token.Prefix))
 	if errors.Is(err, sql.ErrNoRows) {
-		return oauth2.Token{}, errBadToken
+		return codersdk.OAuth2TokenResponse{}, errBadToken
 	}
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
-	equal, err := userpassword.Compare(string(dbToken.RefreshHash), token.secret)
-	if err != nil {
-		return oauth2.Token{}, xerrors.Errorf("unable to compare token: %w", err)
-	}
+	equal := apikey.ValidateHash(dbToken.RefreshHash, token.Secret)
 	if !equal {
-		return oauth2.Token{}, errBadToken
+		return codersdk.OAuth2TokenResponse{}, errBadToken
 	}
 
 	// Ensure the token has not expired.
 	if dbToken.ExpiresAt.Before(dbtime.Now()) {
-		return oauth2.Token{}, errBadToken
+		return codersdk.OAuth2TokenResponse{}, errBadToken
 	}
 
 	// Verify resource parameter consistency for refresh tokens (RFC 8707)
-	if params.resource != "" {
+	if req.Resource != "" {
 		// If resource is provided in refresh request, it must match the original token's audience
-		if !dbToken.Audience.Valid || dbToken.Audience.String != params.resource {
-			return oauth2.Token{}, errInvalidResource
+		if !dbToken.Audience.Valid || dbToken.Audience.String != req.Resource {
+			return codersdk.OAuth2TokenResponse{}, errInvalidResource
 		}
 	}
 
 	// Grab the user roles so we can perform the refresh as the user.
-	//nolint:gocritic // There is no user yet so we must use the system.
-	prevKey, err := db.GetAPIKeyByID(dbauthz.AsSystemRestricted(ctx), dbToken.APIKeyID)
+	//nolint:gocritic // OAuth2 system context — need to read the previous API key
+	prevKey, err := db.GetAPIKeyByID(dbauthz.AsSystemOAuth2(ctx), dbToken.APIKeyID)
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
 	actor, _, err := httpmw.UserRBACSubject(ctx, db, prevKey.UserID, rbac.ScopeAll)
 	if err != nil {
-		return oauth2.Token{}, xerrors.Errorf("fetch user actor: %w", err)
+		return codersdk.OAuth2TokenResponse{}, xerrors.Errorf("fetch user actor: %w", err)
 	}
 
 	// Generate a new refresh token.
 	refreshToken, err := GenerateSecret()
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
 	// Generate the new API key.
@@ -403,7 +439,7 @@ func refreshTokenGrant(ctx context.Context, db database.Store, app database.OAut
 		TokenName: tokenName,
 	})
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
 	// Replace the token.
@@ -431,7 +467,7 @@ func refreshTokenGrant(ctx context.Context, db database.Store, app database.OAut
 			CreatedAt:   dbtime.Now(),
 			ExpiresAt:   refreshExpiresAt,
 			HashPrefix:  []byte(refreshToken.Prefix),
-			RefreshHash: []byte(refreshToken.Hashed),
+			RefreshHash: refreshToken.Hashed,
 			AppSecretID: dbToken.AppSecretID,
 			APIKeyID:    newKey.ID,
 			UserID:      dbToken.UserID,
@@ -443,15 +479,15 @@ func refreshTokenGrant(ctx context.Context, db database.Store, app database.OAut
 		return nil
 	}, nil)
 	if err != nil {
-		return oauth2.Token{}, err
+		return codersdk.OAuth2TokenResponse{}, err
 	}
 
-	return oauth2.Token{
+	return codersdk.OAuth2TokenResponse{
 		AccessToken:  sessionToken,
-		TokenType:    "Bearer",
+		TokenType:    codersdk.OAuth2TokenTypeBearer,
 		RefreshToken: refreshToken.Formatted,
-		Expiry:       key.ExpiresAt,
 		ExpiresIn:    int64(time.Until(key.ExpiresAt).Seconds()),
+		Expiry:       &key.ExpiresAt,
 	}, nil
 }
 

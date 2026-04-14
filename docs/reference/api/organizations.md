@@ -1,92 +1,5 @@
 # Organizations
 
-## Add new license
-
-### Code samples
-
-```shell
-# Example request using curl
-curl -X POST http://coder-server:8080/api/v2/licenses \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json' \
-  -H 'Coder-Session-Token: API_KEY'
-```
-
-`POST /licenses`
-
-> Body parameter
-
-```json
-{
-  "license": "string"
-}
-```
-
-### Parameters
-
-| Name   | In   | Type                                                               | Required | Description         |
-|--------|------|--------------------------------------------------------------------|----------|---------------------|
-| `body` | body | [codersdk.AddLicenseRequest](schemas.md#codersdkaddlicenserequest) | true     | Add license request |
-
-### Example responses
-
-> 201 Response
-
-```json
-{
-  "claims": {},
-  "id": 0,
-  "uploaded_at": "2019-08-24T14:15:22Z",
-  "uuid": "095be615-a8ad-4c33-8e9c-c7612fbf6c9f"
-}
-```
-
-### Responses
-
-| Status | Meaning                                                      | Description | Schema                                         |
-|--------|--------------------------------------------------------------|-------------|------------------------------------------------|
-| 201    | [Created](https://tools.ietf.org/html/rfc7231#section-6.3.2) | Created     | [codersdk.License](schemas.md#codersdklicense) |
-
-To perform this operation, you must be authenticated. [Learn more](authentication.md).
-
-## Update license entitlements
-
-### Code samples
-
-```shell
-# Example request using curl
-curl -X POST http://coder-server:8080/api/v2/licenses/refresh-entitlements \
-  -H 'Accept: application/json' \
-  -H 'Coder-Session-Token: API_KEY'
-```
-
-`POST /licenses/refresh-entitlements`
-
-### Example responses
-
-> 201 Response
-
-```json
-{
-  "detail": "string",
-  "message": "string",
-  "validations": [
-    {
-      "detail": "string",
-      "field": "string"
-    }
-  ]
-}
-```
-
-### Responses
-
-| Status | Meaning                                                      | Description | Schema                                           |
-|--------|--------------------------------------------------------------|-------------|--------------------------------------------------|
-| 201    | [Created](https://tools.ietf.org/html/rfc7231#section-6.3.2) | Created     | [codersdk.Response](schemas.md#codersdkresponse) |
-
-To perform this operation, you must be authenticated. [Learn more](authentication.md).
-
 ## Get organizations
 
 ### Code samples
@@ -370,21 +283,9 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/provisi
 
 #### Enumerated Values
 
-| Parameter | Value       |
-|-----------|-------------|
-| `status`  | `pending`   |
-| `status`  | `running`   |
-| `status`  | `succeeded` |
-| `status`  | `canceling` |
-| `status`  | `canceled`  |
-| `status`  | `failed`    |
-| `status`  | `unknown`   |
-| `status`  | `pending`   |
-| `status`  | `running`   |
-| `status`  | `succeeded` |
-| `status`  | `canceling` |
-| `status`  | `canceled`  |
-| `status`  | `failed`    |
+| Parameter | Value(s)                                                                        |
+|-----------|---------------------------------------------------------------------------------|
+| `status`  | `canceled`, `canceling`, `failed`, `pending`, `running`, `succeeded`, `unknown` |
 
 ### Example responses
 
@@ -416,6 +317,7 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/provisi
       "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
       "template_name": "string",
       "template_version_name": "string",
+      "workspace_build_transition": "start",
       "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
       "workspace_name": "string"
     },
@@ -445,56 +347,51 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/provisi
 
 Status Code **200**
 
-| Name                       | Type                                                                         | Required | Restrictions | Description |
-|----------------------------|------------------------------------------------------------------------------|----------|--------------|-------------|
-| `[array item]`             | array                                                                        | false    |              |             |
-| `» available_workers`      | array                                                                        | false    |              |             |
-| `» canceled_at`            | string(date-time)                                                            | false    |              |             |
-| `» completed_at`           | string(date-time)                                                            | false    |              |             |
-| `» created_at`             | string(date-time)                                                            | false    |              |             |
-| `» error`                  | string                                                                       | false    |              |             |
-| `» error_code`             | [codersdk.JobErrorCode](schemas.md#codersdkjoberrorcode)                     | false    |              |             |
-| `» file_id`                | string(uuid)                                                                 | false    |              |             |
-| `» id`                     | string(uuid)                                                                 | false    |              |             |
-| `» initiator_id`           | string(uuid)                                                                 | false    |              |             |
-| `» input`                  | [codersdk.ProvisionerJobInput](schemas.md#codersdkprovisionerjobinput)       | false    |              |             |
-| `»» error`                 | string                                                                       | false    |              |             |
-| `»» template_version_id`   | string(uuid)                                                                 | false    |              |             |
-| `»» workspace_build_id`    | string(uuid)                                                                 | false    |              |             |
-| `» logs_overflowed`        | boolean                                                                      | false    |              |             |
-| `» metadata`               | [codersdk.ProvisionerJobMetadata](schemas.md#codersdkprovisionerjobmetadata) | false    |              |             |
-| `»» template_display_name` | string                                                                       | false    |              |             |
-| `»» template_icon`         | string                                                                       | false    |              |             |
-| `»» template_id`           | string(uuid)                                                                 | false    |              |             |
-| `»» template_name`         | string                                                                       | false    |              |             |
-| `»» template_version_name` | string                                                                       | false    |              |             |
-| `»» workspace_id`          | string(uuid)                                                                 | false    |              |             |
-| `»» workspace_name`        | string                                                                       | false    |              |             |
-| `» organization_id`        | string(uuid)                                                                 | false    |              |             |
-| `» queue_position`         | integer                                                                      | false    |              |             |
-| `» queue_size`             | integer                                                                      | false    |              |             |
-| `» started_at`             | string(date-time)                                                            | false    |              |             |
-| `» status`                 | [codersdk.ProvisionerJobStatus](schemas.md#codersdkprovisionerjobstatus)     | false    |              |             |
-| `» tags`                   | object                                                                       | false    |              |             |
-| `»» [any property]`        | string                                                                       | false    |              |             |
-| `» type`                   | [codersdk.ProvisionerJobType](schemas.md#codersdkprovisionerjobtype)         | false    |              |             |
-| `» worker_id`              | string(uuid)                                                                 | false    |              |             |
-| `» worker_name`            | string                                                                       | false    |              |             |
+| Name                            | Type                                                                         | Required | Restrictions | Description |
+|---------------------------------|------------------------------------------------------------------------------|----------|--------------|-------------|
+| `[array item]`                  | array                                                                        | false    |              |             |
+| `» available_workers`           | array                                                                        | false    |              |             |
+| `» canceled_at`                 | string(date-time)                                                            | false    |              |             |
+| `» completed_at`                | string(date-time)                                                            | false    |              |             |
+| `» created_at`                  | string(date-time)                                                            | false    |              |             |
+| `» error`                       | string                                                                       | false    |              |             |
+| `» error_code`                  | [codersdk.JobErrorCode](schemas.md#codersdkjoberrorcode)                     | false    |              |             |
+| `» file_id`                     | string(uuid)                                                                 | false    |              |             |
+| `» id`                          | string(uuid)                                                                 | false    |              |             |
+| `» initiator_id`                | string(uuid)                                                                 | false    |              |             |
+| `» input`                       | [codersdk.ProvisionerJobInput](schemas.md#codersdkprovisionerjobinput)       | false    |              |             |
+| `»» error`                      | string                                                                       | false    |              |             |
+| `»» template_version_id`        | string(uuid)                                                                 | false    |              |             |
+| `»» workspace_build_id`         | string(uuid)                                                                 | false    |              |             |
+| `» logs_overflowed`             | boolean                                                                      | false    |              |             |
+| `» metadata`                    | [codersdk.ProvisionerJobMetadata](schemas.md#codersdkprovisionerjobmetadata) | false    |              |             |
+| `»» template_display_name`      | string                                                                       | false    |              |             |
+| `»» template_icon`              | string                                                                       | false    |              |             |
+| `»» template_id`                | string(uuid)                                                                 | false    |              |             |
+| `»» template_name`              | string                                                                       | false    |              |             |
+| `»» template_version_name`      | string                                                                       | false    |              |             |
+| `»» workspace_build_transition` | [codersdk.WorkspaceTransition](schemas.md#codersdkworkspacetransition)       | false    |              |             |
+| `»» workspace_id`               | string(uuid)                                                                 | false    |              |             |
+| `»» workspace_name`             | string                                                                       | false    |              |             |
+| `» organization_id`             | string(uuid)                                                                 | false    |              |             |
+| `» queue_position`              | integer                                                                      | false    |              |             |
+| `» queue_size`                  | integer                                                                      | false    |              |             |
+| `» started_at`                  | string(date-time)                                                            | false    |              |             |
+| `» status`                      | [codersdk.ProvisionerJobStatus](schemas.md#codersdkprovisionerjobstatus)     | false    |              |             |
+| `» tags`                        | object                                                                       | false    |              |             |
+| `»» [any property]`             | string                                                                       | false    |              |             |
+| `» type`                        | [codersdk.ProvisionerJobType](schemas.md#codersdkprovisionerjobtype)         | false    |              |             |
+| `» worker_id`                   | string(uuid)                                                                 | false    |              |             |
+| `» worker_name`                 | string                                                                       | false    |              |             |
 
 #### Enumerated Values
 
-| Property     | Value                         |
-|--------------|-------------------------------|
-| `error_code` | `REQUIRED_TEMPLATE_VARIABLES` |
-| `status`     | `pending`                     |
-| `status`     | `running`                     |
-| `status`     | `succeeded`                   |
-| `status`     | `canceling`                   |
-| `status`     | `canceled`                    |
-| `status`     | `failed`                      |
-| `type`       | `template_version_import`     |
-| `type`       | `workspace_build`             |
-| `type`       | `template_version_dry_run`    |
+| Property                     | Value(s)                                                                 |
+|------------------------------|--------------------------------------------------------------------------|
+| `error_code`                 | `REQUIRED_TEMPLATE_VARIABLES`                                            |
+| `workspace_build_transition` | `delete`, `start`, `stop`                                                |
+| `status`                     | `canceled`, `canceling`, `failed`, `pending`, `running`, `succeeded`     |
+| `type`                       | `template_version_dry_run`, `template_version_import`, `workspace_build` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -547,6 +444,7 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/provisi
     "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
     "template_name": "string",
     "template_version_name": "string",
+    "workspace_build_transition": "start",
     "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
     "workspace_name": "string"
   },

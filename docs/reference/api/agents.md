@@ -483,22 +483,30 @@ curl -X GET http://coder-server:8080/api/v2/workspaceagents/me/reinit \
 
 `GET /workspaceagents/me/reinit`
 
+### Parameters
+
+| Name   | In    | Type    | Required | Description                     |
+|--------|-------|---------|----------|---------------------------------|
+| `wait` | query | boolean | false    | Opt in to durable reinit checks |
+
 ### Example responses
 
 > 200 Response
 
 ```json
 {
+  "owner_id": "8826ee2e-7933-4665-aef2-2393f84a0d05",
   "reason": "prebuild_claimed",
-  "workspaceID": "string"
+  "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9"
 }
 ```
 
 ### Responses
 
-| Status | Meaning                                                 | Description | Schema                                                                     |
-|--------|---------------------------------------------------------|-------------|----------------------------------------------------------------------------|
-| 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | [agentsdk.ReinitializationEvent](schemas.md#agentsdkreinitializationevent) |
+| Status | Meaning                                                       | Description | Schema                                                                     |
+|--------|---------------------------------------------------------------|-------------|----------------------------------------------------------------------------|
+| 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)       | OK          | [agentsdk.ReinitializationEvent](schemas.md#agentsdkreinitializationevent) |
+| 409    | [Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8) | Conflict    | [codersdk.Response](schemas.md#codersdkresponse)                           |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -838,6 +846,10 @@ curl -X GET http://coder-server:8080/api/v2/workspaceagents/{workspaceagent}/con
       "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
       "name": "string",
       "status": "running",
+      "subagent_id": {
+        "uuid": "string",
+        "valid": true
+      },
       "workspace_folder": "string"
     }
   ],
@@ -852,6 +864,33 @@ curl -X GET http://coder-server:8080/api/v2/workspaceagents/{workspaceagent}/con
 | Status | Meaning                                                 | Description | Schema                                                                                                   |
 |--------|---------------------------------------------------------|-------------|----------------------------------------------------------------------------------------------------------|
 | 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | [codersdk.WorkspaceAgentListContainersResponse](schemas.md#codersdkworkspaceagentlistcontainersresponse) |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
+## Delete devcontainer for workspace agent
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X DELETE http://coder-server:8080/api/v2/workspaceagents/{workspaceagent}/containers/devcontainers/{devcontainer} \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`DELETE /workspaceagents/{workspaceagent}/containers/devcontainers/{devcontainer}`
+
+### Parameters
+
+| Name             | In   | Type         | Required | Description        |
+|------------------|------|--------------|----------|--------------------|
+| `workspaceagent` | path | string(uuid) | true     | Workspace agent ID |
+| `devcontainer`   | path | string       | true     | Devcontainer ID    |
+
+### Responses
+
+| Status | Meaning                                                         | Description | Schema |
+|--------|-----------------------------------------------------------------|-------------|--------|
+| 204    | [No Content](https://tools.ietf.org/html/rfc7231#section-6.3.5) | No Content  |        |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -988,6 +1027,10 @@ curl -X GET http://coder-server:8080/api/v2/workspaceagents/{workspaceagent}/con
       "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
       "name": "string",
       "status": "running",
+      "subagent_id": {
+        "uuid": "string",
+        "valid": true
+      },
       "workspace_folder": "string"
     }
   ],
@@ -1089,13 +1132,20 @@ curl -X GET http://coder-server:8080/api/v2/workspaceagents/{workspaceagent}/log
 
 ### Parameters
 
-| Name             | In    | Type         | Required | Description                                  |
-|------------------|-------|--------------|----------|----------------------------------------------|
-| `workspaceagent` | path  | string(uuid) | true     | Workspace agent ID                           |
-| `before`         | query | integer      | false    | Before log id                                |
-| `after`          | query | integer      | false    | After log id                                 |
-| `follow`         | query | boolean      | false    | Follow log stream                            |
-| `no_compression` | query | boolean      | false    | Disable compression for WebSocket connection |
+| Name             | In    | Type         | Required | Description                                                                                                                                 |
+|------------------|-------|--------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `workspaceagent` | path  | string(uuid) | true     | Workspace agent ID                                                                                                                          |
+| `before`         | query | integer      | false    | Before log id                                                                                                                               |
+| `after`          | query | integer      | false    | After log id                                                                                                                                |
+| `follow`         | query | boolean      | false    | Follow log stream                                                                                                                           |
+| `no_compression` | query | boolean      | false    | Disable compression for WebSocket connection                                                                                                |
+| `format`         | query | string       | false    | Log output format. Accepted: 'json' (default), 'text' (plain text with RFC3339 timestamps and ANSI colors). Not supported with follow=true. |
+
+#### Enumerated Values
+
+| Parameter | Value(s)       |
+|-----------|----------------|
+| `format`  | `json`, `text` |
 
 ### Example responses
 
@@ -1134,13 +1184,9 @@ Status Code **200**
 
 #### Enumerated Values
 
-| Property | Value   |
-|----------|---------|
-| `level`  | `trace` |
-| `level`  | `debug` |
-| `level`  | `info`  |
-| `level`  | `warn`  |
-| `level`  | `error` |
+| Property | Value(s)                                  |
+|----------|-------------------------------------------|
+| `level`  | `debug`, `error`, `info`, `trace`, `warn` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -1230,12 +1276,8 @@ Status Code **200**
 
 #### Enumerated Values
 
-| Property | Value   |
-|----------|---------|
-| `level`  | `trace` |
-| `level`  | `debug` |
-| `level`  | `info`  |
-| `level`  | `warn`  |
-| `level`  | `error` |
+| Property | Value(s)                                  |
+|----------|-------------------------------------------|
+| `level`  | `debug`, `error`, `info`, `trace`, `warn` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).

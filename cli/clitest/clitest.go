@@ -17,20 +17,35 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/cli"
 	"github.com/coder/coder/v2/cli/config"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/provisioner/echo"
 	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/quartz"
 	"github.com/coder/serpent"
 )
 
 // New creates a CLI instance with a configuration pointed to a
-// temporary testing directory.
+// temporary testing directory. The invocation is set up to use a
+// global config directory for the given testing.TB, and keyring
+// usage disabled.
 func New(t testing.TB, args ...string) (*serpent.Invocation, config.Root) {
 	var root cli.RootCmd
+
+	cmd, err := root.Command(root.AGPL())
+	require.NoError(t, err)
+
+	return NewWithCommand(t, cmd, args...)
+}
+
+// NewWithClock is like New, but injects the given clock for
+// tests that are time-dependent.
+func NewWithClock(t testing.TB, clk quartz.Clock, args ...string) (*serpent.Invocation, config.Root) {
+	var root cli.RootCmd
+	root.SetClock(clk)
 
 	cmd, err := root.Command(root.AGPL())
 	require.NoError(t, err)
@@ -59,6 +74,15 @@ func NewWithCommand(
 	t testing.TB, cmd *serpent.Command, args ...string,
 ) (*serpent.Invocation, config.Root) {
 	configDir := config.Root(t.TempDir())
+	// Keyring usage is disabled here when --global-config is set because many existing
+	// tests expect the session token to be stored on disk and is not properly instrumented
+	// for parallel testing against the actual operating system keyring.
+	invArgs := append([]string{"--global-config", string(configDir)}, args...)
+	return setupInvocation(t, cmd, invArgs...), configDir
+}
+
+func setupInvocation(t testing.TB, cmd *serpent.Command, args ...string,
+) *serpent.Invocation {
 	// I really would like to fail test on error logs, but realistically, turning on by default
 	// in all our CLI tests is going to create a lot of flaky noise.
 	logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).
@@ -66,16 +90,21 @@ func NewWithCommand(
 		Named("cli")
 	i := &serpent.Invocation{
 		Command: cmd,
-		Args:    append([]string{"--global-config", string(configDir)}, args...),
+		Args:    args,
 		Stdin:   io.LimitReader(nil, 0),
 		Stdout:  (&logWriter{prefix: "stdout", log: logger}),
 		Stderr:  (&logWriter{prefix: "stderr", log: logger}),
 		Logger:  logger,
 	}
 	t.Logf("invoking command: %s %s", cmd.Name(), strings.Join(i.Args, " "))
+	return i
+}
 
-	// These can be overridden by the test.
-	return i, configDir
+func NewWithDefaultKeyringCommand(t testing.TB, cmd *serpent.Command, args ...string,
+) (*serpent.Invocation, config.Root) {
+	configDir := config.Root(t.TempDir())
+	invArgs := append([]string{"--global-config", string(configDir)}, args...)
+	return setupInvocation(t, cmd, invArgs...), configDir
 }
 
 // SetupConfig applies the URL and SessionToken of the client to the config.
@@ -144,7 +173,10 @@ func Start(t *testing.T, inv *serpent.Invocation) {
 	StartWithAssert(t, inv, nil)
 }
 
-func StartWithAssert(t *testing.T, inv *serpent.Invocation, assertCallback func(t *testing.T, err error)) { //nolint:revive
+// StartWithAssert starts the given invocation and calls assertCallback
+// with the resulting error when the invocation completes. If assertCallback
+// is nil, expected shutdown errors are silently tolerated.
+func StartWithAssert(t *testing.T, inv *serpent.Invocation, assertCallback func(t *testing.T, err error)) {
 	t.Helper()
 
 	closeCh := make(chan struct{})

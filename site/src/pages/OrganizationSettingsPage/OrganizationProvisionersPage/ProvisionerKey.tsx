@@ -1,16 +1,15 @@
+import { InfoIcon } from "lucide-react";
+import type { FC, ReactNode } from "react";
 import {
 	ProvisionerKeyNameBuiltIn,
 	ProvisionerKeyNamePSK,
 	ProvisionerKeyNameUserAuth,
-} from "api/typesGenerated";
+} from "#/api/typesGenerated";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import { InfoIcon } from "lucide-react";
-import type { FC, ReactNode } from "react";
+} from "#/components/Tooltip/Tooltip";
 
 type KeyType = "builtin" | "userAuth" | "psk" | "key";
 
@@ -63,22 +62,20 @@ export const ProvisionerKey: FC<ProvisionerKeyProps> = ({ name }) => {
 		<span className="flex items-center gap-1 whitespace-nowrap text-xs font-medium text-content-secondary">
 			{name}
 			{info && (
-				<TooltipProvider>
-					<Tooltip delayDuration={0}>
-						<TooltipTrigger asChild>
-							<span className="flex items-center">
-								<span className="sr-only">More info</span>
-								<InfoIcon
-									tabIndex={0}
-									className="cursor-pointer size-icon-xs p-0.5"
-								/>
-							</span>
-						</TooltipTrigger>
-						<TooltipContent className="max-w-xs">
-							{infoByType[type]}
-						</TooltipContent>
-					</Tooltip>
-				</TooltipProvider>
+				<Tooltip>
+					<TooltipTrigger asChild>
+						<span className="flex items-center">
+							<span className="sr-only">More info</span>
+							<InfoIcon
+								tabIndex={0}
+								className="cursor-pointer size-icon-xs p-0.5"
+							/>
+						</span>
+					</TooltipTrigger>
+					<TooltipContent className="max-w-xs">
+						{infoByType[type]}
+					</TooltipContent>
+				</Tooltip>
 			)}
 		</span>
 	);

@@ -10,6 +10,8 @@ const (
 	ResourceAssignOrgRole                 RBACResource = "assign_org_role"
 	ResourceAssignRole                    RBACResource = "assign_role"
 	ResourceAuditLog                      RBACResource = "audit_log"
+	ResourceBoundaryUsage                 RBACResource = "boundary_usage"
+	ResourceChat                          RBACResource = "chat"
 	ResourceConnectionLog                 RBACResource = "connection_log"
 	ResourceCryptoKey                     RBACResource = "crypto_key"
 	ResourceDebugInfo                     RBACResource = "debug_info"
@@ -35,6 +37,7 @@ const (
 	ResourceReplicas                      RBACResource = "replicas"
 	ResourceSystem                        RBACResource = "system"
 	ResourceTailnetCoordinator            RBACResource = "tailnet_coordinator"
+	ResourceTask                          RBACResource = "task"
 	ResourceTemplate                      RBACResource = "template"
 	ResourceUsageEvent                    RBACResource = "usage_event"
 	ResourceUser                          RBACResource = "user"
@@ -59,8 +62,10 @@ const (
 	ActionRead               RBACAction = "read"
 	ActionReadPersonal       RBACAction = "read_personal"
 	ActionSSH                RBACAction = "ssh"
+	ActionShare              RBACAction = "share"
 	ActionUnassign           RBACAction = "unassign"
 	ActionUpdate             RBACAction = "update"
+	ActionUpdateAgent        RBACAction = "update_agent"
 	ActionUpdatePersonal     RBACAction = "update_personal"
 	ActionUse                RBACAction = "use"
 	ActionViewInsights       RBACAction = "view_insights"
@@ -77,6 +82,8 @@ var RBACResourceActions = map[RBACResource][]RBACAction{
 	ResourceAssignOrgRole:                 {ActionAssign, ActionCreate, ActionDelete, ActionRead, ActionUnassign, ActionUpdate},
 	ResourceAssignRole:                    {ActionAssign, ActionRead, ActionUnassign},
 	ResourceAuditLog:                      {ActionCreate, ActionRead},
+	ResourceBoundaryUsage:                 {ActionDelete, ActionRead, ActionUpdate},
+	ResourceChat:                          {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceConnectionLog:                 {ActionRead, ActionUpdate},
 	ResourceCryptoKey:                     {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceDebugInfo:                     {ActionRead},
@@ -102,14 +109,15 @@ var RBACResourceActions = map[RBACResource][]RBACAction{
 	ResourceReplicas:                      {ActionRead},
 	ResourceSystem:                        {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceTailnetCoordinator:            {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
+	ResourceTask:                          {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceTemplate:                      {ActionCreate, ActionDelete, ActionRead, ActionUpdate, ActionUse, ActionViewInsights},
 	ResourceUsageEvent:                    {ActionCreate, ActionRead, ActionUpdate},
 	ResourceUser:                          {ActionCreate, ActionDelete, ActionRead, ActionReadPersonal, ActionUpdate, ActionUpdatePersonal},
 	ResourceUserSecret:                    {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 	ResourceWebpushSubscription:           {ActionCreate, ActionDelete, ActionRead},
-	ResourceWorkspace:                     {ActionApplicationConnect, ActionCreate, ActionCreateAgent, ActionDelete, ActionDeleteAgent, ActionRead, ActionSSH, ActionWorkspaceStart, ActionWorkspaceStop, ActionUpdate},
+	ResourceWorkspace:                     {ActionApplicationConnect, ActionCreate, ActionCreateAgent, ActionDelete, ActionDeleteAgent, ActionRead, ActionShare, ActionSSH, ActionWorkspaceStart, ActionWorkspaceStop, ActionUpdate, ActionUpdateAgent},
 	ResourceWorkspaceAgentDevcontainers:   {ActionCreate},
 	ResourceWorkspaceAgentResourceMonitor: {ActionCreate, ActionRead, ActionUpdate},
-	ResourceWorkspaceDormant:              {ActionApplicationConnect, ActionCreate, ActionCreateAgent, ActionDelete, ActionDeleteAgent, ActionRead, ActionSSH, ActionWorkspaceStart, ActionWorkspaceStop, ActionUpdate},
+	ResourceWorkspaceDormant:              {ActionApplicationConnect, ActionCreate, ActionCreateAgent, ActionDelete, ActionDeleteAgent, ActionRead, ActionShare, ActionSSH, ActionWorkspaceStart, ActionWorkspaceStop, ActionUpdate, ActionUpdateAgent},
 	ResourceWorkspaceProxy:                {ActionCreate, ActionDelete, ActionRead, ActionUpdate},
 }

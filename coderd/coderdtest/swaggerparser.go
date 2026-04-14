@@ -147,6 +147,10 @@ func parseSwaggerComment(commentGroup *ast.CommentGroup) SwaggerComment {
 	return c
 }
 
+func isExperimentalEndpoint(route string) bool {
+	return strings.HasPrefix(route, "/workspaceagents/me/experimental/")
+}
+
 func VerifySwaggerDefinitions(t *testing.T, router chi.Router, swaggerComments []SwaggerComment) {
 	assertUniqueRoutes(t, swaggerComments)
 	assertSingleAnnotations(t, swaggerComments)
@@ -160,8 +164,12 @@ func VerifySwaggerDefinitions(t *testing.T, router chi.Router, swaggerComments [
 		t.Run(method+" "+route, func(t *testing.T) {
 			t.Parallel()
 
-			// This route is for compatibility purposes and is not documented.
-			if route == "/workspaceagents/me/metadata" {
+			// Wildcard routes break the swaggo parser, so we do not document
+			// them.
+			if strings.HasSuffix(route, "/*") {
+				return
+			}
+			if isExperimentalEndpoint(route) {
 				return
 			}
 
@@ -342,7 +350,7 @@ func assertAccept(t *testing.T, comment SwaggerComment) {
 	}
 }
 
-var allowedProduceTypes = []string{"json", "text/event-stream", "text/html"}
+var allowedProduceTypes = []string{"json", "text/event-stream", "text/html", "text/plain"}
 
 func assertProduce(t *testing.T, comment SwaggerComment) {
 	var hasResponseModel bool

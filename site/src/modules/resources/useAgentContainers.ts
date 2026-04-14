@@ -1,35 +1,34 @@
-import { API, watchAgentContainers } from "api/api";
+import { useEffect, useEffectEvent } from "react";
+import { useQuery, useQueryClient } from "react-query";
+import { toast } from "sonner";
+import { watchAgentContainers } from "#/api/api";
+import {
+	workspaceAgentContainers,
+	workspaceAgentContainersKey,
+} from "#/api/queries/workspaces";
 import type {
 	WorkspaceAgent,
 	WorkspaceAgentDevcontainer,
 	WorkspaceAgentListContainersResponse,
-} from "api/typesGenerated";
-import { displayError } from "components/GlobalSnackbar/utils";
-import { useEffectEvent } from "hooks/hookPolyfills";
-import { useEffect } from "react";
-import { useQuery, useQueryClient } from "react-query";
+} from "#/api/typesGenerated";
 
 export function useAgentContainers(
 	agent: WorkspaceAgent,
 ): readonly WorkspaceAgentDevcontainer[] | undefined {
 	const queryClient = useQueryClient();
+	const queryKey = workspaceAgentContainersKey(agent.id);
 
 	const {
 		data: devcontainers,
 		error: queryError,
 		isLoading: queryIsLoading,
 	} = useQuery({
-		queryKey: ["agents", agent.id, "containers"],
-		queryFn: () => API.getAgentContainers(agent.id),
-		enabled: agent.status === "connected",
+		...workspaceAgentContainers(agent),
 		select: (res) => res.devcontainers,
-		staleTime: Number.POSITIVE_INFINITY,
 	});
 
 	const updateDevcontainersCache = useEffectEvent(
 		async (data: WorkspaceAgentListContainersResponse) => {
-			const queryKey = ["agents", agent.id, "containers"];
-
 			queryClient.setQueryData(queryKey, data);
 		},
 	);
@@ -43,10 +42,9 @@ export function useAgentContainers(
 
 		socket.addEventListener("message", (event) => {
 			if (event.parseError) {
-				displayError(
-					"Failed to update containers",
-					"Please try refreshing the page",
-				);
+				toast.error("Failed to update containers.", {
+					description: "Please try refreshing the page.",
+				});
 				return;
 			}
 
@@ -54,20 +52,13 @@ export function useAgentContainers(
 		});
 
 		socket.addEventListener("error", () => {
-			displayError(
-				"Failed to load containers",
-				"Please try refreshing the page",
-			);
+			toast.error("Failed to load containers.", {
+				description: "Please try refreshing the page.",
+			});
 		});
 
 		return () => socket.close();
-	}, [
-		agent.id,
-		agent.status,
-		queryIsLoading,
-		queryError,
-		updateDevcontainersCache,
-	]);
+	}, [agent.id, agent.status, queryIsLoading, queryError]);
 
 	return devcontainers;
 }

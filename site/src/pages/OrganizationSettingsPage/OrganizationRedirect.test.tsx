@@ -1,18 +1,18 @@
+import { screen } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import {
 	MockDefaultOrganization,
 	MockEntitlementsWithMultiOrg,
 	MockOrganization2,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	renderWithOrganizationSettingsLayout,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { server } from "testHelpers/server";
-import { screen } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
+} from "#/testHelpers/renderHelpers";
+import { server } from "#/testHelpers/server";
 import OrganizationRedirect from "./OrganizationRedirect";
 
-jest.spyOn(console, "error").mockImplementation(() => {});
+vi.spyOn(console, "error").mockImplementation(() => {});
 
 const renderPage = async () => {
 	const { router } = renderWithOrganizationSettingsLayout(

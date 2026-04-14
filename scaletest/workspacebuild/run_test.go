@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/agent"
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/codersdk"
@@ -58,7 +57,14 @@ func Test_Runner(t *testing.T) {
 				},
 				{
 					Type: &proto.Response_Apply{
-						Apply: &proto.ApplyComplete{
+						Apply: &proto.ApplyComplete{},
+					},
+				},
+			},
+			ProvisionGraph: []*proto.Response{
+				{
+					Type: &proto.Response_Graph{
+						Graph: &proto.GraphComplete{
 							Resources: []*proto.Resource{
 								{
 									Name: "example1",
@@ -111,25 +117,23 @@ func Test_Runner(t *testing.T) {
 		// finish, then start the agents.
 		go func() {
 			var workspace codersdk.Workspace
-			for {
+			if !assert.Eventually(t, func() bool {
 				res, err := client.Workspaces(ctx, codersdk.WorkspaceFilter{
 					Owner: codersdk.Me,
 				})
-				if !assert.NoError(t, err) {
-					return
+				if err != nil {
+					return false
 				}
-				workspaces := res.Workspaces
-
-				if len(workspaces) == 1 {
-					workspace = workspaces[0]
-					break
+				if len(res.Workspaces) == 1 {
+					workspace = res.Workspaces[0]
+					return true
 				}
-
-				time.Sleep(100 * time.Millisecond)
+				return false
+			}, testutil.WaitShort, testutil.IntervalMedium) {
+				return
 			}
 
 			coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
-
 			// Start the three agents.
 			for i, authToken := range []string{authToken1, authToken2, authToken3} {
 				i := i + 1
@@ -245,8 +249,10 @@ func Test_Runner(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse:         echo.ParseComplete,
-			ProvisionPlan: echo.PlanComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionPlan:  echo.PlanComplete,
+			ProvisionInit:  echo.InitComplete,
+			ProvisionGraph: echo.GraphComplete,
 			ProvisionApply: []*proto.Response{
 				{
 					Type: &proto.Response_Apply{

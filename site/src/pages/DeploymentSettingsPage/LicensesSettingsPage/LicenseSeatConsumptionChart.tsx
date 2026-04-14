@@ -1,17 +1,3 @@
-import { Button } from "components/Button/Button";
-import {
-	type ChartConfig,
-	ChartContainer,
-	ChartTooltip,
-	ChartTooltipContent,
-} from "components/Chart/Chart";
-import {
-	Collapsible,
-	CollapsibleContent,
-	CollapsibleTrigger,
-} from "components/Collapsible/Collapsible";
-import { Link } from "components/Link/Link";
-import { Spinner } from "components/Spinner/Spinner";
 import { ChevronRightIcon } from "lucide-react";
 import type { FC } from "react";
 import { Link as RouterLink } from "react-router";
@@ -23,12 +9,27 @@ import {
 	XAxis,
 	YAxis,
 } from "recharts";
-import { docs } from "utils/docs";
+import { Button } from "#/components/Button/Button";
+import {
+	type ChartConfig,
+	ChartContainer,
+	ChartTooltip,
+	ChartTooltipContent,
+} from "#/components/Chart/Chart";
+import {
+	Collapsible,
+	CollapsibleContent,
+	CollapsibleTrigger,
+} from "#/components/Collapsible/Collapsible";
+import { Link } from "#/components/Link/Link";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { docs } from "#/utils/docs";
+import { formatDate } from "#/utils/time";
 
 const chartConfig = {
 	users: {
 		label: "Users",
-		color: "hsl(var(--highlight-green))",
+		color: "hsl(var(--highlight-purple))",
 	},
 } satisfies ChartConfig;
 
@@ -153,9 +154,13 @@ export const LicenseSeatConsumptionChart: FC<
 										tickMargin={12}
 										minTickGap={24}
 										tickFormatter={(value: string) =>
-											new Date(value).toLocaleDateString(undefined, {
+											formatDate(new Date(value), {
 												month: "short",
 												day: "numeric",
+												year: undefined,
+												hour: undefined,
+												minute: undefined,
+												second: undefined,
 											})
 										}
 									/>
@@ -207,7 +212,7 @@ export const LicenseSeatConsumptionChart: FC<
 
 									<Area
 										dataKey="users"
-										type="natural"
+										type="linear"
 										fill="url(#fillUsers)"
 										fillOpacity={0.4}
 										stroke="var(--color-users)"

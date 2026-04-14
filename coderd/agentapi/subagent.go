@@ -13,20 +13,18 @@ import (
 	"github.com/sqlc-dev/pqtype"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"github.com/coder/quartz"
-
+	"cdr.dev/slog/v3"
 	agentproto "github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/provisioner"
+	"github.com/coder/quartz"
 )
 
 type SubAgentAPI struct {
 	OwnerID        uuid.UUID
 	OrganizationID uuid.UUID
-	AgentID        uuid.UUID
 	AgentFn        func(context.Context) (database.WorkspaceAgent, error)
 
 	Log      slog.Logger
@@ -37,25 +35,6 @@ type SubAgentAPI struct {
 func (a *SubAgentAPI) CreateSubAgent(ctx context.Context, req *agentproto.CreateSubAgentRequest) (*agentproto.CreateSubAgentResponse, error) {
 	//nolint:gocritic // This gives us only the permissions required to do the job.
 	ctx = dbauthz.AsSubAgentAPI(ctx, a.OrganizationID, a.OwnerID)
-
-	parentAgent, err := a.AgentFn(ctx)
-	if err != nil {
-		return nil, xerrors.Errorf("get parent agent: %w", err)
-	}
-
-	agentName := req.Name
-	if agentName == "" {
-		return nil, codersdk.ValidationError{
-			Field:  "name",
-			Detail: "agent name cannot be empty",
-		}
-	}
-	if !provisioner.AgentNameRegex.MatchString(agentName) {
-		return nil, codersdk.ValidationError{
-			Field:  "name",
-			Detail: fmt.Sprintf("agent name %q does not match regex %q", agentName, provisioner.AgentNameRegex),
-		}
-	}
 
 	createdAt := a.Clock.Now()
 
@@ -84,6 +63,72 @@ func (a *SubAgentAPI) CreateSubAgent(ctx context.Context, req *agentproto.Create
 		displayApps = append(displayApps, app)
 	}
 
+	parentAgent, err := a.AgentFn(ctx)
+	if err != nil {
+		return nil, xerrors.Errorf("get parent agent: %w", err)
+	}
+
+	// An ID is only given in the request when it is a terraform-defined devcontainer
+	// that has attached resources. These subagents are pre-provisioned by terraform
+	// (the agent record already exists), so we update configurable fields like
+	// display_apps and directory rather than creating a new agent.
+	if req.Id != nil {
+		id, err := uuid.FromBytes(req.Id)
+		if err != nil {
+			return nil, xerrors.Errorf("parse agent id: %w", err)
+		}
+
+		subAgent, err := a.Database.GetWorkspaceAgentByID(ctx, id)
+		if err != nil {
+			return nil, xerrors.Errorf("get workspace agent by id: %w", err)
+		}
+
+		// Validate that the subagent belongs to the current parent agent to
+		// prevent updating subagents from other agents within the same workspace.
+		if !subAgent.ParentID.Valid || subAgent.ParentID.UUID != parentAgent.ID {
+			return nil, xerrors.Errorf("subagent does not belong to this parent agent")
+		}
+
+		if err := a.Database.UpdateWorkspaceAgentDisplayAppsByID(ctx, database.UpdateWorkspaceAgentDisplayAppsByIDParams{
+			ID:          id,
+			DisplayApps: displayApps,
+			UpdatedAt:   createdAt,
+		}); err != nil {
+			return nil, xerrors.Errorf("update workspace agent display apps: %w", err)
+		}
+
+		if req.Directory != "" {
+			if err := a.Database.UpdateWorkspaceAgentDirectoryByID(ctx, database.UpdateWorkspaceAgentDirectoryByIDParams{
+				ID:        id,
+				Directory: req.Directory,
+				UpdatedAt: createdAt,
+			}); err != nil {
+				return nil, xerrors.Errorf("update workspace agent directory: %w", err)
+			}
+		}
+
+		return &agentproto.CreateSubAgentResponse{
+			Agent: &agentproto.SubAgent{
+				Name:      subAgent.Name,
+				Id:        subAgent.ID[:],
+				AuthToken: subAgent.AuthToken[:],
+			},
+		}, nil
+	}
+
+	agentName := req.Name
+	if agentName == "" {
+		return nil, codersdk.ValidationError{
+			Field:  "name",
+			Detail: "agent name cannot be empty",
+		}
+	}
+	if !provisioner.AgentNameRegex.MatchString(agentName) {
+		return nil, codersdk.ValidationError{
+			Field:  "name",
+			Detail: fmt.Sprintf("agent name %q does not match regex %q", agentName, provisioner.AgentNameRegex),
+		}
+	}
 	subAgent, err := a.Database.InsertWorkspaceAgent(ctx, database.InsertWorkspaceAgentParams{
 		ID:                       uuid.New(),
 		ParentID:                 uuid.NullUUID{Valid: true, UUID: parentAgent.ID},
@@ -92,7 +137,7 @@ func (a *SubAgentAPI) CreateSubAgent(ctx context.Context, req *agentproto.Create
 		Name:                     agentName,
 		ResourceID:               parentAgent.ResourceID,
 		AuthToken:                uuid.New(),
-		AuthInstanceID:           parentAgent.AuthInstanceID,
+		AuthInstanceID:           sql.NullString{},
 		Architecture:             req.Architecture,
 		EnvironmentVariables:     pqtype.NullRawMessage{},
 		OperatingSystem:          req.OperatingSystem,
@@ -259,7 +304,12 @@ func (a *SubAgentAPI) ListSubAgents(ctx context.Context, _ *agentproto.ListSubAg
 	//nolint:gocritic // This gives us only the permissions required to do the job.
 	ctx = dbauthz.AsSubAgentAPI(ctx, a.OrganizationID, a.OwnerID)
 
-	workspaceAgents, err := a.Database.GetWorkspaceAgentsByParentID(ctx, a.AgentID)
+	parentAgent, err := a.AgentFn(ctx)
+	if err != nil {
+		return nil, xerrors.Errorf("get parent agent: %w", err)
+	}
+
+	workspaceAgents, err := a.Database.GetWorkspaceAgentsByParentID(ctx, parentAgent.ID)
 	if err != nil {
 		return nil, err
 	}

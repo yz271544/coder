@@ -11,6 +11,7 @@ metadata:
     app.kubernetes.io/name: coder
     app.kubernetes.io/part-of: coder
     app.kubernetes.io/version: 0.1.0
+    com.coder/sa-label: test-value
     helm.sh/chart: coder-0.1.0
   name: coder-service-account
   namespace: default
@@ -123,7 +124,8 @@ spec:
       app.kubernetes.io/name: coder
   template:
     metadata:
-      annotations: {}
+      annotations:
+        app.kubernetes.io/component: coderd
       labels:
         app.kubernetes.io/instance: release-name
         app.kubernetes.io/managed-by: Helm
@@ -167,12 +169,6 @@ spec:
         image: ghcr.io/coder/coder:latest
         imagePullPolicy: IfNotPresent
         lifecycle: {}
-        livenessProbe:
-          httpGet:
-            path: /healthz
-            port: http
-            scheme: HTTP
-          initialDelaySeconds: 0
         name: coder
         ports:
         - containerPort: 8080

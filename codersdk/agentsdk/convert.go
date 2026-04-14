@@ -376,7 +376,7 @@ func ProtoFromLog(log Log) (*proto.Log, error) {
 	}
 	return &proto.Log{
 		CreatedAt: timestamppb.New(log.CreatedAt),
-		Output:    strings.ToValidUTF8(log.Output, "❌"),
+		Output:    SanitizeLogOutput(log.Output),
 		Level:     proto.Log_Level(lvl),
 	}, nil
 }
@@ -425,11 +425,20 @@ func DevcontainerFromProto(pdc *proto.WorkspaceAgentDevcontainer) (codersdk.Work
 	if err != nil {
 		return codersdk.WorkspaceAgentDevcontainer{}, xerrors.Errorf("parse id: %w", err)
 	}
+	var subagentID uuid.NullUUID
+	if pdc.SubagentId != nil {
+		subagentID.Valid = true
+		subagentID.UUID, err = uuid.FromBytes(pdc.SubagentId)
+		if err != nil {
+			return codersdk.WorkspaceAgentDevcontainer{}, xerrors.Errorf("parse subagent id: %w", err)
+		}
+	}
 	return codersdk.WorkspaceAgentDevcontainer{
 		ID:              id,
 		Name:            pdc.Name,
 		WorkspaceFolder: pdc.WorkspaceFolder,
 		ConfigPath:      pdc.ConfigPath,
+		SubagentID:      subagentID,
 	}, nil
 }
 
@@ -442,10 +451,29 @@ func ProtoFromDevcontainers(dcs []codersdk.WorkspaceAgentDevcontainer) []*proto.
 }
 
 func ProtoFromDevcontainer(dc codersdk.WorkspaceAgentDevcontainer) *proto.WorkspaceAgentDevcontainer {
+	var subagentID []byte
+	if dc.SubagentID.Valid {
+		subagentID = dc.SubagentID.UUID[:]
+	}
+
 	return &proto.WorkspaceAgentDevcontainer{
 		Id:              dc.ID[:],
 		Name:            dc.Name,
 		WorkspaceFolder: dc.WorkspaceFolder,
 		ConfigPath:      dc.ConfigPath,
+		SubagentId:      subagentID,
 	}
+}
+
+func ProtoFromPatchAppStatus(pas PatchAppStatus) (*proto.UpdateAppStatusRequest, error) {
+	state, ok := proto.UpdateAppStatusRequest_AppStatusState_value[strings.ToUpper(string(pas.State))]
+	if !ok {
+		return nil, xerrors.Errorf("Invalid state: %s", pas.State)
+	}
+	return &proto.UpdateAppStatusRequest{
+		Slug:    pas.AppSlug,
+		State:   proto.UpdateAppStatusRequest_AppStatusState(state),
+		Message: pas.Message,
+		Uri:     pas.URI,
+	}, nil
 }

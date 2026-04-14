@@ -1,14 +1,13 @@
 import type { Interpolation, Theme } from "@emotion/react";
 import Stack from "@mui/material/Stack";
-import { Pill } from "components/Pill/Pill";
+import type { FC } from "react";
+import { Pill } from "#/components/Pill/Pill";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import type { FC } from "react";
-import { isUUID } from "utils/uuid";
+} from "#/components/Tooltip/Tooltip";
+import { isUUID } from "#/utils/uuid";
 
 interface PillListProps {
 	roles: readonly string[];
@@ -36,25 +35,23 @@ interface OverflowPillProps {
 
 const OverflowPill: FC<OverflowPillProps> = ({ roles }) => {
 	return (
-		<TooltipProvider>
-			<Tooltip delayDuration={0}>
-				<TooltipTrigger asChild>
-					<Pill data-testid="overflow-pill">+{roles.length} more</Pill>
-				</TooltipTrigger>
+		<Tooltip>
+			<TooltipTrigger asChild>
+				<Pill data-testid="overflow-pill">+{roles.length} more</Pill>
+			</TooltipTrigger>
 
-				<TooltipContent className="px-4 py-3 border-surface-quaternary">
-					<ul className="flex flex-col gap-2 list-none my-0 pl-0">
-						{roles.map((role) => (
-							<li key={role}>
-								<Pill css={isUUID(role) ? styles.errorPill : styles.pill}>
-									{role}
-								</Pill>
-							</li>
-						))}
-					</ul>
-				</TooltipContent>
-			</Tooltip>
-		</TooltipProvider>
+			<TooltipContent className="px-4 py-3 border-surface-quaternary">
+				<ul className="flex flex-col gap-2 list-none my-0 pl-0">
+					{roles.map((role) => (
+						<li key={role}>
+							<Pill css={isUUID(role) ? styles.errorPill : styles.pill}>
+								{role}
+							</Pill>
+						</li>
+					))}
+				</ul>
+			</TooltipContent>
+		</Tooltip>
 	);
 };
 

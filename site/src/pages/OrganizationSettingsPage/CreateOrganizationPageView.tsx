@@ -1,32 +1,31 @@
 import TextField from "@mui/material/TextField";
-import { isApiValidationError } from "api/errors";
-import type { CreateOrganizationRequest } from "api/typesGenerated";
-import { ErrorAlert } from "components/Alert/ErrorAlert";
-import { Badges, PremiumBadge } from "components/Badges/Badges";
-import { Button } from "components/Button/Button";
-import { ChooseOne, Cond } from "components/Conditionals/ChooseOne";
-import { IconField } from "components/IconField/IconField";
-import { Paywall } from "components/Paywall/Paywall";
-import { PopoverPaywall } from "components/Paywall/PopoverPaywall";
-import { Spinner } from "components/Spinner/Spinner";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipProvider,
-	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
 import { useFormik } from "formik";
 import { ArrowLeft } from "lucide-react";
 import type { FC } from "react";
 import { Link, useNavigate } from "react-router";
-import { docs } from "utils/docs";
+import * as Yup from "yup";
+import { isApiValidationError } from "#/api/errors";
+import type { CreateOrganizationRequest } from "#/api/typesGenerated";
+import { ErrorAlert } from "#/components/Alert/ErrorAlert";
+import { Badges, PremiumBadge } from "#/components/Badges/Badges";
+import { Button } from "#/components/Button/Button";
+import { ChooseOne, Cond } from "#/components/Conditionals/ChooseOne";
+import { IconField } from "#/components/IconField/IconField";
+import { PaywallPremium } from "#/components/Paywall/PaywallPremium";
+import { PopoverPaywall } from "#/components/Paywall/PopoverPaywall";
+import { Spinner } from "#/components/Spinner/Spinner";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
+import { docs } from "#/utils/docs";
 import {
 	displayNameValidator,
 	getFormHelpers,
 	nameValidator,
 	onChangeTrimmed,
-} from "utils/formUtils";
-import * as Yup from "yup";
+} from "#/utils/formUtils";
 
 const MAX_DESCRIPTION_CHAR_LIMIT = 128;
 const MAX_DESCRIPTION_MESSAGE = `Please enter a description that is no longer than ${MAX_DESCRIPTION_CHAR_LIMIT} characters.`;
@@ -76,35 +75,33 @@ export const CreateOrganizationPageView: FC<
 			<div className="flex flex-col gap-4 w-full min-w-96 mx-auto">
 				<div className="flex flex-col items-center">
 					{Boolean(error) && !isApiValidationError(error) && (
-						<div css={{ marginBottom: 32 }}>
+						<div className="mb-8">
 							<ErrorAlert error={error} />
 						</div>
 					)}
 
 					<Badges>
-						<TooltipProvider>
-							<Tooltip delayDuration={0}>
-								{isEntitled && (
-									<TooltipTrigger asChild>
-										<span>
-											<PremiumBadge />
-										</span>
-									</TooltipTrigger>
-								)}
+						<Tooltip>
+							{isEntitled && (
+								<TooltipTrigger asChild>
+									<span>
+										<PremiumBadge />
+									</span>
+								</TooltipTrigger>
+							)}
 
-								<TooltipContent
-									sideOffset={-28}
-									collisionPadding={16}
-									className="p-0"
-								>
-									<PopoverPaywall
-										message="Organizations"
-										description="Create multiple organizations within a single Coder deployment, allowing several platform teams to operate with isolated users, templates, and distinct underlying infrastructure."
-										documentationLink={docs("/admin/users/organizations")}
-									/>
-								</TooltipContent>
-							</Tooltip>
-						</TooltipProvider>
+							<TooltipContent
+								sideOffset={-28}
+								collisionPadding={16}
+								className="p-0"
+							>
+								<PopoverPaywall
+									message="Organizations"
+									description="Create multiple organizations within a single Coder deployment, allowing several platform teams to operate with isolated users, templates, and distinct underlying infrastructure."
+									documentationLink={docs("/admin/users/organizations")}
+								/>
+							</TooltipContent>
+						</Tooltip>
 					</Badges>
 
 					<header className="flex flex-col items-center">
@@ -118,7 +115,7 @@ export const CreateOrganizationPageView: FC<
 				<ChooseOne>
 					<Cond condition={!isEntitled}>
 						<div className="min-w-fit mx-auto">
-							<Paywall
+							<PaywallPremium
 								message="Organizations"
 								description="Create multiple organizations within a single Coder deployment, allowing several platform teams to operate with isolated users, templates, and distinct underlying infrastructure."
 								documentationLink={docs("/admin/users/organizations")}

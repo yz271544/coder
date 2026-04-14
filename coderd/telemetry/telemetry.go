@@ -27,27 +27,31 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/buildinfo"
 	clitelemetry "github.com/coder/coder/v2/cli/telemetry"
 	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
 	tailnetproto "github.com/coder/coder/v2/tailnet/proto"
+	"github.com/coder/quartz"
 )
 
 const (
 	// VersionHeader is sent in every telemetry request to
 	// report the semantic version of Coder.
 	VersionHeader = "X-Coder-Version"
+
+	DefaultSnapshotFrequency = 30 * time.Minute
 )
 
 type Options struct {
 	Disabled bool
 	Database database.Store
 	Logger   slog.Logger
+	Clock    quartz.Clock
 	// URL is an endpoint to direct telemetry towards!
 	URL         *url.URL
 	Experiments codersdk.Experiments
@@ -65,9 +69,11 @@ type Options struct {
 // Duplicate data will be sent, it's on the server-side to index by UUID.
 // Data is anonymized prior to being sent!
 func New(options Options) (Reporter, error) {
+	if options.Clock == nil {
+		options.Clock = quartz.NewReal()
+	}
 	if options.SnapshotFrequency == 0 {
-		// Report once every 30mins by default!
-		options.SnapshotFrequency = 30 * time.Minute
+		options.SnapshotFrequency = DefaultSnapshotFrequency
 	}
 	snapshotURL, err := options.URL.Parse("/snapshot")
 	if err != nil {
@@ -86,7 +92,7 @@ func New(options Options) (Reporter, error) {
 		options:       options,
 		deploymentURL: deploymentURL,
 		snapshotURL:   snapshotURL,
-		startedAt:     dbtime.Now(),
+		startedAt:     dbtime.Time(options.Clock.Now()).UTC(),
 		client:        &http.Client{},
 	}
 	go reporter.runSnapshotter()
@@ -166,7 +172,7 @@ func (r *remoteReporter) Close() {
 		return
 	}
 	close(r.closed)
-	now := dbtime.Now()
+	now := dbtime.Time(r.options.Clock.Now()).UTC()
 	r.shutdownAt = &now
 	if r.Enabled() {
 		// Report a final collection of telemetry prior to close!
@@ -355,7 +361,7 @@ func (r *remoteReporter) deployment() error {
 		return xerrors.Errorf("create deployment request: %w", err)
 	}
 	req.Header.Set(VersionHeader, buildinfo.Version())
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := r.client.Do(req)
 	if err != nil {
 		return xerrors.Errorf("perform request: %w", err)
 	}
@@ -410,9 +416,10 @@ func checkIDPOrgSync(ctx context.Context, db database.Store, values *codersdk.De
 func (r *remoteReporter) createSnapshot() (*Snapshot, error) {
 	var (
 		ctx = r.ctx
+		now = r.options.Clock.Now()
 		// For resources that grow in size very quickly (like workspace builds),
 		// we only report events that occurred within the past hour.
-		createdAfter = dbtime.Now().Add(-1 * time.Hour)
+		createdAfter = dbtime.Time(now.Add(-1 * time.Hour)).UTC()
 		eg           errgroup.Group
 		snapshot     = &Snapshot{
 			DeploymentID: r.options.DeploymentID,
@@ -517,7 +524,10 @@ func (r *remoteReporter) createSnapshot() (*Snapshot, error) {
 		if err != nil {
 			return xerrors.Errorf("get workspaces: %w", err)
 		}
-		workspaces := database.ConvertWorkspaceRows(workspaceRows)
+		workspaces, err := database.ConvertWorkspaceRows(workspaceRows)
+		if err != nil {
+			return xerrors.Errorf("convert workspace rows: %w", err)
+		}
 		snapshot.Workspaces = make([]Workspace, 0, len(workspaces))
 		for _, dbWorkspace := range workspaces {
 			snapshot.Workspaces = append(snapshot.Workspaces, ConvertWorkspace(dbWorkspace))
@@ -730,12 +740,326 @@ func (r *remoteReporter) createSnapshot() (*Snapshot, error) {
 		}
 		return nil
 	})
+	eg.Go(func() error {
+		tasks, err := CollectTasks(ctx, r.options.Database)
+		if err != nil {
+			return xerrors.Errorf("collect tasks telemetry: %w", err)
+		}
+		snapshot.Tasks = tasks
+		return nil
+	})
+	eg.Go(func() error {
+		events, err := CollectTaskEvents(ctx, r.options.Database, createdAfter, now)
+		if err != nil {
+			return xerrors.Errorf("collect task events telemetry: %w", err)
+		}
+		snapshot.TaskEvents = events
+		return nil
+	})
+	eg.Go(func() error {
+		summaries, err := r.generateAIBridgeInterceptionsSummaries(ctx)
+		if err != nil {
+			return xerrors.Errorf("generate AI Bridge interceptions telemetry summaries: %w", err)
+		}
+		snapshot.AIBridgeInterceptionsSummaries = summaries
+		return nil
+	})
+	eg.Go(func() error {
+		summary, err := r.collectBoundaryUsageSummary(ctx)
+		if err != nil {
+			return xerrors.Errorf("collect boundary usage summary: %w", err)
+		}
+		// Only send a summary if there was actual usage.
+		if summary != nil && summary.UniqueUsers > 0 {
+			snapshot.BoundaryUsageSummary = summary
+		}
+		return nil
+	})
+
+	eg.Go(func() error {
+		chats, err := r.options.Database.GetChatsUpdatedAfter(ctx, createdAfter)
+		if err != nil {
+			return xerrors.Errorf("get chats updated after: %w", err)
+		}
+		snapshot.Chats = make([]Chat, 0, len(chats))
+		for _, chat := range chats {
+			snapshot.Chats = append(snapshot.Chats, ConvertChat(chat))
+		}
+		return nil
+	})
+	eg.Go(func() error {
+		summaries, err := r.options.Database.GetChatMessageSummariesPerChat(ctx, createdAfter)
+		if err != nil {
+			return xerrors.Errorf("get chat message summaries: %w", err)
+		}
+		snapshot.ChatMessageSummaries = make([]ChatMessageSummary, 0, len(summaries))
+		for _, s := range summaries {
+			snapshot.ChatMessageSummaries = append(snapshot.ChatMessageSummaries, ConvertChatMessageSummary(s))
+		}
+		return nil
+	})
+	eg.Go(func() error {
+		configs, err := r.options.Database.GetChatModelConfigsForTelemetry(ctx)
+		if err != nil {
+			return xerrors.Errorf("get chat model configs: %w", err)
+		}
+		snapshot.ChatModelConfigs = make([]ChatModelConfig, 0, len(configs))
+		for _, c := range configs {
+			snapshot.ChatModelConfigs = append(snapshot.ChatModelConfigs, ConvertChatModelConfig(c))
+		}
+		return nil
+	})
 
 	err := eg.Wait()
 	if err != nil {
 		return nil, err
 	}
 	return snapshot, nil
+}
+
+func (r *remoteReporter) generateAIBridgeInterceptionsSummaries(ctx context.Context) ([]AIBridgeInterceptionsSummary, error) {
+	// Get the current timeframe, which is the previous hour.
+	now := dbtime.Time(r.options.Clock.Now()).UTC()
+	endedAtBefore := now.Truncate(time.Hour)
+	endedAtAfter := endedAtBefore.Add(-1 * time.Hour)
+
+	// Note: we don't use a transaction for this function since we do tolerate
+	// some errors, like duplicate lock rows, and we also calculate
+	// summaries in parallel.
+
+	// Claim the heartbeat lock row for this hour.
+	err := r.options.Database.InsertTelemetryLock(ctx, database.InsertTelemetryLockParams{
+		EventType:      "aibridge_interceptions_summary",
+		PeriodEndingAt: endedAtBefore,
+	})
+	if database.IsUniqueViolation(err, database.UniqueTelemetryLocksPkey) {
+		// Another replica has already claimed the lock row for this hour.
+		r.options.Logger.Debug(ctx, "aibridge interceptions telemetry lock already claimed for this hour by another replica, skipping", slog.F("period_ending_at", endedAtBefore))
+		return nil, nil
+	}
+	if err != nil {
+		return nil, xerrors.Errorf("insert AI Bridge interceptions telemetry lock (period_ending_at=%q): %w", endedAtBefore, err)
+	}
+
+	// List the summary categories that need to be calculated.
+	summaryCategories, err := r.options.Database.ListAIBridgeInterceptionsTelemetrySummaries(ctx, database.ListAIBridgeInterceptionsTelemetrySummariesParams{
+		EndedAtAfter:  endedAtAfter,  // inclusive
+		EndedAtBefore: endedAtBefore, // exclusive
+	})
+	if err != nil {
+		return nil, xerrors.Errorf("list AI Bridge interceptions telemetry summaries (startedAtAfter=%q, endedAtBefore=%q): %w", endedAtAfter, endedAtBefore, err)
+	}
+
+	// Calculate and convert the summaries for all categories.
+	var (
+		eg, egCtx = errgroup.WithContext(ctx)
+		mu        sync.Mutex
+		summaries = make([]AIBridgeInterceptionsSummary, 0, len(summaryCategories))
+	)
+	for _, category := range summaryCategories {
+		eg.Go(func() error {
+			summary, err := r.options.Database.CalculateAIBridgeInterceptionsTelemetrySummary(egCtx, database.CalculateAIBridgeInterceptionsTelemetrySummaryParams{
+				Provider:      category.Provider,
+				Model:         category.Model,
+				Client:        category.Client,
+				EndedAtAfter:  endedAtAfter,
+				EndedAtBefore: endedAtBefore,
+			})
+			if err != nil {
+				return xerrors.Errorf("calculate AI Bridge interceptions telemetry summary (provider=%q, model=%q, client=%q, startedAtAfter=%q, endedAtBefore=%q): %w", category.Provider, category.Model, category.Client, endedAtAfter, endedAtBefore, err)
+			}
+
+			// Double check that at least one interception was found in the
+			// timeframe.
+			if summary.InterceptionCount == 0 {
+				return nil
+			}
+
+			converted := ConvertAIBridgeInterceptionsSummary(endedAtBefore, category.Provider, category.Model, category.Client, summary)
+
+			mu.Lock()
+			defer mu.Unlock()
+			summaries = append(summaries, converted)
+			return nil
+		})
+	}
+
+	return summaries, eg.Wait()
+}
+
+// collectBoundaryUsageSummary collects boundary usage statistics from all
+// replicas and resets the stats for the next telemetry period. Returns nil if
+// another replica has already collected for this period.
+func (r *remoteReporter) collectBoundaryUsageSummary(ctx context.Context) (*BoundaryUsageSummary, error) {
+	// Use twice the snapshot frequency as the staleness limit to ensure we
+	// capture data from replicas that may have slightly different flush times.
+	maxStaleness := r.options.SnapshotFrequency * 2
+	//nolint:gocritic // This is the actual collection of boundary usage tracking.
+	boundaryCtx := dbauthz.AsBoundaryUsageTracker(ctx)
+
+	// Claim the telemetry lock for this period. Use snapshot frequency so each
+	// telemetry snapshot period gets exactly one collection.
+	now := dbtime.Time(r.options.Clock.Now()).UTC()
+	periodEndingAt := now.Truncate(r.options.SnapshotFrequency)
+	err := r.options.Database.InsertTelemetryLock(ctx, database.InsertTelemetryLockParams{
+		EventType:      "boundary_usage_summary",
+		PeriodEndingAt: periodEndingAt,
+	})
+	if database.IsUniqueViolation(err, database.UniqueTelemetryLocksPkey) {
+		r.options.Logger.Debug(ctx, "boundary usage telemetry lock already claimed by another replica, skipping", slog.F("period_ending_at", periodEndingAt))
+		return nil, nil //nolint:nilnil // This is simple to handle when dealing with telemetry.
+	}
+	if err != nil {
+		return nil, xerrors.Errorf("insert boundary usage telemetry lock (period_ending_at=%q): %w", periodEndingAt, err)
+	}
+
+	var summary database.GetAndResetBoundaryUsageSummaryRow
+	err = r.options.Database.InTx(func(tx database.Store) error {
+		// The advisory lock use here ensures a clean transition to the next snapshot by
+		// preventing replicas from upserting row(s) at the same time as we aggregate and
+		// delete all rows here.
+		var txErr error
+		if txErr = tx.AcquireLock(boundaryCtx, database.LockIDBoundaryUsageStats); txErr != nil {
+			return txErr
+		}
+		summary, txErr = tx.GetAndResetBoundaryUsageSummary(boundaryCtx, maxStaleness.Milliseconds())
+		return txErr
+	}, nil)
+	if err != nil {
+		return nil, xerrors.Errorf("get and reset boundary usage summary: %w", err)
+	}
+
+	return &BoundaryUsageSummary{
+		UniqueWorkspaces:           summary.UniqueWorkspaces,
+		UniqueUsers:                summary.UniqueUsers,
+		AllowedRequests:            summary.AllowedRequests,
+		DeniedRequests:             summary.DeniedRequests,
+		PeriodStart:                now.Add(-r.options.SnapshotFrequency),
+		PeriodDurationMilliseconds: r.options.SnapshotFrequency.Milliseconds(),
+	}, nil
+}
+
+func CollectTasks(ctx context.Context, db database.Store) ([]Task, error) {
+	dbTasks, err := db.ListTasks(ctx, database.ListTasksParams{
+		OwnerID:        uuid.Nil,
+		OrganizationID: uuid.Nil,
+		Status:         "",
+	})
+	if err != nil {
+		return nil, xerrors.Errorf("list tasks: %w", err)
+	}
+	if len(dbTasks) == 0 {
+		return []Task{}, nil
+	}
+
+	tasks := make([]Task, 0, len(dbTasks))
+	for _, dbTask := range dbTasks {
+		tasks = append(tasks, ConvertTask(dbTask))
+	}
+	return tasks, nil
+}
+
+// buildTaskEvent constructs a TaskEvent from the combined query row.
+func buildTaskEvent(
+	row database.GetTelemetryTaskEventsRow,
+	createdAfter time.Time,
+	now time.Time,
+) TaskEvent {
+	event := TaskEvent{
+		TaskID: row.TaskID.String(),
+	}
+
+	var (
+		hasStartBuild    = row.StartBuildCreatedAt.Valid
+		isResumed        = hasStartBuild && row.StartBuildNumber.Valid && row.StartBuildNumber.Int32 > 1
+		hasStopBuild     = row.StopBuildCreatedAt.Valid
+		startedAfterStop = hasStartBuild && hasStopBuild && row.StartBuildCreatedAt.Time.After(row.StopBuildCreatedAt.Time)
+		currentlyPaused  = hasStopBuild && !startedAfterStop
+	)
+
+	// Pause-related fields (requires a stop build).
+	if hasStopBuild {
+		event.LastPausedAt = &row.StopBuildCreatedAt.Time
+		switch {
+		case row.StopBuildReason.Valid && row.StopBuildReason.BuildReason == database.BuildReasonTaskAutoPause:
+			event.PauseReason = ptr.Ref("auto")
+		case row.StopBuildReason.Valid && row.StopBuildReason.BuildReason == database.BuildReasonTaskManualPause:
+			event.PauseReason = ptr.Ref("manual")
+		default:
+			event.PauseReason = ptr.Ref("other")
+		}
+
+		// Idle duration: time between last working status and the pause.
+		if row.LastWorkingStatusAt.Valid &&
+			row.StopBuildCreatedAt.Time.After(row.LastWorkingStatusAt.Time) {
+			idle := row.StopBuildCreatedAt.Time.Sub(row.LastWorkingStatusAt.Time)
+			event.IdleDurationMS = ptr.Ref(idle.Milliseconds())
+		}
+	}
+
+	// Resume-related fields (requires task_resume start after stop).
+	if startedAfterStop {
+		// Paused duration: time between pause and resume.
+		if row.StartBuildCreatedAt.Time.After(createdAfter) {
+			paused := row.StartBuildCreatedAt.Time.Sub(row.StopBuildCreatedAt.Time)
+			event.PausedDurationMS = ptr.Ref(paused.Milliseconds())
+		}
+
+		// Below only relevant for "resumed" tasks, not when initially created.
+		if isResumed {
+			event.LastResumedAt = &row.StartBuildCreatedAt.Time
+			switch {
+			// TODO(Cian): will this exist? Future readers may know better than I.
+			// case row.StartBuildReason == database.BuildReasonTaskAutoResume:
+			//	event.ResumeReason = ptr.Ref("auto")
+			case row.StartBuildReason.BuildReason == database.BuildReasonTaskResume:
+				event.ResumeReason = ptr.Ref("manual")
+			default: // Task resumed by starting workspace?
+				event.ResumeReason = ptr.Ref("other")
+			}
+		}
+	}
+
+	// Unresolved pause: report current paused duration.
+	if currentlyPaused {
+		paused := now.Sub(row.StopBuildCreatedAt.Time)
+		event.PausedDurationMS = ptr.Ref(paused.Milliseconds())
+	}
+
+	// Resume-to-status duration.
+	if row.FirstStatusAfterResumeAt.Valid && isResumed {
+		delta := row.FirstStatusAfterResumeAt.Time.Sub(row.StartBuildCreatedAt.Time)
+		event.ResumeToStatusMS = ptr.Ref(delta.Milliseconds())
+	}
+
+	// Active duration: from SQL calculation.
+	if row.ActiveDurationMs > 0 {
+		event.ActiveDurationMS = ptr.Ref(row.ActiveDurationMs)
+	}
+
+	return event
+}
+
+// CollectTaskEvents collects lifecycle events for tasks with recent activity.
+func CollectTaskEvents(ctx context.Context, db database.Store, createdAfter, now time.Time) ([]TaskEvent, error) {
+	rows, err := db.GetTelemetryTaskEvents(ctx, database.GetTelemetryTaskEventsParams{
+		CreatedAfter: createdAfter,
+		Now:          now,
+	})
+	if err != nil {
+		return nil, xerrors.Errorf("get telemetry task events: %w", err)
+	}
+	events := make([]TaskEvent, 0, len(rows))
+	for _, row := range rows {
+		events = append(events, buildTaskEvent(row, createdAfter, now))
+	}
+	return events, nil
+}
+
+// HashContent returns a SHA256 hash of the content as a hex string.
+// This is useful for hashing sensitive content like prompts for telemetry.
+func HashContent(content string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 }
 
 // ConvertAPIKey anonymizes an API key.
@@ -1205,9 +1529,17 @@ type Snapshot struct {
 	Workspaces                           []Workspace                           `json:"workspaces"`
 	NetworkEvents                        []NetworkEvent                        `json:"network_events"`
 	Organizations                        []Organization                        `json:"organizations"`
+	Tasks                                []Task                                `json:"tasks"`
+	TaskEvents                           []TaskEvent                           `json:"task_events"`
 	TelemetryItems                       []TelemetryItem                       `json:"telemetry_items"`
 	UserTailnetConnections               []UserTailnetConnection               `json:"user_tailnet_connections"`
 	PrebuiltWorkspaces                   []PrebuiltWorkspace                   `json:"prebuilt_workspaces"`
+	AIBridgeInterceptionsSummaries       []AIBridgeInterceptionsSummary        `json:"aibridge_interceptions_summaries"`
+	BoundaryUsageSummary                 *BoundaryUsageSummary                 `json:"boundary_usage_summary"`
+	FirstUserOnboarding                  *FirstUserOnboarding                  `json:"first_user_onboarding"`
+	Chats                                []Chat                                `json:"chats"`
+	ChatMessageSummaries                 []ChatMessageSummary                  `json:"chat_message_summaries"`
+	ChatModelConfigs                     []ChatModelConfig                     `json:"chat_model_configs"`
 }
 
 // Deployment contains information about the host running Coder.
@@ -1255,6 +1587,14 @@ type User struct {
 	GithubComUserID int64               `json:"github_com_user_id"`
 	// Omitempty for backwards compatibility.
 	LoginType string `json:"login_type,omitempty"`
+}
+
+// FirstUserOnboarding contains optional newsletter preference data
+// collected during first user setup. This is sent once when the first
+// user is created.
+type FirstUserOnboarding struct {
+	NewsletterMarketing bool `json:"newsletter_marketing"`
+	NewsletterReleases  bool `json:"newsletter_releases"`
 }
 
 type Group struct {
@@ -1753,6 +2093,123 @@ type Organization struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type Task struct {
+	ID                   string    `json:"id"`
+	OrganizationID       string    `json:"organization_id"`
+	OwnerID              string    `json:"owner_id"`
+	Name                 string    `json:"name"`
+	WorkspaceID          *string   `json:"workspace_id"`
+	WorkspaceBuildNumber *int64    `json:"workspace_build_number"`
+	WorkspaceAgentID     *string   `json:"workspace_agent_id"`
+	WorkspaceAppID       *string   `json:"workspace_app_id"`
+	TemplateVersionID    string    `json:"template_version_id"`
+	PromptHash           string    `json:"prompt_hash"` // Prompt is hashed for privacy.
+	Status               string    `json:"status"`
+	CreatedAt            time.Time `json:"created_at"`
+}
+
+// TaskEvent represents lifecycle events for a task (pause/resume
+// cycles). The createdAfter parameter gates PausedDurationMS so
+// that only recent pause/resume pairs are reported.
+type TaskEvent struct {
+	TaskID           string     `json:"task_id"`
+	LastPausedAt     *time.Time `json:"last_paused_at"`
+	LastResumedAt    *time.Time `json:"last_resumed_at"`
+	PauseReason      *string    `json:"pause_reason"`
+	ResumeReason     *string    `json:"resume_reason"`
+	IdleDurationMS   *int64     `json:"idle_duration_ms"`
+	PausedDurationMS *int64     `json:"paused_duration_ms"`
+	ResumeToStatusMS *int64     `json:"resume_to_status_ms"`
+	ActiveDurationMS *int64     `json:"active_duration_ms"`
+}
+
+// ConvertTask converts a database Task to a telemetry Task.
+func ConvertTask(task database.Task) Task {
+	t := Task{
+		ID:                task.ID.String(),
+		OrganizationID:    task.OrganizationID.String(),
+		OwnerID:           task.OwnerID.String(),
+		Name:              task.Name,
+		TemplateVersionID: task.TemplateVersionID.String(),
+		PromptHash:        HashContent(task.Prompt),
+		Status:            string(task.Status),
+		CreatedAt:         task.CreatedAt,
+	}
+	if task.WorkspaceID.Valid {
+		t.WorkspaceID = ptr.Ref(task.WorkspaceID.UUID.String())
+	}
+	if task.WorkspaceBuildNumber.Valid {
+		t.WorkspaceBuildNumber = ptr.Ref(int64(task.WorkspaceBuildNumber.Int32))
+	}
+	if task.WorkspaceAgentID.Valid {
+		t.WorkspaceAgentID = ptr.Ref(task.WorkspaceAgentID.UUID.String())
+	}
+	if task.WorkspaceAppID.Valid {
+		t.WorkspaceAppID = ptr.Ref(task.WorkspaceAppID.UUID.String())
+	}
+	return t
+}
+
+// ConvertChat converts a database chat row to a telemetry Chat.
+func ConvertChat(dbChat database.GetChatsUpdatedAfterRow) Chat {
+	c := Chat{
+		ID:                dbChat.ID,
+		OwnerID:           dbChat.OwnerID,
+		CreatedAt:         dbChat.CreatedAt,
+		UpdatedAt:         dbChat.UpdatedAt,
+		Status:            string(dbChat.Status),
+		HasParent:         dbChat.HasParent,
+		Archived:          dbChat.Archived,
+		LastModelConfigID: dbChat.LastModelConfigID,
+	}
+	if dbChat.RootChatID.Valid {
+		c.RootChatID = &dbChat.RootChatID.UUID
+	}
+	if dbChat.WorkspaceID.Valid {
+		c.WorkspaceID = &dbChat.WorkspaceID.UUID
+	}
+	if dbChat.Mode.Valid {
+		mode := string(dbChat.Mode.ChatMode)
+		c.Mode = &mode
+	}
+	return c
+}
+
+// ConvertChatMessageSummary converts a database chat message
+// summary row to a telemetry ChatMessageSummary.
+func ConvertChatMessageSummary(dbRow database.GetChatMessageSummariesPerChatRow) ChatMessageSummary {
+	return ChatMessageSummary{
+		ChatID:                   dbRow.ChatID,
+		MessageCount:             dbRow.MessageCount,
+		UserMessageCount:         dbRow.UserMessageCount,
+		AssistantMessageCount:    dbRow.AssistantMessageCount,
+		ToolMessageCount:         dbRow.ToolMessageCount,
+		SystemMessageCount:       dbRow.SystemMessageCount,
+		TotalInputTokens:         dbRow.TotalInputTokens,
+		TotalOutputTokens:        dbRow.TotalOutputTokens,
+		TotalReasoningTokens:     dbRow.TotalReasoningTokens,
+		TotalCacheCreationTokens: dbRow.TotalCacheCreationTokens,
+		TotalCacheReadTokens:     dbRow.TotalCacheReadTokens,
+		TotalCostMicros:          dbRow.TotalCostMicros,
+		TotalRuntimeMs:           dbRow.TotalRuntimeMs,
+		DistinctModelCount:       dbRow.DistinctModelCount,
+		CompressedMessageCount:   dbRow.CompressedMessageCount,
+	}
+}
+
+// ConvertChatModelConfig converts a database model config row to a
+// telemetry ChatModelConfig.
+func ConvertChatModelConfig(dbRow database.GetChatModelConfigsForTelemetryRow) ChatModelConfig {
+	return ChatModelConfig{
+		ID:           dbRow.ID,
+		Provider:     dbRow.Provider,
+		Model:        dbRow.Model,
+		ContextLimit: dbRow.ContextLimit,
+		Enabled:      dbRow.Enabled,
+		IsDefault:    dbRow.IsDefault,
+	}
+}
+
 type telemetryItemKey string
 
 // The comment below gets rid of the warning that the name "TelemetryItemKey" has
@@ -1796,6 +2253,162 @@ type PrebuiltWorkspace struct {
 	CreatedAt time.Time                  `json:"created_at"`
 	EventType PrebuiltWorkspaceEventType `json:"event_type"`
 	Count     int                        `json:"count"`
+}
+
+type AIBridgeInterceptionsSummaryDurationMillis struct {
+	P50 int64 `json:"p50"`
+	P90 int64 `json:"p90"`
+	P95 int64 `json:"p95"`
+	P99 int64 `json:"p99"`
+}
+
+type AIBridgeInterceptionsSummaryTokenCount struct {
+	Input         int64 `json:"input"`
+	Output        int64 `json:"output"`
+	CachedRead    int64 `json:"cached_read"`
+	CachedWritten int64 `json:"cached_written"`
+}
+
+type AIBridgeInterceptionsSummaryToolCallsCount struct {
+	Injected    int64 `json:"injected"`
+	NonInjected int64 `json:"non_injected"`
+}
+
+// AIBridgeInterceptionsSummary is a summary of aggregated AI Bridge
+// interception data over a period of 1 hour. We send a summary each hour for
+// each unique provider + model + client combination.
+type AIBridgeInterceptionsSummary struct {
+	ID uuid.UUID `json:"id"`
+
+	// The end of the hour for which the summary is taken. This will always be a
+	// UTC timestamp truncated to the hour.
+	Timestamp time.Time `json:"timestamp"`
+	Provider  string    `json:"provider"`
+	Model     string    `json:"model"`
+	Client    string    `json:"client"`
+
+	InterceptionCount          int64                                      `json:"interception_count"`
+	InterceptionDurationMillis AIBridgeInterceptionsSummaryDurationMillis `json:"interception_duration_millis"`
+
+	// Map of route to number of interceptions.
+	// e.g. "/v1/chat/completions:blocking", "/v1/chat/completions:streaming"
+	InterceptionsByRoute map[string]int64 `json:"interceptions_by_route"`
+
+	UniqueInitiatorCount int64 `json:"unique_initiator_count"`
+
+	UserPromptsCount int64 `json:"user_prompts_count"`
+
+	TokenUsagesCount int64                                  `json:"token_usages_count"`
+	TokenCount       AIBridgeInterceptionsSummaryTokenCount `json:"token_count"`
+
+	ToolCallsCount             AIBridgeInterceptionsSummaryToolCallsCount `json:"tool_calls_count"`
+	InjectedToolCallErrorCount int64                                      `json:"injected_tool_call_error_count"`
+}
+
+// BoundaryUsageSummary contains aggregated boundary usage statistics across all
+// replicas for the telemetry period. See the boundaryusage package documentation
+// for the full tracking architecture.
+type BoundaryUsageSummary struct {
+	UniqueWorkspaces int64 `json:"unique_workspaces"`
+	UniqueUsers      int64 `json:"unique_users"`
+	AllowedRequests  int64 `json:"allowed_requests"`
+	DeniedRequests   int64 `json:"denied_requests"`
+
+	// PeriodStart and PeriodDurationMilliseconds describe the approximate collection
+	// window. The actual data may not align *exactly* to these boundaries because:
+	//
+	//   - Each replica flushes to the database independently on its own schedule
+	//   - The summary captures "data flushed since last reset" rather than "usage
+	//     during exactly the stated interval"
+	//   - Unflushed in-memory data at snapshot time rolls into the next period
+	//
+	// This is adequate for our purposes of gathering general usage and trends.
+	//
+	// PeriodStart is the approximate start of the collection period.
+	PeriodStart time.Time `json:"period_start"`
+	// PeriodDurationMilliseconds is the expected duration of the collection
+	// period (the telemetry snapshot frequency).
+	PeriodDurationMilliseconds int64 `json:"period_duration_ms"`
+}
+
+// Chat contains anonymized metadata about a chat for telemetry.
+// Titles and message content are excluded to avoid PII leakage.
+type Chat struct {
+	ID                uuid.UUID  `json:"id"`
+	OwnerID           uuid.UUID  `json:"owner_id"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	Status            string     `json:"status"`
+	HasParent         bool       `json:"has_parent"`
+	RootChatID        *uuid.UUID `json:"root_chat_id"`
+	WorkspaceID       *uuid.UUID `json:"workspace_id"`
+	Mode              *string    `json:"mode"`
+	Archived          bool       `json:"archived"`
+	LastModelConfigID uuid.UUID  `json:"last_model_config_id"`
+}
+
+// ChatMessageSummary contains per-chat aggregated message metrics
+// for telemetry. Individual message content is never included.
+type ChatMessageSummary struct {
+	ChatID                   uuid.UUID `json:"chat_id"`
+	MessageCount             int64     `json:"message_count"`
+	UserMessageCount         int64     `json:"user_message_count"`
+	AssistantMessageCount    int64     `json:"assistant_message_count"`
+	ToolMessageCount         int64     `json:"tool_message_count"`
+	SystemMessageCount       int64     `json:"system_message_count"`
+	TotalInputTokens         int64     `json:"total_input_tokens"`
+	TotalOutputTokens        int64     `json:"total_output_tokens"`
+	TotalReasoningTokens     int64     `json:"total_reasoning_tokens"`
+	TotalCacheCreationTokens int64     `json:"total_cache_creation_tokens"`
+	TotalCacheReadTokens     int64     `json:"total_cache_read_tokens"`
+	TotalCostMicros          int64     `json:"total_cost_micros"`
+	TotalRuntimeMs           int64     `json:"total_runtime_ms"`
+	DistinctModelCount       int64     `json:"distinct_model_count"`
+	CompressedMessageCount   int64     `json:"compressed_message_count"`
+}
+
+// ChatModelConfig contains model configuration metadata for
+// telemetry. Sensitive fields like API keys are excluded.
+type ChatModelConfig struct {
+	ID           uuid.UUID `json:"id"`
+	Provider     string    `json:"provider"`
+	Model        string    `json:"model"`
+	ContextLimit int64     `json:"context_limit"`
+	Enabled      bool      `json:"enabled"`
+	IsDefault    bool      `json:"is_default"`
+}
+
+func ConvertAIBridgeInterceptionsSummary(endTime time.Time, provider, model, client string, summary database.CalculateAIBridgeInterceptionsTelemetrySummaryRow) AIBridgeInterceptionsSummary {
+	return AIBridgeInterceptionsSummary{
+		ID:                uuid.New(),
+		Timestamp:         endTime,
+		Provider:          provider,
+		Model:             model,
+		Client:            client,
+		InterceptionCount: summary.InterceptionCount,
+		InterceptionDurationMillis: AIBridgeInterceptionsSummaryDurationMillis{
+			P50: summary.InterceptionDurationP50Millis,
+			P90: summary.InterceptionDurationP90Millis,
+			P95: summary.InterceptionDurationP95Millis,
+			P99: summary.InterceptionDurationP99Millis,
+		},
+		// TODO: currently we don't track by route
+		InterceptionsByRoute: make(map[string]int64),
+		UniqueInitiatorCount: summary.UniqueInitiatorCount,
+		UserPromptsCount:     summary.UserPromptsCount,
+		TokenUsagesCount:     summary.TokenUsagesCount,
+		TokenCount: AIBridgeInterceptionsSummaryTokenCount{
+			Input:         summary.TokenCountInput,
+			Output:        summary.TokenCountOutput,
+			CachedRead:    summary.TokenCountCachedRead,
+			CachedWritten: summary.TokenCountCachedWritten,
+		},
+		ToolCallsCount: AIBridgeInterceptionsSummaryToolCallsCount{
+			Injected:    summary.ToolCallsCountInjected,
+			NonInjected: summary.ToolCallsCountNonInjected,
+		},
+		InjectedToolCallErrorCount: summary.InjectedToolCallErrorCount,
+	}
 }
 
 type noopReporter struct{}

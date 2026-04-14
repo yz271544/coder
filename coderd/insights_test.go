@@ -17,8 +17,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/agent/agenttest"
 	agentproto "github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/coderdtest"
@@ -78,7 +78,7 @@ func TestDeploymentInsights(t *testing.T) {
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 		Parse:          echo.ParseComplete,
 		ProvisionPlan:  echo.PlanComplete,
-		ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+		ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 	})
 	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 	require.Empty(t, template.BuildTimeStats[codersdk.WorkspaceTransitionStart])
@@ -168,7 +168,7 @@ func TestUserActivityInsights_SanityCheck(t *testing.T) {
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 		Parse:          echo.ParseComplete,
 		ProvisionPlan:  echo.PlanComplete,
-		ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+		ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 	})
 	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 	require.Empty(t, template.BuildTimeStats[codersdk.WorkspaceTransitionStart])
@@ -266,7 +266,7 @@ func TestUserLatencyInsights(t *testing.T) {
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 		Parse:          echo.ParseComplete,
 		ProvisionPlan:  echo.PlanComplete,
-		ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+		ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 	})
 	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 	require.Empty(t, template.BuildTimeStats[codersdk.WorkspaceTransitionStart])
@@ -520,7 +520,7 @@ func TestTemplateInsights_Golden(t *testing.T) {
 		return templates, users, testData
 	}
 
-	prepare := func(t *testing.T, templates []*testTemplate, users []*testUser, testData map[*testWorkspace]testDataGen) (*codersdk.Client, chan dbrollup.Event) {
+	prepare := func(t *testing.T, templates []*testTemplate, users []*testUser, testData map[*testWorkspace]testDataGen, disableStorage bool) (*codersdk.Client, chan dbrollup.Event) {
 		logger := testutil.Logger(t)
 		db, ps := dbtestutil.NewDB(t)
 		events := make(chan dbrollup.Event)
@@ -641,22 +641,16 @@ func TestTemplateInsights_Golden(t *testing.T) {
 			// Create the template version and template.
 			version := coderdtest.CreateTemplateVersion(t, client, firstUser.OrganizationID, &echo.Responses{
 				Parse: echo.ParseComplete,
-				ProvisionPlan: []*proto.Response{
+				ProvisionGraph: []*proto.Response{
 					{
-						Type: &proto.Response_Plan{
-							Plan: &proto.PlanComplete{
+						Type: &proto.Response_Graph{
+							Graph: &proto.GraphComplete{
 								Parameters: parameters,
+								Resources:  resources,
 							},
 						},
 					},
 				},
-				ProvisionApply: []*proto.Response{{
-					Type: &proto.Response_Apply{
-						Apply: &proto.ApplyComplete{
-							Resources: resources,
-						},
-					},
-				}},
 			})
 			coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 
@@ -706,22 +700,24 @@ func TestTemplateInsights_Golden(t *testing.T) {
 		require.NoError(t, err)
 		defer batcherCloser() // Flushes the stats, this is to ensure they're written.
 
-		for workspace, data := range testData {
-			for _, stat := range data.agentStats {
-				createdAt := stat.startedAt
-				connectionCount := int64(1)
-				if stat.noConnections {
-					connectionCount = 0
-				}
-				for createdAt.Before(stat.endedAt) {
-					batcher.Add(createdAt, workspace.agentID, workspace.template.id, workspace.user.(*testUser).sdk.ID, workspace.id, &agentproto.Stats{
-						ConnectionCount:             connectionCount,
-						SessionCountVscode:          stat.sessionCountVSCode,
-						SessionCountJetbrains:       stat.sessionCountJetBrains,
-						SessionCountReconnectingPty: stat.sessionCountReconnectingPTY,
-						SessionCountSsh:             stat.sessionCountSSH,
-					}, false)
-					createdAt = createdAt.Add(30 * time.Second)
+		if !disableStorage {
+			for workspace, data := range testData {
+				for _, stat := range data.agentStats {
+					createdAt := stat.startedAt
+					connectionCount := int64(1)
+					if stat.noConnections {
+						connectionCount = 0
+					}
+					for createdAt.Before(stat.endedAt) {
+						batcher.Add(createdAt, workspace.agentID, workspace.template.id, workspace.user.(*testUser).sdk.ID, workspace.id, &agentproto.Stats{
+							ConnectionCount:             connectionCount,
+							SessionCountVscode:          stat.sessionCountVSCode,
+							SessionCountJetbrains:       stat.sessionCountJetBrains,
+							SessionCountReconnectingPty: stat.sessionCountReconnectingPTY,
+							SessionCountSsh:             stat.sessionCountSSH,
+						}, false)
+						createdAt = createdAt.Add(30 * time.Second)
+					}
 				}
 			}
 		}
@@ -750,8 +746,9 @@ func TestTemplateInsights_Golden(t *testing.T) {
 			}
 		}
 		reporter := workspacestats.NewReporter(workspacestats.ReporterOptions{
-			Database:         db,
-			AppStatBatchSize: workspaceapps.DefaultStatsDBReporterBatchSize,
+			Database:               db,
+			AppStatBatchSize:       workspaceapps.DefaultStatsDBReporterBatchSize,
+			DisableDatabaseInserts: disableStorage,
 		})
 		err = reporter.ReportAppStats(dbauthz.AsSystemRestricted(ctx), stats)
 		require.NoError(t, err, "want no error inserting app stats")
@@ -1057,10 +1054,11 @@ func TestTemplateInsights_Golden(t *testing.T) {
 		ignoreTimes bool
 	}
 	tests := []struct {
-		name         string
-		makeFixture  func() ([]*testTemplate, []*testUser)
-		makeTestData func([]*testTemplate, []*testUser) map[*testWorkspace]testDataGen
-		requests     []testRequest
+		name           string
+		makeFixture    func() ([]*testTemplate, []*testUser)
+		makeTestData   func([]*testTemplate, []*testUser) map[*testWorkspace]testDataGen
+		disableStorage bool
+		requests       []testRequest
 	}{
 		{
 			name:         "multiple users and workspaces",
@@ -1237,6 +1235,24 @@ func TestTemplateInsights_Golden(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:           "disabled",
+			makeFixture:    baseTemplateAndUserFixture,
+			makeTestData:   makeBaseTestData,
+			disableStorage: true,
+			requests: []testRequest{
+				{
+					name: "week deployment wide",
+					makeRequest: func(_ []*testTemplate) codersdk.TemplateInsightsRequest {
+						return codersdk.TemplateInsightsRequest{
+							StartTime: frozenWeekAgo,
+							EndTime:   frozenWeekAgo.AddDate(0, 0, 7),
+							Interval:  codersdk.InsightsReportIntervalDay,
+						}
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1246,7 +1262,7 @@ func TestTemplateInsights_Golden(t *testing.T) {
 			require.NotNil(t, tt.makeFixture, "test bug: makeFixture must be set")
 			require.NotNil(t, tt.makeTestData, "test bug: makeTestData must be set")
 			templates, users, testData := prepareFixtureAndTestData(t, tt.makeFixture, tt.makeTestData)
-			client, events := prepare(t, templates, users, testData)
+			client, events := prepare(t, templates, users, testData, tt.disableStorage)
 
 			// Drain two events, the first one resumes rolluper
 			// operation and the second one waits for the rollup
@@ -1431,7 +1447,7 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 		return templates, users, testData
 	}
 
-	prepare := func(t *testing.T, templates []*testTemplate, users []*testUser, testData map[*testWorkspace]testDataGen) (*codersdk.Client, chan dbrollup.Event) {
+	prepare := func(t *testing.T, templates []*testTemplate, users []*testUser, testData map[*testWorkspace]testDataGen, disableStorage bool) (*codersdk.Client, chan dbrollup.Event) {
 		logger := testutil.Logger(t)
 		db, ps := dbtestutil.NewDB(t)
 		events := make(chan dbrollup.Event)
@@ -1539,9 +1555,9 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 			version := coderdtest.CreateTemplateVersion(t, client, firstUser.OrganizationID, &echo.Responses{
 				Parse:         echo.ParseComplete,
 				ProvisionPlan: echo.PlanComplete,
-				ProvisionApply: []*proto.Response{{
-					Type: &proto.Response_Apply{
-						Apply: &proto.ApplyComplete{
+				ProvisionGraph: []*proto.Response{{
+					Type: &proto.Response_Graph{
+						Graph: &proto.GraphComplete{
 							Resources: resources,
 						},
 					},
@@ -1595,22 +1611,24 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 		require.NoError(t, err)
 		defer batcherCloser() // Flushes the stats, this is to ensure they're written.
 
-		for workspace, data := range testData {
-			for _, stat := range data.agentStats {
-				createdAt := stat.startedAt
-				connectionCount := int64(1)
-				if stat.noConnections {
-					connectionCount = 0
-				}
-				for createdAt.Before(stat.endedAt) {
-					batcher.Add(createdAt, workspace.agentID, workspace.template.id, workspace.user.(*testUser).sdk.ID, workspace.id, &agentproto.Stats{
-						ConnectionCount:             connectionCount,
-						SessionCountVscode:          stat.sessionCountVSCode,
-						SessionCountJetbrains:       stat.sessionCountJetBrains,
-						SessionCountReconnectingPty: stat.sessionCountReconnectingPTY,
-						SessionCountSsh:             stat.sessionCountSSH,
-					}, false)
-					createdAt = createdAt.Add(30 * time.Second)
+		if !disableStorage {
+			for workspace, data := range testData {
+				for _, stat := range data.agentStats {
+					createdAt := stat.startedAt
+					connectionCount := int64(1)
+					if stat.noConnections {
+						connectionCount = 0
+					}
+					for createdAt.Before(stat.endedAt) {
+						batcher.Add(createdAt, workspace.agentID, workspace.template.id, workspace.user.(*testUser).sdk.ID, workspace.id, &agentproto.Stats{
+							ConnectionCount:             connectionCount,
+							SessionCountVscode:          stat.sessionCountVSCode,
+							SessionCountJetbrains:       stat.sessionCountJetBrains,
+							SessionCountReconnectingPty: stat.sessionCountReconnectingPTY,
+							SessionCountSsh:             stat.sessionCountSSH,
+						}, false)
+						createdAt = createdAt.Add(30 * time.Second)
+					}
 				}
 			}
 		}
@@ -1639,8 +1657,9 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 			}
 		}
 		reporter := workspacestats.NewReporter(workspacestats.ReporterOptions{
-			Database:         db,
-			AppStatBatchSize: workspaceapps.DefaultStatsDBReporterBatchSize,
+			Database:               db,
+			AppStatBatchSize:       workspaceapps.DefaultStatsDBReporterBatchSize,
+			DisableDatabaseInserts: disableStorage,
 		})
 		err = reporter.ReportAppStats(dbauthz.AsSystemRestricted(ctx), stats)
 		require.NoError(t, err, "want no error inserting app stats")
@@ -1902,10 +1921,11 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 		ignoreTimes bool
 	}
 	tests := []struct {
-		name         string
-		makeFixture  func() ([]*testTemplate, []*testUser)
-		makeTestData func([]*testTemplate, []*testUser) map[*testWorkspace]testDataGen
-		requests     []testRequest
+		name           string
+		makeFixture    func() ([]*testTemplate, []*testUser)
+		makeTestData   func([]*testTemplate, []*testUser) map[*testWorkspace]testDataGen
+		disableStorage bool
+		requests       []testRequest
 	}{
 		{
 			name:         "multiple users and workspaces",
@@ -2013,6 +2033,23 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:           "disabled",
+			makeFixture:    baseTemplateAndUserFixture,
+			makeTestData:   makeBaseTestData,
+			disableStorage: true,
+			requests: []testRequest{
+				{
+					name: "week deployment wide",
+					makeRequest: func(templates []*testTemplate) codersdk.UserActivityInsightsRequest {
+						return codersdk.UserActivityInsightsRequest{
+							StartTime: frozenWeekAgo,
+							EndTime:   frozenWeekAgo.AddDate(0, 0, 7),
+						}
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -2022,7 +2059,7 @@ func TestUserActivityInsights_Golden(t *testing.T) {
 			require.NotNil(t, tt.makeFixture, "test bug: makeFixture must be set")
 			require.NotNil(t, tt.makeTestData, "test bug: makeTestData must be set")
 			templates, users, testData := prepareFixtureAndTestData(t, tt.makeFixture, tt.makeTestData)
-			client, events := prepare(t, templates, users, testData)
+			client, events := prepare(t, templates, users, testData, tt.disableStorage)
 
 			// Drain two events, the first one resumes rolluper
 			// operation and the second one waits for the rollup
@@ -2343,6 +2380,189 @@ func TestGenericInsights_RBAC(t *testing.T) {
 					require.Equal(t, http.StatusNotFound, apiErr.StatusCode())
 				})
 			}
+		})
+	}
+}
+
+func TestGenericInsights_Disabled(t *testing.T) {
+	t.Parallel()
+
+	db, ps := dbtestutil.NewDB(t)
+	logger := testutil.Logger(t)
+	client := coderdtest.New(t, &coderdtest.Options{
+		Database:                  db,
+		Pubsub:                    ps,
+		Logger:                    &logger,
+		IncludeProvisionerDaemon:  true,
+		AgentStatsRefreshInterval: time.Millisecond * 100,
+		DatabaseRolluper: dbrollup.New(
+			logger.Named("dbrollup"),
+			db,
+			dbrollup.WithInterval(time.Millisecond*100),
+		),
+		DeploymentValues: coderdtest.DeploymentValues(t, func(dv *codersdk.DeploymentValues) {
+			dv.StatsCollection = codersdk.StatsCollectionConfig{
+				UsageStats: codersdk.UsageStatsConfig{
+					Enable: false,
+				},
+			}
+		}),
+	})
+	user := coderdtest.CreateFirstUser(t, client)
+	_, _ = coderdtest.CreateAnotherUser(t, client, user.OrganizationID)
+
+	tests := []struct {
+		name string
+		fn   func(ctx context.Context) error
+		// ok means there should be no error, otherwise assume 404 due to being
+		// disabled.
+		ok bool
+	}{
+		{
+			name: "DAUS",
+			fn: func(ctx context.Context) error {
+				_, err := client.DeploymentDAUs(ctx, 0)
+				return err
+			},
+		},
+		{
+			name: "UserActivity",
+			fn: func(ctx context.Context) error {
+				_, err := client.UserActivityInsights(ctx, codersdk.UserActivityInsightsRequest{})
+				return err
+			},
+		},
+		{
+			name: "UserLatency",
+			fn: func(ctx context.Context) error {
+				_, err := client.UserLatencyInsights(ctx, codersdk.UserLatencyInsightsRequest{})
+				return err
+			},
+		},
+		{
+			name: "UserStatusCounts",
+			fn: func(ctx context.Context) error {
+				_, err := client.GetUserStatusCounts(ctx, codersdk.GetUserStatusCountsRequest{
+					Timezone: "America/St_Johns",
+					Offset:   -2,
+				})
+				return err
+			},
+			// Status count is not derived from template insights, so it should not be
+			// disabled.
+			ok: true,
+		},
+		{
+			name: "Templates",
+			fn: func(ctx context.Context) error {
+				_, err := client.TemplateInsights(ctx, codersdk.TemplateInsightsRequest{})
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
+			defer cancel()
+
+			err := tt.fn(ctx)
+			if tt.ok {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				cerr := coderdtest.SDKError(t, err)
+				require.Contains(t, cerr.Error(), "disabled")
+				require.Equal(t, http.StatusNotFound, cerr.StatusCode())
+			}
+		})
+	}
+}
+
+func TestGetUserStatusCounts(t *testing.T) {
+	t.Parallel()
+
+	type testCase struct {
+		name          string
+		request       codersdk.GetUserStatusCountsRequest
+		checkError    func(t *testing.T, err error)
+		checkResponse func(t *testing.T, resp codersdk.GetUserStatusCountsResponse)
+	}
+
+	happyResponseCheck := func(t *testing.T, resp codersdk.GetUserStatusCountsResponse) {
+		require.Len(t, resp.StatusCounts, 1)
+		require.NotNil(t, resp.StatusCounts[codersdk.UserStatusActive])
+		require.Len(t, resp.StatusCounts[codersdk.UserStatusActive], 61)
+		// Depending on the current time of day relative to the
+		// timezone/offset, the first user's creation may land on the
+		// last date in the range. All earlier dates must be zero; the
+		// last date may be 0 or 1.
+		counts := resp.StatusCounts[codersdk.UserStatusActive]
+		for _, count := range counts[:len(counts)-1] {
+			require.Zero(t, count.Count)
+		}
+		require.LessOrEqual(t, counts[len(counts)-1].Count, int64(1))
+	}
+	testcases := []testCase{
+		{
+			name: "OK when timezone and offset are provided",
+			request: codersdk.GetUserStatusCountsRequest{
+				Timezone: "America/St_Johns",
+				Offset:   -2,
+			},
+			checkError: func(t *testing.T, err error) {
+				require.NoError(t, err)
+			},
+			checkResponse: happyResponseCheck,
+		},
+		{
+			name: "OK when timezone without offset",
+			request: codersdk.GetUserStatusCountsRequest{
+				Timezone: "America/St_Johns",
+			},
+			checkError: func(t *testing.T, err error) {
+				require.NoError(t, err)
+			},
+			checkResponse: happyResponseCheck,
+		},
+		{
+			name: "OK when offset is provided without timezone",
+			request: codersdk.GetUserStatusCountsRequest{
+				Offset: -2,
+			},
+			checkError: func(t *testing.T, err error) {
+				require.NoError(t, err)
+			},
+			checkResponse: happyResponseCheck,
+		},
+		{
+			name: "Error when timezone is invalid",
+			request: codersdk.GetUserStatusCountsRequest{
+				Timezone: "Invalid/Timezone",
+			},
+			checkError: func(t *testing.T, err error) {
+				require.Error(t, err)
+				cerr := coderdtest.SDKError(t, err)
+				assert.ErrorContains(t, cerr, "unknown time zone")
+				require.Equal(t, http.StatusBadRequest, cerr.StatusCode())
+			},
+			checkResponse: func(t *testing.T, resp codersdk.GetUserStatusCountsResponse) {
+				require.Empty(t, resp.StatusCounts)
+			},
+		},
+	}
+
+	client := coderdtest.New(t, nil)
+	coderdtest.CreateFirstUser(t, client)
+	for _, tt := range testcases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := testutil.Context(t, testutil.WaitShort)
+			resp, err := client.GetUserStatusCounts(ctx, tt.request)
+			tt.checkError(t, err)
+			tt.checkResponse(t, resp)
 		})
 	}
 }

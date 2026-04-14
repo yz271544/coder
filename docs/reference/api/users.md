@@ -34,7 +34,9 @@ curl -X GET http://coder-server:8080/api/v2/users \
       "avatar_url": "http://example.com",
       "created_at": "2019-08-24T14:15:22Z",
       "email": "user@example.com",
+      "has_ai_seat": true,
       "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+      "is_service_account": true,
       "last_seen_at": "2019-08-24T14:15:22Z",
       "login_type": "",
       "name": "string",
@@ -90,6 +92,7 @@ curl -X POST http://coder-server:8080/api/v2/users \
     "497f6eca-6276-4993-bfeb-53cbbbba6f08"
   ],
   "password": "string",
+  "service_account": true,
   "user_status": "active",
   "username": "string"
 }
@@ -110,7 +113,9 @@ curl -X POST http://coder-server:8080/api/v2/users \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",
@@ -240,6 +245,10 @@ curl -X POST http://coder-server:8080/api/v2/users/first \
 {
   "email": "string",
   "name": "string",
+  "onboarding_info": {
+    "newsletter_marketing": true,
+    "newsletter_releases": true
+  },
   "password": "string",
   "trial": true,
   "trial_info": {
@@ -373,6 +382,37 @@ curl -X GET http://coder-server:8080/api/v2/users/oauth2/github/device \
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
+## Get OIDC claims for the authenticated user
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X GET http://coder-server:8080/api/v2/users/oidc-claims \
+  -H 'Accept: application/json' \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`GET /users/oidc-claims`
+
+### Example responses
+
+> 200 Response
+
+```json
+{
+  "claims": {}
+}
+```
+
+### Responses
+
+| Status | Meaning                                                 | Description | Schema                                                               |
+|--------|---------------------------------------------------------|-------------|----------------------------------------------------------------------|
+| 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | [codersdk.OIDCClaimsResponse](schemas.md#codersdkoidcclaimsresponse) |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
 ## OpenID Connect Callback
 
 ### Code samples
@@ -421,7 +461,9 @@ curl -X GET http://coder-server:8080/api/v2/users/{user} \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",
@@ -746,9 +788,10 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/keys/tokens \
 
 ### Parameters
 
-| Name   | In   | Type   | Required | Description          |
-|--------|------|--------|----------|----------------------|
-| `user` | path | string | true     | User ID, name, or me |
+| Name              | In    | Type    | Required | Description                        |
+|-------------------|-------|---------|----------|------------------------------------|
+| `user`            | path  | string  | true     | User ID, name, or me               |
+| `include_expired` | query | boolean | false    | Include expired tokens in the list |
 
 ### Example responses
 
@@ -757,6 +800,12 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/keys/tokens \
 ```json
 [
   {
+    "allow_list": [
+      {
+        "id": "string",
+        "type": "*"
+      }
+    ],
     "created_at": "2019-08-24T14:15:22Z",
     "expires_at": "2019-08-24T14:15:22Z",
     "id": "string",
@@ -784,31 +833,31 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/keys/tokens \
 
 Status Code **200**
 
-| Name                 | Type                                                   | Required | Restrictions | Description                     |
-|----------------------|--------------------------------------------------------|----------|--------------|---------------------------------|
-| `[array item]`       | array                                                  | false    |              |                                 |
-| `» created_at`       | string(date-time)                                      | true     |              |                                 |
-| `» expires_at`       | string(date-time)                                      | true     |              |                                 |
-| `» id`               | string                                                 | true     |              |                                 |
-| `» last_used`        | string(date-time)                                      | true     |              |                                 |
-| `» lifetime_seconds` | integer                                                | true     |              |                                 |
-| `» login_type`       | [codersdk.LoginType](schemas.md#codersdklogintype)     | true     |              |                                 |
-| `» scope`            | [codersdk.APIKeyScope](schemas.md#codersdkapikeyscope) | false    |              | Deprecated: use Scopes instead. |
-| `» scopes`           | array                                                  | false    |              |                                 |
-| `» token_name`       | string                                                 | true     |              |                                 |
-| `» updated_at`       | string(date-time)                                      | true     |              |                                 |
-| `» user_id`          | string(uuid)                                           | true     |              |                                 |
+| Name                 | Type                                                     | Required | Restrictions | Description                     |
+|----------------------|----------------------------------------------------------|----------|--------------|---------------------------------|
+| `[array item]`       | array                                                    | false    |              |                                 |
+| `» allow_list`       | array                                                    | false    |              |                                 |
+| `»» id`              | string                                                   | false    |              |                                 |
+| `»» type`            | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                 |
+| `» created_at`       | string(date-time)                                        | true     |              |                                 |
+| `» expires_at`       | string(date-time)                                        | true     |              |                                 |
+| `» id`               | string                                                   | true     |              |                                 |
+| `» last_used`        | string(date-time)                                        | true     |              |                                 |
+| `» lifetime_seconds` | integer                                                  | true     |              |                                 |
+| `» login_type`       | [codersdk.LoginType](schemas.md#codersdklogintype)       | true     |              |                                 |
+| `» scope`            | [codersdk.APIKeyScope](schemas.md#codersdkapikeyscope)   | false    |              | Deprecated: use Scopes instead. |
+| `» scopes`           | array                                                    | false    |              |                                 |
+| `» token_name`       | string                                                   | true     |              |                                 |
+| `» updated_at`       | string(date-time)                                        | true     |              |                                 |
+| `» user_id`          | string(uuid)                                             | true     |              |                                 |
 
 #### Enumerated Values
 
-| Property     | Value                 |
-|--------------|-----------------------|
-| `login_type` | `password`            |
-| `login_type` | `github`              |
-| `login_type` | `oidc`                |
-| `login_type` | `token`               |
-| `scope`      | `all`                 |
-| `scope`      | `application_connect` |
+| Property     | Value(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|--------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `type`       | `*`, `aibridge_interception`, `api_key`, `assign_org_role`, `assign_role`, `audit_log`, `boundary_usage`, `chat`, `connection_log`, `crypto_key`, `debug_info`, `deployment_config`, `deployment_stats`, `file`, `group`, `group_member`, `idpsync_settings`, `inbox_notification`, `license`, `notification_message`, `notification_preference`, `notification_template`, `oauth2_app`, `oauth2_app_code_token`, `oauth2_app_secret`, `organization`, `organization_member`, `prebuilt_workspace`, `provisioner_daemon`, `provisioner_jobs`, `replicas`, `system`, `tailnet_coordinator`, `task`, `template`, `usage_event`, `user`, `user_secret`, `webpush_subscription`, `workspace`, `workspace_agent_devcontainers`, `workspace_agent_resource_monitor`, `workspace_dormant`, `workspace_proxy` |
+| `login_type` | `github`, `oidc`, `password`, `token`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `scope`      | `all`, `application_connect`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -896,6 +945,12 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/keys/tokens/{keyname} \
 
 ```json
 {
+  "allow_list": [
+    {
+      "id": "string",
+      "type": "*"
+    }
+  ],
   "created_at": "2019-08-24T14:15:22Z",
   "expires_at": "2019-08-24T14:15:22Z",
   "id": "string",
@@ -946,6 +1001,12 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/keys/{keyid} \
 
 ```json
 {
+  "allow_list": [
+    {
+      "id": "string",
+      "type": "*"
+    }
+  ],
   "created_at": "2019-08-24T14:15:22Z",
   "expires_at": "2019-08-24T14:15:22Z",
   "id": "string",
@@ -994,6 +1055,40 @@ curl -X DELETE http://coder-server:8080/api/v2/users/{user}/keys/{keyid} \
 | Status | Meaning                                                         | Description | Schema |
 |--------|-----------------------------------------------------------------|-------------|--------|
 | 204    | [No Content](https://tools.ietf.org/html/rfc7231#section-6.3.5) | No Content  |        |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
+## Expire API key
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X PUT http://coder-server:8080/api/v2/users/{user}/keys/{keyid}/expire \
+  -H 'Accept: */*' \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`PUT /users/{user}/keys/{keyid}/expire`
+
+### Parameters
+
+| Name    | In   | Type           | Required | Description          |
+|---------|------|----------------|----------|----------------------|
+| `user`  | path | string         | true     | User ID, name, or me |
+| `keyid` | path | string(string) | true     | Key ID               |
+
+### Example responses
+
+> 404 Response
+
+### Responses
+
+| Status | Meaning                                                                    | Description           | Schema                                           |
+|--------|----------------------------------------------------------------------------|-----------------------|--------------------------------------------------|
+| 204    | [No Content](https://tools.ietf.org/html/rfc7231#section-6.3.5)            | No Content            |                                                  |
+| 404    | [Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)             | Not Found             | [codersdk.Response](schemas.md#codersdkresponse) |
+| 500    | [Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1) | Internal Server Error | [codersdk.Response](schemas.md#codersdkresponse) |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -1178,6 +1273,90 @@ curl -X PUT http://coder-server:8080/api/v2/users/{user}/password \
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
+## Get user preference settings
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X GET http://coder-server:8080/api/v2/users/{user}/preferences \
+  -H 'Accept: application/json' \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`GET /users/{user}/preferences`
+
+### Parameters
+
+| Name   | In   | Type   | Required | Description          |
+|--------|------|--------|----------|----------------------|
+| `user` | path | string | true     | User ID, name, or me |
+
+### Example responses
+
+> 200 Response
+
+```json
+{
+  "task_notification_alert_dismissed": true
+}
+```
+
+### Responses
+
+| Status | Meaning                                                 | Description | Schema                                                                       |
+|--------|---------------------------------------------------------|-------------|------------------------------------------------------------------------------|
+| 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | [codersdk.UserPreferenceSettings](schemas.md#codersdkuserpreferencesettings) |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
+## Update user preference settings
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X PUT http://coder-server:8080/api/v2/users/{user}/preferences \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json' \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`PUT /users/{user}/preferences`
+
+> Body parameter
+
+```json
+{
+  "task_notification_alert_dismissed": true
+}
+```
+
+### Parameters
+
+| Name   | In   | Type                                                                                                   | Required | Description             |
+|--------|------|--------------------------------------------------------------------------------------------------------|----------|-------------------------|
+| `user` | path | string                                                                                                 | true     | User ID, name, or me    |
+| `body` | body | [codersdk.UpdateUserPreferenceSettingsRequest](schemas.md#codersdkupdateuserpreferencesettingsrequest) | true     | New preference settings |
+
+### Example responses
+
+> 200 Response
+
+```json
+{
+  "task_notification_alert_dismissed": true
+}
+```
+
+### Responses
+
+| Status | Meaning                                                 | Description | Schema                                                                       |
+|--------|---------------------------------------------------------|-------------|------------------------------------------------------------------------------|
+| 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | [codersdk.UserPreferenceSettings](schemas.md#codersdkuserpreferencesettings) |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
 ## Update user profile
 
 ### Code samples
@@ -1217,7 +1396,9 @@ curl -X PUT http://coder-server:8080/api/v2/users/{user}/profile \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",
@@ -1274,7 +1455,9 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/roles \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",
@@ -1343,7 +1526,9 @@ curl -X PUT http://coder-server:8080/api/v2/users/{user}/roles \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",
@@ -1400,7 +1585,9 @@ curl -X PUT http://coder-server:8080/api/v2/users/{user}/status/activate \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",
@@ -1457,7 +1644,9 @@ curl -X PUT http://coder-server:8080/api/v2/users/{user}/status/suspend \
   "avatar_url": "http://example.com",
   "created_at": "2019-08-24T14:15:22Z",
   "email": "user@example.com",
+  "has_ai_seat": true,
   "id": "497f6eca-6276-4993-bfeb-53cbbbba6f08",
+  "is_service_account": true,
   "last_seen_at": "2019-08-24T14:15:22Z",
   "login_type": "",
   "name": "string",

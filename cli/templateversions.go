@@ -121,6 +121,11 @@ func (r *RootCmd) templateVersionsList() *serpent.Command {
 				return xerrors.Errorf("render table: %w", err)
 			}
 
+			if out == "" {
+				cliui.Infof(inv.Stderr, "No template versions found.")
+				return nil
+			}
+
 			_, err = fmt.Fprintln(inv.Stdout, out)
 			return err
 		},
@@ -134,8 +139,10 @@ func (r *RootCmd) templateVersionsList() *serpent.Command {
 type templateVersionRow struct {
 	// For json format:
 	TemplateVersion codersdk.TemplateVersion `table:"-"`
+	ActiveJSON      bool                     `json:"active" table:"-"`
 
 	// For table format:
+	ID        string    `json:"-" table:"id"`
 	Name      string    `json:"-" table:"name,default_sort"`
 	CreatedAt time.Time `json:"-" table:"created at"`
 	CreatedBy string    `json:"-" table:"created by"`
@@ -161,6 +168,8 @@ func templateVersionsToRows(activeVersionID uuid.UUID, templateVersions ...coder
 
 		rows[i] = templateVersionRow{
 			TemplateVersion: templateVersion,
+			ActiveJSON:      templateVersion.ID == activeVersionID,
+			ID:              templateVersion.ID.String(),
 			Name:            templateVersion.Name,
 			CreatedAt:       templateVersion.CreatedAt,
 			CreatedBy:       templateVersion.CreatedBy.Username,

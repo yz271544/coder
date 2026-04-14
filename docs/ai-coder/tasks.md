@@ -1,4 +1,4 @@
-# Coder Tasks (Beta)
+# Coder Tasks
 
 Coder Tasks is an interface for running & managing coding agents such as Claude Code and Aider, powered by Coder workspaces.
 
@@ -6,8 +6,16 @@ Coder Tasks is an interface for running & managing coding agents such as Claude 
 
 Coder Tasks is best for cases where the IDE is secondary, such as prototyping or running long-running background jobs. However, tasks run inside full workspaces so developers can [connect via an IDE](../user-guides/workspace-access) to take a task to completion.
 
+You can also interact with Coder Tasks from your IDE. The [Coder extension for VS Code](https://marketplace.visualstudio.com/items?itemName=coder.coder-remote) (and compatible forks like Cursor) enables you to create, monitor, and manage Tasks directly from the IDE, eliminating the need to context-switch to a browser. After logging in, you get access to a dedicated Tasks view in the sidebar that lets you select a template, configure parameters, prompt an agent, and track task status or download logs. Your tasks run in Coder workspaces with access to your repos, credentials, and internal network.
+
+![VS Code IDE Extension](../images/guides/ai-agents/vs_code_tasks_extension.png)
+
+The Task details view shows the user's complete chat, workspace status and, build or startup logs so you can understand what the Task is doing and troubleshoot failures. This makes it easier to confirm progress and diagnose issues without leaving the Task workflow.
+
+![VS Code IDE Extension Details View](../images/guides/ai-agents/vs_code_tasks_extension_details.png)
+
 > [!NOTE]
-> Coder Tasks is free and open source. If you are a Coder Premium customer or want to run hundreds of tasks in the background, [contact us](https://coder.com/contact) for roadmap information and volume pricing.
+> Both Community and Premium deployments include 1,000 Agent Workspace Builds for proof-of-concept use. Community deployments do not have access to [AI Gateway](./ai-gateway/index.md) or [Agent Firewall](./agent-firewall/index.md). To scale beyond the 1,000 build limit or enable AI Governance features, the [AI Governance Add-On](./ai-governance.md) provides expanded usage pools that grow with your user count. [Contact us](https://coder.com/contact) to discuss pricing.
 
 ## Supported Agents (and Models)
 
@@ -39,16 +47,23 @@ Try prompts such as:
 - "document the project structure"
 - "change the primary color theme to purple"
 
-To import the template and begin configuring it, follow the [documentation in the Coder Registry](https://registry.coder.com/templates/coder-labs/tasks-docker)
+To import the template and begin configuring it, import the example [Run Coder Tasks on Docker](https://github.com/coder/coder/tree/main/examples/templates/tasks-docker) template.
 
 ### Option 2&rpar; Create or Duplicate Your Own Template
 
-A template becomes a Task template if it defines a `coder_ai_task` resource and a `coder_parameter` named `"AI Prompt"`. Coder analyzes template files during template version import to determine if these requirements are met. Try adding this terraform block to an existing template where you'll add our Claude Code module. Note: the `coder_ai_task` resource is defined within the [Claude Code Module](https://registry.coder.com/modules/coder/claude-code?tab=readme), so it's not defined within this block.
+A template becomes a Task-capable template if it defines a `coder_ai_task` resource. Coder analyzes template files during template version import to determine if these requirements are met. Try adding this terraform block to an existing template where you'll add our Claude Code module.
+
+> [!NOTE]
+> The `coder_ai_task` resource is not defined within the [Claude Code Module](https://registry.coder.com/modules/coder/claude-code?tab=readme). You need to define it yourself.
 
 ```hcl
-data "coder_parameter" "ai_prompt" {
-    name = "AI Prompt"
-    type = "string"
+terraform {
+  required_providers {
+    coder = {
+      source = "coder/coder"
+      version = ">= 2.13"
+    }
+  }
 }
 
 data "coder_parameter" "setup_script" {
@@ -61,12 +76,18 @@ data "coder_parameter" "setup_script" {
   default      = ""
 }
 
+data "coder_task" "me" {}
+
+resource "coder_ai_task" "task" {
+  app_id = module.claude-code.task_app_id
+}
+
 # The Claude Code module does the automatic task reporting
 # Other agent modules: https://registry.coder.com/modules?search=agent
 # Or use a custom agent:
 module "claude-code" {
   source   = "registry.coder.com/coder/claude-code/coder"
-  version  = "3.0.1"
+  version  = "4.0.0"
   agent_id = coder_agent.example.id
   workdir  = "/home/coder/project"
 
@@ -77,7 +98,7 @@ module "claude-code" {
   claude_code_version = "1.0.82" # Pin to a specific version
   agentapi_version    = "v0.6.1"
 
-  ai_prompt = data.coder_parameter.ai_prompt.value
+  ai_prompt = data.coder_task.me.prompt
   model     = "sonnet"
 
   # Optional: run your pre-flight script
@@ -105,16 +126,16 @@ variable "anthropic_api_key" {
 }
 ```
 
-> [!NOTE]
-> This definition is not final and may change while Tasks is in beta. After any changes, we guarantee backwards compatibility for one minor Coder version. After that, you may need to update your template to continue using it with Tasks.
-
 Because Tasks run unpredictable AI agents, often for background tasks, we recommend creating a separate template for Coder Tasks with limited permissions. You can always duplicate your existing template, then apply separate network policies/firewalls/permissions to the template. From there, follow the docs for one of our [built-in modules for agents](https://registry.coder.com/modules?search=tag%3Atasks) in order to add it to your template, configure your LLM provider.
 
 Alternatively, follow our guide for [custom agents](./custom-agents.md).
 
+> [!IMPORTANT]
+> Upgrading from Coder v2.27 or earlier? See the [Tasks Migration Guide](./tasks-migration.md) for breaking changes in v2.28.0.
+
 ## Customizing the Task UI
 
-The Task UI displays all workspace apps declared in a Task template. You can customize the app shown in the sidebar using the `sidebar_app.id` field on the `coder_ai_task` resource.
+The Task UI displays all workspace apps declared in a Task template. You can customize the app shown in the sidebar using the `app_id` field on the `coder_ai_task` resource.
 
 If a workspace app has the special `"preview"` slug, a navbar will appear above it. This is intended for templates that let users preview a web app they’re working on.
 
@@ -127,6 +148,17 @@ Coder can automatically generate a name your tasks if you set the `ANTHROPIC_API
 ## Opting out of Tasks
 
 If you tried Tasks and decided you don't want to use it, you can hide the Tasks tab by starting `coder server` with the `CODER_HIDE_AI_TASKS=true` environment variable or the `--hide-ai-tasks` flag.
+
+## Pausing and resuming tasks
+
+Tasks automatically pause when the workspace reaches its idle timeout,
+freeing compute resources. While paused, you can view a snapshot of the
+last conversation messages. When you resume or send a new message, the
+workspace restarts and the agent picks up where it left off if the agent
+and template support session persistence.
+
+For details on how pause and resume works and what your template needs,
+see [Task lifecycle](./tasks-lifecycle.md).
 
 ## Command Line Interface
 

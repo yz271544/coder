@@ -27,8 +27,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/agent/agentcontainers"
 	"github.com/coder/coder/v2/agent/agentexec"
 	"github.com/coder/coder/v2/agent/agentrsa"
@@ -111,8 +110,17 @@ type Config struct {
 	// X11DisplayOffset is the offset to add to the X11 display number.
 	// Default is 10.
 	X11DisplayOffset *int
+	// X11MaxPort overrides the highest port used for X11 forwarding
+	// listeners. Defaults to X11MaxPort (6200). Useful in tests
+	// to shrink the port range and reduce the number of sessions
+	// required.
+	X11MaxPort *int
 	// BlockFileTransfer restricts use of file transfer applications.
 	BlockFileTransfer bool
+	// BlockReversePortForwarding disables reverse port forwarding (ssh -R).
+	BlockReversePortForwarding bool
+	// BlockLocalPortForwarding disables local port forwarding (ssh -L).
+	BlockLocalPortForwarding bool
 	// ReportConnection.
 	ReportConnection reportConnectionFunc
 	// Experimental: allow connecting to running containers via Docker exec.
@@ -159,6 +167,10 @@ func NewServer(ctx context.Context, logger slog.Logger, prometheusRegistry *prom
 		offset := X11DefaultDisplayOffset
 		config.X11DisplayOffset = &offset
 	}
+	if config.X11MaxPort == nil {
+		maxPort := X11MaxPort
+		config.X11MaxPort = &maxPort
+	}
 	if config.UpdateEnv == nil {
 		config.UpdateEnv = func(current []string) ([]string, error) { return current, nil }
 	}
@@ -182,7 +194,7 @@ func NewServer(ctx context.Context, logger slog.Logger, prometheusRegistry *prom
 	}
 
 	forwardHandler := &ssh.ForwardedTCPHandler{}
-	unixForwardHandler := newForwardedUnixHandler(logger)
+	unixForwardHandler := newForwardedUnixHandler(logger, config.BlockReversePortForwarding)
 
 	metrics := newSSHServerMetrics(prometheusRegistry)
 	s := &Server{
@@ -202,6 +214,7 @@ func NewServer(ctx context.Context, logger slog.Logger, prometheusRegistry *prom
 			x11HandlerErrors: metrics.x11HandlerErrors,
 			fs:               fs,
 			displayOffset:    *config.X11DisplayOffset,
+			maxPort:          *config.X11MaxPort,
 			sessions:         make(map[*x11Session]struct{}),
 			connections:      make(map[net.Conn]struct{}),
 			network: func() X11Network {
@@ -220,8 +233,15 @@ func NewServer(ctx context.Context, logger slog.Logger, prometheusRegistry *prom
 				wrapped := NewJetbrainsChannelWatcher(ctx, s.logger, s.config.ReportConnection, newChan, &s.connCountJetBrains)
 				ssh.DirectTCPIPHandler(srv, conn, wrapped, ctx)
 			},
-			"direct-streamlocal@openssh.com": directStreamLocalHandler,
-			"session":                        ssh.DefaultSessionHandler,
+			"direct-streamlocal@openssh.com": func(srv *ssh.Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx ssh.Context) {
+				if s.config.BlockLocalPortForwarding {
+					s.logger.Warn(ctx, "unix local port forward blocked")
+					_ = newChan.Reject(gossh.Prohibited, "local port forwarding is disabled")
+					return
+				}
+				directStreamLocalHandler(srv, conn, newChan, ctx)
+			},
+			"session": ssh.DefaultSessionHandler,
 		},
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
 			s.logger.Warn(ctx, "ssh connection failed",
@@ -241,6 +261,12 @@ func NewServer(ctx context.Context, logger slog.Logger, prometheusRegistry *prom
 		// be set before we start listening.
 		HostSigners: []ssh.Signer{},
 		LocalPortForwardingCallback: func(ctx ssh.Context, destinationHost string, destinationPort uint32) bool {
+			if s.config.BlockLocalPortForwarding {
+				s.logger.Warn(ctx, "local port forward blocked",
+					slog.F("destination_host", destinationHost),
+					slog.F("destination_port", destinationPort))
+				return false
+			}
 			// Allow local port forwarding all!
 			s.logger.Debug(ctx, "local port forward",
 				slog.F("destination_host", destinationHost),
@@ -251,6 +277,12 @@ func NewServer(ctx context.Context, logger slog.Logger, prometheusRegistry *prom
 			return true
 		},
 		ReversePortForwardingCallback: func(ctx ssh.Context, bindHost string, bindPort uint32) bool {
+			if s.config.BlockReversePortForwarding {
+				s.logger.Warn(ctx, "reverse port forward blocked",
+					slog.F("bind_host", bindHost),
+					slog.F("bind_port", bindPort))
+				return false
+			}
 			// Allow reverse port forwarding all!
 			s.logger.Debug(ctx, "reverse port forward",
 				slog.F("bind_host", bindHost),
@@ -391,10 +423,19 @@ func (s *Server) sessionHandler(session ssh.Session) {
 	env := session.Environ()
 	magicType, magicTypeRaw, env := extractMagicSessionType(env)
 
+	// It's not safe to assume RemoteAddr() returns a non-nil value. slog.F usage is fine because it correctly
+	// handles nil.
+	// c.f. https://github.com/coder/internal/issues/1143
+	remoteAddr := session.RemoteAddr()
+	remoteAddrString := ""
+	if remoteAddr != nil {
+		remoteAddrString = remoteAddr.String()
+	}
+
 	if !s.trackSession(session, true) {
 		reason := "unable to accept new session, server is closing"
 		// Report connection attempt even if we couldn't accept it.
-		disconnected := s.config.ReportConnection(id, magicType, session.RemoteAddr().String())
+		disconnected := s.config.ReportConnection(id, magicType, remoteAddrString)
 		defer disconnected(1, reason)
 
 		logger.Info(ctx, reason)
@@ -429,7 +470,7 @@ func (s *Server) sessionHandler(session ssh.Session) {
 		scr := &sessionCloseTracker{Session: session}
 		session = scr
 
-		disconnected := s.config.ReportConnection(id, magicType, session.RemoteAddr().String())
+		disconnected := s.config.ReportConnection(id, magicType, remoteAddrString)
 		defer func() {
 			disconnected(scr.exitCode(), reason)
 		}()
@@ -820,13 +861,19 @@ func (s *Server) sftpHandler(logger slog.Logger, session ssh.Session) error {
 	session.DisablePTYEmulation()
 
 	var opts []sftp.ServerOption
-	// Change current working directory to the users home
-	// directory so that SFTP connections land there.
-	homedir, err := userHomeDir()
-	if err != nil {
-		logger.Warn(ctx, "get sftp working directory failed, unable to get home dir", slog.Error(err))
-	} else {
-		opts = append(opts, sftp.WithServerWorkingDirectory(homedir))
+	// Change current working directory to the configured
+	// directory (or home directory if not set) so that SFTP
+	// connections land there.
+	dir := s.config.WorkingDirectory()
+	if dir == "" {
+		var err error
+		dir, err = userHomeDir()
+		if err != nil {
+			logger.Warn(ctx, "get sftp working directory failed, unable to get home dir", slog.Error(err))
+		}
+	}
+	if dir != "" {
+		opts = append(opts, sftp.WithServerWorkingDirectory(dir))
 	}
 
 	server, err := sftp.NewServer(session, opts...)

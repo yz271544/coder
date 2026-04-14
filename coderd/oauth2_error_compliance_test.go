@@ -99,7 +99,7 @@ func TestOAuth2RegistrationErrorCodes(t *testing.T) {
 			req: codersdk.OAuth2ClientRegistrationRequest{
 				RedirectURIs: []string{"https://example.com/callback"},
 				ClientName:   fmt.Sprintf("test-client-%d", time.Now().UnixNano()),
-				GrantTypes:   []string{"unsupported_grant_type"},
+				GrantTypes:   []codersdk.OAuth2ProviderGrantType{"unsupported_grant_type"},
 			},
 			expectedError: "invalid_client_metadata",
 			expectedCode:  http.StatusBadRequest,
@@ -109,7 +109,7 @@ func TestOAuth2RegistrationErrorCodes(t *testing.T) {
 			req: codersdk.OAuth2ClientRegistrationRequest{
 				RedirectURIs:  []string{"https://example.com/callback"},
 				ClientName:    fmt.Sprintf("test-client-%d", time.Now().UnixNano()),
-				ResponseTypes: []string{"unsupported_response_type"},
+				ResponseTypes: []codersdk.OAuth2ProviderResponseType{"unsupported_response_type"},
 			},
 			expectedError: "invalid_client_metadata",
 			expectedCode:  http.StatusBadRequest,
@@ -356,11 +356,14 @@ func TestOAuth2ErrorHTTPHeaders(t *testing.T) {
 func TestOAuth2SpecificErrorScenarios(t *testing.T) {
 	t.Parallel()
 
+	// Single instance shared across all sub-tests that need a
+	// coderd server. Sub-tests that don't need one just ignore it.
+	client := coderdtest.New(t, nil)
+	_ = coderdtest.CreateFirstUser(t, client)
+
 	t.Run("MissingRequiredFields", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// Test completely empty request
@@ -385,8 +388,6 @@ func TestOAuth2SpecificErrorScenarios(t *testing.T) {
 	t.Run("UnsupportedFields", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// Test with fields that might not be supported yet
@@ -408,8 +409,6 @@ func TestOAuth2SpecificErrorScenarios(t *testing.T) {
 	t.Run("SecurityBoundaryErrors", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// Register a client first

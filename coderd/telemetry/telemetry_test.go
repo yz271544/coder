@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -13,21 +14,26 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
 	"github.com/coder/coder/v2/buildinfo"
+	"github.com/coder/coder/v2/coderd/boundaryusage"
 	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/dbfake"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/idpsync"
 	"github.com/coder/coder/v2/coderd/runtimeconfig"
 	"github.com/coder/coder/v2/coderd/telemetry"
+	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/quartz"
 )
 
 func TestMain(m *testing.M) {
@@ -44,6 +50,7 @@ func TestTelemetry(t *testing.T) {
 		db, _ := dbtestutil.NewDB(t)
 
 		ctx := testutil.Context(t, testutil.WaitMedium)
+		now := dbtime.Now()
 
 		org, err := db.GetDefaultOrganization(ctx)
 		require.NoError(t, err)
@@ -143,13 +150,26 @@ func TestTelemetry(t *testing.T) {
 			AgentID:      taskWsAgent.ID,
 		})
 		taskWB := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
-			Transition:         database.WorkspaceTransitionStart,
-			Reason:             database.BuildReasonAutostart,
-			WorkspaceID:        taskWs.ID,
-			TemplateVersionID:  tv.ID,
-			JobID:              taskJob.ID,
-			HasAITask:          sql.NullBool{Valid: true, Bool: true},
-			AITaskSidebarAppID: uuid.NullUUID{Valid: true, UUID: taskWsApp.ID},
+			Transition:        database.WorkspaceTransitionStart,
+			Reason:            database.BuildReasonAutostart,
+			WorkspaceID:       taskWs.ID,
+			TemplateVersionID: tv.ID,
+			JobID:             taskJob.ID,
+			HasAITask:         sql.NullBool{Valid: true, Bool: true},
+		})
+		task := dbgen.Task(t, db, database.TaskTable{
+			OwnerID:            user.ID,
+			OrganizationID:     org.ID,
+			WorkspaceID:        uuid.NullUUID{Valid: true, UUID: taskWs.ID},
+			TemplateVersionID:  taskTV.ID,
+			Prompt:             "example prompt",
+			TemplateParameters: json.RawMessage(`{"foo": "bar"}`),
+		})
+		taskWA := dbgen.TaskWorkspaceApp(t, db, database.TaskWorkspaceApp{
+			TaskID:               task.ID,
+			WorkspaceAgentID:     uuid.NullUUID{Valid: true, UUID: taskWsAgent.ID},
+			WorkspaceAppID:       uuid.NullUUID{Valid: true, UUID: taskWsApp.ID},
+			WorkspaceBuildNumber: taskWB.BuildNumber,
 		})
 
 		group := dbgen.Group(t, db, database.Group{
@@ -194,12 +214,92 @@ func TestTelemetry(t *testing.T) {
 			AgentID: wsagent.ID,
 		})
 
-		_, snapshot := collectSnapshot(ctx, t, db, nil)
+		previousAIBridgeInterceptionPeriod := now.Truncate(time.Hour)
+		user2 := dbgen.User(t, db, database.User{})
+		aiBridgeInterception1 := dbgen.AIBridgeInterception(t, db, database.InsertAIBridgeInterceptionParams{
+			InitiatorID: user.ID,
+			Provider:    "anthropic",
+			Model:       "deanseek",
+			StartedAt:   previousAIBridgeInterceptionPeriod.Add(-30 * time.Minute),
+		}, nil)
+		_ = dbgen.AIBridgeTokenUsage(t, db, database.InsertAIBridgeTokenUsageParams{
+			InterceptionID:        aiBridgeInterception1.ID,
+			InputTokens:           100,
+			OutputTokens:          200,
+			CacheReadInputTokens:  300,
+			CacheWriteInputTokens: 400,
+			Metadata:              json.RawMessage(`{"cache_read_input":300,"cache_creation_input":400}`),
+		})
+		_ = dbgen.AIBridgeUserPrompt(t, db, database.InsertAIBridgeUserPromptParams{
+			InterceptionID: aiBridgeInterception1.ID,
+		})
+		_ = dbgen.AIBridgeToolUsage(t, db, database.InsertAIBridgeToolUsageParams{
+			InterceptionID:  aiBridgeInterception1.ID,
+			Injected:        true,
+			InvocationError: sql.NullString{String: "error1", Valid: true},
+		})
+		_, err = db.UpdateAIBridgeInterceptionEnded(ctx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      aiBridgeInterception1.ID,
+			EndedAt: aiBridgeInterception1.StartedAt.Add(1 * time.Minute), // 1 minute duration
+		})
+		require.NoError(t, err)
+		aiBridgeInterception2 := dbgen.AIBridgeInterception(t, db, database.InsertAIBridgeInterceptionParams{
+			InitiatorID: user2.ID,
+			Provider:    aiBridgeInterception1.Provider,
+			Model:       aiBridgeInterception1.Model,
+			StartedAt:   aiBridgeInterception1.StartedAt,
+		}, nil)
+		_ = dbgen.AIBridgeTokenUsage(t, db, database.InsertAIBridgeTokenUsageParams{
+			InterceptionID:        aiBridgeInterception2.ID,
+			InputTokens:           100,
+			OutputTokens:          200,
+			CacheReadInputTokens:  300,
+			CacheWriteInputTokens: 400,
+			Metadata:              json.RawMessage(`{"cache_read_input":300,"cache_creation_input":400}`),
+		})
+		_ = dbgen.AIBridgeUserPrompt(t, db, database.InsertAIBridgeUserPromptParams{
+			InterceptionID: aiBridgeInterception2.ID,
+		})
+		_ = dbgen.AIBridgeToolUsage(t, db, database.InsertAIBridgeToolUsageParams{
+			InterceptionID: aiBridgeInterception2.ID,
+			Injected:       false,
+		})
+		_, err = db.UpdateAIBridgeInterceptionEnded(ctx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      aiBridgeInterception2.ID,
+			EndedAt: aiBridgeInterception2.StartedAt.Add(2 * time.Minute), // 2 minute duration
+		})
+		require.NoError(t, err)
+		aiBridgeInterception3 := dbgen.AIBridgeInterception(t, db, database.InsertAIBridgeInterceptionParams{
+			InitiatorID: user2.ID,
+			Provider:    "openai",
+			Model:       "gpt-5",
+			StartedAt:   aiBridgeInterception1.StartedAt,
+		}, nil)
+		_, err = db.UpdateAIBridgeInterceptionEnded(ctx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      aiBridgeInterception3.ID,
+			EndedAt: aiBridgeInterception3.StartedAt.Add(3 * time.Minute), // 3 minute duration
+		})
+		require.NoError(t, err)
+		_ = dbgen.AIBridgeInterception(t, db, database.InsertAIBridgeInterceptionParams{
+			InitiatorID: user2.ID,
+			Provider:    "openai",
+			Model:       "gpt-5",
+			StartedAt:   aiBridgeInterception1.StartedAt,
+		}, nil)
+		// not ended, so it should not affect summaries
+
+		clock := quartz.NewMock(t)
+		clock.Set(now)
+
+		_, snapshot := collectSnapshot(ctx, t, db, func(opts telemetry.Options) telemetry.Options {
+			opts.Clock = clock
+			return opts
+		})
 		require.Len(t, snapshot.ProvisionerJobs, 2)
 		require.Len(t, snapshot.Licenses, 1)
 		require.Len(t, snapshot.Templates, 2)
 		require.Len(t, snapshot.TemplateVersions, 3)
-		require.Len(t, snapshot.Users, 1)
+		require.Len(t, snapshot.Users, 2)
 		require.Len(t, snapshot.Groups, 2)
 		// 1 member in the everyone group + 1 member in the custom group
 		require.Len(t, snapshot.GroupMembers, 2)
@@ -220,6 +320,34 @@ func TestTelemetry(t *testing.T) {
 		require.Len(t, wsa.Subsystems, 2)
 		require.Equal(t, string(database.WorkspaceAgentSubsystemEnvbox), wsa.Subsystems[0])
 		require.Equal(t, string(database.WorkspaceAgentSubsystemExectrace), wsa.Subsystems[1])
+		require.Len(t, snapshot.Tasks, 1)
+		require.Len(t, snapshot.TaskEvents, 1)
+		taskEvent := snapshot.TaskEvents[0]
+		assert.Equal(t, task.ID.String(), taskEvent.TaskID)
+		assert.Nil(t, taskEvent.LastResumedAt)
+		assert.Nil(t, taskEvent.LastPausedAt)
+		assert.Nil(t, taskEvent.PauseReason)
+		assert.Nil(t, taskEvent.ResumeReason)
+		assert.Nil(t, taskEvent.IdleDurationMS)
+		assert.Nil(t, taskEvent.PausedDurationMS)
+		assert.Nil(t, taskEvent.ResumeToStatusMS)
+		assert.Nil(t, taskEvent.ActiveDurationMS)
+		for _, snapTask := range snapshot.Tasks {
+			assert.Equal(t, task.ID.String(), snapTask.ID)
+			assert.Equal(t, task.OrganizationID.String(), snapTask.OrganizationID)
+			assert.Equal(t, task.OwnerID.String(), snapTask.OwnerID)
+			assert.Equal(t, task.Name, snapTask.Name)
+			if assert.True(t, task.WorkspaceID.Valid) {
+				assert.Equal(t, task.WorkspaceID.UUID.String(), *snapTask.WorkspaceID)
+			}
+			assert.EqualValues(t, taskWA.WorkspaceBuildNumber, *snapTask.WorkspaceBuildNumber)
+			assert.Equal(t, taskWA.WorkspaceAgentID.UUID.String(), *snapTask.WorkspaceAgentID)
+			assert.Equal(t, taskWA.WorkspaceAppID.UUID.String(), *snapTask.WorkspaceAppID)
+			assert.Equal(t, task.TemplateVersionID.String(), snapTask.TemplateVersionID)
+			assert.Equal(t, "e196fe22e61cfa32d8c38749e0ce348108bb4cae29e2c36cdcce7e77faa9eb5f", snapTask.PromptHash)
+			assert.Equal(t, string(task.Status), snapTask.Status)
+			assert.Equal(t, task.CreatedAt.UTC(), snapTask.CreatedAt.UTC())
+		}
 
 		require.True(t, slices.ContainsFunc(snapshot.TemplateVersions, func(ttv telemetry.TemplateVersion) bool {
 			if ttv.ID != taskTV.ID {
@@ -257,6 +385,53 @@ func TestTelemetry(t *testing.T) {
 		for _, entity := range snapshot.Templates {
 			require.Equal(t, entity.OrganizationID, org.ID)
 		}
+
+		// 2 unique provider + model + client combinations
+		require.Len(t, snapshot.AIBridgeInterceptionsSummaries, 2)
+		snapshot1 := snapshot.AIBridgeInterceptionsSummaries[0]
+		snapshot2 := snapshot.AIBridgeInterceptionsSummaries[1]
+		if snapshot1.Provider != aiBridgeInterception1.Provider {
+			snapshot1, snapshot2 = snapshot2, snapshot1
+		}
+
+		require.Equal(t, snapshot1.Provider, aiBridgeInterception1.Provider)
+		require.Equal(t, snapshot1.Model, aiBridgeInterception1.Model)
+		require.Equal(t, snapshot1.Client, "Unknown") // no client info yet
+		require.EqualValues(t, snapshot1.InterceptionCount, 2)
+		require.EqualValues(t, snapshot1.InterceptionsByRoute, map[string]int64{}) // no route info yet
+		require.EqualValues(t, snapshot1.InterceptionDurationMillis.P50, 90_000)
+		require.EqualValues(t, snapshot1.InterceptionDurationMillis.P90, 114_000)
+		require.EqualValues(t, snapshot1.InterceptionDurationMillis.P95, 117_000)
+		require.EqualValues(t, snapshot1.InterceptionDurationMillis.P99, 119_400)
+		require.EqualValues(t, snapshot1.UniqueInitiatorCount, 2)
+		require.EqualValues(t, snapshot1.UserPromptsCount, 2)
+		require.EqualValues(t, snapshot1.TokenUsagesCount, 2)
+		require.EqualValues(t, snapshot1.TokenCount.Input, 200)
+		require.EqualValues(t, snapshot1.TokenCount.Output, 400)
+		require.EqualValues(t, snapshot1.TokenCount.CachedRead, 600)
+		require.EqualValues(t, snapshot1.TokenCount.CachedWritten, 800)
+		require.EqualValues(t, snapshot1.ToolCallsCount.Injected, 1)
+		require.EqualValues(t, snapshot1.ToolCallsCount.NonInjected, 1)
+		require.EqualValues(t, snapshot1.InjectedToolCallErrorCount, 1)
+
+		require.Equal(t, snapshot2.Provider, aiBridgeInterception3.Provider)
+		require.Equal(t, snapshot2.Model, aiBridgeInterception3.Model)
+		require.Equal(t, snapshot2.Client, "Unknown") // no client info yet
+		require.EqualValues(t, snapshot2.InterceptionCount, 1)
+		require.EqualValues(t, snapshot2.InterceptionsByRoute, map[string]int64{}) // no route info yet
+		require.EqualValues(t, snapshot2.InterceptionDurationMillis.P50, 180_000)
+		require.EqualValues(t, snapshot2.InterceptionDurationMillis.P90, 180_000)
+		require.EqualValues(t, snapshot2.InterceptionDurationMillis.P95, 180_000)
+		require.EqualValues(t, snapshot2.InterceptionDurationMillis.P99, 180_000)
+		require.EqualValues(t, snapshot2.UniqueInitiatorCount, 1)
+		require.EqualValues(t, snapshot2.UserPromptsCount, 0)
+		require.EqualValues(t, snapshot2.TokenUsagesCount, 0)
+		require.EqualValues(t, snapshot2.TokenCount.Input, 0)
+		require.EqualValues(t, snapshot2.TokenCount.Output, 0)
+		require.EqualValues(t, snapshot2.TokenCount.CachedRead, 0)
+		require.EqualValues(t, snapshot2.TokenCount.CachedWritten, 0)
+		require.EqualValues(t, snapshot2.ToolCallsCount.Injected, 0)
+		require.EqualValues(t, snapshot2.ToolCallsCount.NonInjected, 0)
 	})
 	t.Run("HashedEmail", func(t *testing.T) {
 		t.Parallel()
@@ -520,6 +695,573 @@ func TestPrebuiltWorkspacesTelemetry(t *testing.T) {
 	}
 }
 
+// taskTelemetryHelper is a grab bag of stuff useful in task telemetry test cases
+type taskTelemetryHelper struct {
+	t    *testing.T
+	ctx  context.Context
+	db   database.Store
+	org  database.Organization
+	user database.User
+}
+
+// createBuild creates a workspace build with the given parameters,
+// handling provisioner job creation automatically.
+func (h *taskTelemetryHelper) createBuild(
+	resp dbfake.WorkspaceResponse,
+	buildNumber int32,
+	createdAt time.Time,
+	transition database.WorkspaceTransition,
+	reason database.BuildReason,
+) (database.WorkspaceBuild, *database.WorkspaceApp) {
+	job := dbgen.ProvisionerJob(h.t, h.db, nil, database.ProvisionerJob{
+		Provisioner:    database.ProvisionerTypeTerraform,
+		StorageMethod:  database.ProvisionerStorageMethodFile,
+		Type:           database.ProvisionerJobTypeWorkspaceBuild,
+		OrganizationID: h.org.ID,
+	})
+	bld := dbgen.WorkspaceBuild(h.t, h.db, database.WorkspaceBuild{
+		WorkspaceID:       resp.Workspace.ID,
+		TemplateVersionID: resp.TemplateVersion.ID,
+		JobID:             job.ID,
+		Transition:        transition,
+		Reason:            reason,
+		BuildNumber:       buildNumber,
+		CreatedAt:         createdAt,
+		HasAITask: sql.NullBool{
+			Bool:  true,
+			Valid: true,
+		},
+	})
+	if transition == database.WorkspaceTransitionStart {
+		require.NotEmpty(h.t, resp.Agents, "need at least one agent")
+		agt := resp.Agents[0]
+		// App IDs are regenerated by provisionerd each build.
+		app := dbgen.WorkspaceApp(h.t, h.db, database.WorkspaceApp{
+			AgentID: agt.ID,
+		})
+		_, err := h.db.UpsertTaskWorkspaceApp(h.ctx, database.UpsertTaskWorkspaceAppParams{
+			TaskID:               resp.Task.ID,
+			WorkspaceBuildNumber: buildNumber,
+			WorkspaceAgentID:     uuid.NullUUID{UUID: agt.ID, Valid: true},
+			WorkspaceAppID:       uuid.NullUUID{UUID: app.ID, Valid: true},
+		})
+		require.NoError(h.t, err, "failed to upsert task app")
+		return bld, &app
+	}
+	return bld, nil
+}
+
+// nolint: dupl // Test code is better WET than DRY.
+func TestTasksTelemetry(t *testing.T) {
+	t.Parallel()
+
+	// Define a fixed reference time for deterministic testing.
+	now := time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC)
+
+	createAppStatus := func(ctx context.Context, db database.Store, wsID uuid.UUID, agentID, appID uuid.UUID, state database.WorkspaceAppStatusState, message string, createdAt time.Time) {
+		_, err := db.InsertWorkspaceAppStatus(ctx, database.InsertWorkspaceAppStatusParams{
+			ID:          uuid.New(),
+			CreatedAt:   createdAt,
+			WorkspaceID: wsID,
+			AgentID:     agentID,
+			AppID:       appID,
+			State:       state,
+			Message:     message,
+		})
+		require.NoError(t, err)
+	}
+
+	getApp := func(ctx context.Context, db database.Store, agentID uuid.UUID) database.WorkspaceApp {
+		apps, err := db.GetWorkspaceAppsByAgentID(ctx, agentID)
+		require.NoError(t, err)
+		require.NotEmpty(t, apps, "expected at least one app")
+		return apps[0]
+	}
+
+	type statusSpec struct {
+		state   database.WorkspaceAppStatusState
+		message string
+		offset  time.Duration
+	}
+
+	type buildSpec struct {
+		buildNumber int32
+		offset      time.Duration
+		transition  database.WorkspaceTransition
+		reason      database.BuildReason
+		statuses    []statusSpec // created after this build, using this build's app
+	}
+
+	tests := []struct {
+		name string
+
+		// Input: DB setup.
+		skipWorkspace bool
+		createdOffset time.Duration
+		buildOffset   *time.Duration
+		extraBuilds   []buildSpec
+		appStatuses   []statusSpec
+
+		// Expected output.
+		expectEvent       bool
+		lastPausedOffset  *time.Duration
+		lastResumedOffset *time.Duration
+		pauseReason       *string
+		resumeReason      *string
+		idleDurationMS    *int64
+		pausedDurationMS  *int64
+		resumeToStatusMS  *int64
+		activeDurationMS  *int64
+	}{
+		{
+			name:          "no workspace - all lifecycle fields nil",
+			skipWorkspace: true,
+			createdOffset: -1 * time.Hour,
+		},
+		{
+			name:          "running workspace - no pause/resume events",
+			createdOffset: -45 * time.Minute,
+			buildOffset:   ptr.Ref(-30 * time.Minute),
+			expectEvent:   true,
+		},
+		{
+			name:          "with app status - no lifecycle events",
+			createdOffset: -90 * time.Minute,
+			buildOffset:   ptr.Ref(-45 * time.Minute),
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "Task started", -40 * time.Minute},
+			},
+			expectEvent: true,
+			// ResumeToStatusMS is nil because initial start (BuildReasonInitiator)
+			// doesn't count - only task_resume starts are considered.
+			activeDurationMS: ptr.Ref(int64(40 * time.Minute / time.Millisecond)),
+		},
+		{
+			name:          "auto paused - LastPausedAt and PauseReason=auto",
+			createdOffset: -3 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -20 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-20 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			pausedDurationMS: ptr.Ref(20 * time.Minute.Milliseconds()), // Ongoing pause.
+		},
+		{
+			name:          "manual paused - LastPausedAt and PauseReason=manual",
+			createdOffset: -4 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -15 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskManualPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-15 * time.Minute),
+			pauseReason:      ptr.Ref("manual"),
+			pausedDurationMS: ptr.Ref(15 * time.Minute.Milliseconds()), // Ongoing pause.
+		},
+		{
+			name:          "paused with idle time - IdleDurationMS calculated",
+			createdOffset: -5 * time.Hour,
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "Working on something", -40 * time.Minute},
+				{database.WorkspaceAppStatusStateIdle, "Idle now", -35 * time.Minute},
+			},
+			extraBuilds: []buildSpec{
+				{2, -25 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-25 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			idleDurationMS:   ptr.Ref(15 * time.Minute.Milliseconds()), // Last working (-40) to stop (-25).
+			activeDurationMS: ptr.Ref(5 * time.Minute.Milliseconds()),  // -40 min (working) to -35 min (idle).
+			pausedDurationMS: ptr.Ref(25 * time.Minute.Milliseconds()), // Ongoing pause: now - (-25min).
+		},
+		{
+			name:          "paused with working status after pause - IdleDurationMS nil",
+			createdOffset: -5 * time.Hour,
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "Working after pause", -20 * time.Minute},
+			},
+			extraBuilds: []buildSpec{
+				{2, -25 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-25 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			pausedDurationMS: ptr.Ref(25 * time.Minute.Milliseconds()), // Ongoing pause.
+			// IdleDurationMS is nil because "last working" is after pause.
+			// ActiveDurationMS is nil because working→stop interval is negative.
+		},
+		{
+			name:          "recently resumed - PausedDurationMS calculated",
+			createdOffset: -6 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -50 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -10 * time.Minute, database.WorkspaceTransitionStart, database.BuildReasonTaskResume, nil},
+			},
+			expectEvent:       true,
+			lastPausedOffset:  ptr.Ref(-50 * time.Minute),
+			lastResumedOffset: ptr.Ref(-10 * time.Minute),
+			pauseReason:       ptr.Ref("auto"),
+			resumeReason:      ptr.Ref("manual"),
+			pausedDurationMS:  ptr.Ref(40 * time.Minute.Milliseconds()),
+		},
+		{
+			// This test verifies that we do not double-report task events outside of the window.
+			name:          "resumed long ago - PausedDurationMS nil",
+			createdOffset: -10 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -5 * time.Hour, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -2 * time.Hour, database.WorkspaceTransitionStart, database.BuildReasonTaskResume, nil},
+			},
+			expectEvent: false,
+		},
+		{
+			name:          "multiple cycles - captures latest pause/resume",
+			createdOffset: -8 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -3 * time.Hour, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -150 * time.Minute, database.WorkspaceTransitionStart, database.BuildReasonTaskResume, nil},
+				{4, -30 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskManualPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-30 * time.Minute),
+			pauseReason:      ptr.Ref("manual"),
+			pausedDurationMS: ptr.Ref(30 * time.Minute.Milliseconds()), // Ongoing pause: now - (-30min).
+		},
+		{
+			name:          "currently paused after recent resume - reports ongoing pause",
+			createdOffset: -6 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -50 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -30 * time.Minute, database.WorkspaceTransitionStart, database.BuildReasonTaskResume, nil},
+				{4, -10 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskManualPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-10 * time.Minute),
+			pauseReason:      ptr.Ref("manual"),
+			pausedDurationMS: ptr.Ref(10 * time.Minute.Milliseconds()), // Ongoing pause: now - pause time.
+		},
+		{
+			name:          "multiple cycles with recent resume - pairs with preceding pause",
+			createdOffset: -6 * time.Hour,
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "started work", -6 * time.Hour},
+			},
+			extraBuilds: []buildSpec{
+				{2, -50 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -30 * time.Minute, database.WorkspaceTransitionStart, database.BuildReasonTaskResume, []statusSpec{
+					{database.WorkspaceAppStatusStateWorking, "resumed work", -25 * time.Minute},
+				}},
+			},
+			expectEvent:       true,
+			lastPausedOffset:  ptr.Ref(-50 * time.Minute),
+			lastResumedOffset: ptr.Ref(-30 * time.Minute),
+			pauseReason:       ptr.Ref("auto"),
+			resumeReason:      ptr.Ref("manual"),
+			pausedDurationMS:  ptr.Ref(20 * time.Minute.Milliseconds()),
+			resumeToStatusMS:  ptr.Ref((5 * time.Minute).Milliseconds()),
+			// Build 1 ("started work") -> Build 2 (stop) (5h10m) + Build 3 ("resumed work") -> now (25m)
+			// TODO(cian): We define IdleDurationMS as "the time from the last working status to pause".
+			//     We know that the task has reported working since T-6h and got auto-paused at T-50m.
+			//     We can reasonably assume that it has been 'idle' from when it was stopped (T-30m) to
+			//     its next report at T-25m. This is covered by ResumeToStatusMS.
+			//     But do we consider the time since its last report (T-6h) to its being auto-paused
+			//     as truly "idle"?
+			idleDurationMS:   ptr.Ref(310 * time.Minute.Milliseconds()),
+			activeDurationMS: ptr.Ref((5*time.Hour + 10*time.Minute + 25*time.Minute).Milliseconds()),
+		},
+		{
+			name:          "all fields populated - full lifecycle",
+			createdOffset: -7 * time.Hour,
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "Started working", -390 * time.Minute},
+				{database.WorkspaceAppStatusStateWorking, "Still working", -45 * time.Minute},
+			},
+			extraBuilds: []buildSpec{
+				{2, -35 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -5 * time.Minute, database.WorkspaceTransitionStart, database.BuildReasonTaskResume, []statusSpec{
+					{database.WorkspaceAppStatusStateWorking, "Resumed work", -3 * time.Minute},
+					{database.WorkspaceAppStatusStateIdle, "Finished work", -2 * time.Minute},
+				}},
+			},
+			expectEvent:       true,
+			lastPausedOffset:  ptr.Ref(-35 * time.Minute),
+			lastResumedOffset: ptr.Ref(-5 * time.Minute),
+			pauseReason:       ptr.Ref("auto"),
+			resumeReason:      ptr.Ref("manual"),
+			idleDurationMS:    ptr.Ref(10 * time.Minute.Milliseconds()),
+			pausedDurationMS:  ptr.Ref(30 * time.Minute.Milliseconds()),
+			resumeToStatusMS:  ptr.Ref((2 * time.Minute).Milliseconds()),
+			// Active duration: (-390 to -35) + (-3 to -2) = 355 + 1 = 356 min.
+			activeDurationMS: ptr.Ref(356 * time.Minute.Milliseconds()),
+		},
+		{
+			name:          "non-task_resume builds are tracked as other",
+			createdOffset: -4 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -60 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+				{3, -30 * time.Minute, database.WorkspaceTransitionStart, database.BuildReasonInitiator, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-60 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			resumeReason:     ptr.Ref("other"),
+			// LastResumedAt is set because isResumed is true (build_number > 1)
+			// even though the start reason isn't task_resume.
+			lastResumedOffset: ptr.Ref(-30 * time.Minute),
+			// PausedDurationMS reports ongoing pause: now - (-60min) = 60min.
+			pausedDurationMS: ptr.Ref(30 * time.Minute.Milliseconds()),
+		},
+		{
+			name:          "simple ongoing pause reports duration",
+			createdOffset: -3 * time.Hour,
+			extraBuilds: []buildSpec{
+				{2, -45 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-45 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			// No resume, so ongoing pause: now - (-45min) = 45min.
+			pausedDurationMS: ptr.Ref(45 * time.Minute.Milliseconds()),
+		},
+		{
+			name:          "active duration with paused task",
+			createdOffset: -2 * time.Hour,
+			buildOffset:   ptr.Ref(-2 * time.Hour),
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "Started", -90 * time.Minute},
+				{database.WorkspaceAppStatusStateIdle, "Thinking", -60 * time.Minute}, // 30min working
+				{database.WorkspaceAppStatusStateWorking, "Resumed", -45 * time.Minute},
+				{database.WorkspaceAppStatusStateComplete, "Done", -30 * time.Minute}, // 15min working
+			},
+			extraBuilds: []buildSpec{
+				{2, -25 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-25 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			idleDurationMS:   ptr.Ref(20 * time.Minute.Milliseconds()), // Last working (-45) to stop (-25).
+			activeDurationMS: ptr.Ref(45 * time.Minute.Milliseconds()), // 30 + 15 = 45min of "working".
+			pausedDurationMS: ptr.Ref(25 * time.Minute.Milliseconds()), // Ongoing pause.
+		},
+		{
+			// When a workspace_app_status and a workspace_build share
+			// the exact same created_at timestamp, the ordering inside
+			// task_status_timeline is ambiguous. The boundary row must
+			// sort after real statuses so that LEAD() and the lws
+			// lateral join produce deterministic results.
+			name:          "status and build at same timestamp - deterministic ordering",
+			createdOffset: -3 * time.Hour,
+			buildOffset:   ptr.Ref(-2 * time.Hour),
+			appStatuses: []statusSpec{
+				{database.WorkspaceAppStatusStateWorking, "Started work", -90 * time.Minute},
+				// This status has the exact same timestamp as the
+				// stop build below, exercising the tiebreaker.
+				{database.WorkspaceAppStatusStateWorking, "Last update before pause", -30 * time.Minute},
+			},
+			extraBuilds: []buildSpec{
+				{2, -30 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-30 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			// IdleDurationMS is nil: the Go code requires
+			// stop.After(lastWorking), which is false when equal.
+			// Active: -90m (working) → -30m (boundary/stop) = 60 min.
+			activeDurationMS: ptr.Ref(60 * time.Minute.Milliseconds()),
+			pausedDurationMS: ptr.Ref(30 * time.Minute.Milliseconds()),
+		},
+		{
+			// SQL filter: EXISTS (workspace_builds.created_at > createdAfter).
+			// This task has only old builds (7 days ago), so it won't match
+			// the 1-hour createdAfter filter and should not return an event.
+			name:          "old task with no recent builds - not returned",
+			createdOffset: -7 * 24 * time.Hour,
+			buildOffset:   ptr.Ref(-7 * 24 * time.Hour),
+			expectEvent:   false,
+		},
+		{
+			// SQL filter: EXISTS (workspace_builds.created_at > createdAfter).
+			// This task was created 7 days ago, but has a recent stop build,
+			// so it should match the filter and return an event.
+			name:          "old task with recent build - returned",
+			createdOffset: -7 * 24 * time.Hour,
+			buildOffset:   ptr.Ref(-7 * 24 * time.Hour),
+			extraBuilds: []buildSpec{
+				{2, -30 * time.Minute, database.WorkspaceTransitionStop, database.BuildReasonTaskAutoPause, nil},
+			},
+			expectEvent:      true,
+			lastPausedOffset: ptr.Ref(-30 * time.Minute),
+			pauseReason:      ptr.Ref("auto"),
+			pausedDurationMS: ptr.Ref(30 * time.Minute.Milliseconds()), // Ongoing pause.
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := testutil.Context(t, testutil.WaitMedium)
+			db, _ := dbtestutil.NewDB(t)
+			org, err := db.GetDefaultOrganization(ctx)
+			require.NoError(t, err)
+			user := dbgen.User(t, db, database.User{})
+			_ = dbgen.OrganizationMember(t, db, database.OrganizationMember{
+				UserID:         user.ID,
+				OrganizationID: org.ID,
+			})
+			h := &taskTelemetryHelper{
+				t:    t,
+				ctx:  ctx,
+				db:   db,
+				org:  org,
+				user: user,
+			}
+
+			// Create a deleted task. This is a test antagonist that should never show up in results.
+			deletedTaskResp := dbfake.WorkspaceBuild(h.t, h.db, database.WorkspaceTable{
+				OrganizationID: h.org.ID,
+				OwnerID:        h.user.ID,
+			}).WithTask(database.TaskTable{
+				Prompt:    fmt.Sprintf("deleted-task-%s", t.Name()),
+				CreatedAt: now.Add(-100 * time.Hour),
+			}, nil).Seed(database.WorkspaceBuild{
+				Transition:  database.WorkspaceTransitionStart,
+				Reason:      database.BuildReasonInitiator,
+				BuildNumber: 1,
+				CreatedAt:   now.Add(-100 * time.Hour),
+			}).Succeeded().Do()
+			_, err = db.DeleteTask(h.ctx, database.DeleteTaskParams{
+				DeletedAt: now.Add(-99 * time.Hour),
+				ID:        deletedTaskResp.Task.ID,
+			})
+			require.NoError(h.t, err, "creating deleted task antagonist")
+
+			var expectedTask telemetry.Task
+
+			if tt.skipWorkspace {
+				tv := dbgen.TemplateVersion(t, h.db, database.TemplateVersion{
+					OrganizationID: h.org.ID,
+					CreatedBy:      h.user.ID,
+					HasAITask:      sql.NullBool{Bool: true, Valid: true},
+				})
+				task := dbgen.Task(h.t, h.db, database.TaskTable{
+					OwnerID:           h.user.ID,
+					OrganizationID:    h.org.ID,
+					WorkspaceID:       uuid.NullUUID{},
+					TemplateVersionID: tv.ID,
+					Prompt:            fmt.Sprintf("pending-task-%s", t.Name()),
+					CreatedAt:         now.Add(tt.createdOffset),
+				})
+				expectedTask = telemetry.Task{
+					ID:                task.ID.String(),
+					OrganizationID:    h.org.ID.String(),
+					OwnerID:           h.user.ID.String(),
+					Name:              task.Name,
+					TemplateVersionID: tv.ID.String(),
+					PromptHash:        telemetry.HashContent(task.Prompt),
+					Status:            "pending",
+					CreatedAt:         task.CreatedAt,
+				}
+			} else {
+				buildCreatedAt := now.Add(tt.createdOffset)
+				if tt.buildOffset != nil {
+					buildCreatedAt = now.Add(*tt.buildOffset)
+				}
+
+				resp := dbfake.WorkspaceBuild(h.t, h.db, database.WorkspaceTable{
+					OrganizationID: h.org.ID,
+					OwnerID:        h.user.ID,
+				}).WithTask(database.TaskTable{
+					Prompt:    fmt.Sprintf("task-%s", t.Name()),
+					CreatedAt: now.Add(tt.createdOffset),
+				}, nil).Seed(database.WorkspaceBuild{
+					Transition:  database.WorkspaceTransitionStart,
+					Reason:      database.BuildReasonInitiator,
+					BuildNumber: 1,
+					CreatedAt:   buildCreatedAt,
+				}).Succeeded().Do()
+
+				app := getApp(h.ctx, h.db, resp.Agents[0].ID)
+
+				for _, s := range tt.appStatuses {
+					createAppStatus(h.ctx, h.db, resp.Workspace.ID, resp.Agents[0].ID, app.ID, s.state, s.message, now.Add(s.offset))
+				}
+
+				for _, b := range tt.extraBuilds {
+					bld, bldApp := h.createBuild(resp, b.buildNumber, now.Add(b.offset), b.transition, b.reason)
+					_ = bld
+					if bldApp != nil {
+						for _, s := range b.statuses {
+							createAppStatus(h.ctx, h.db, resp.Workspace.ID, resp.Agents[0].ID, bldApp.ID, s.state, s.message, now.Add(s.offset))
+						}
+					}
+				}
+
+				// Refresh the task
+				updated, err := h.db.GetTaskByID(ctx, resp.Task.ID)
+				require.NoError(t, err, "fetching updated task")
+				expectedTask = telemetry.Task{
+					ID:                   updated.ID.String(),
+					OrganizationID:       updated.OrganizationID.String(),
+					OwnerID:              updated.OwnerID.String(),
+					Name:                 updated.Name,
+					WorkspaceID:          ptr.Ref(updated.WorkspaceID.UUID.String()),
+					WorkspaceBuildNumber: ptr.Ref(int64(updated.WorkspaceBuildNumber.Int32)),
+					WorkspaceAgentID:     ptr.Ref(updated.WorkspaceAgentID.UUID.String()),
+					WorkspaceAppID:       ptr.Ref(updated.WorkspaceAppID.UUID.String()),
+					TemplateVersionID:    updated.TemplateVersionID.String(),
+					PromptHash:           telemetry.HashContent(updated.Prompt),
+					Status:               string(updated.Status),
+					CreatedAt:            updated.CreatedAt,
+				}
+			}
+
+			actualTasks, err := telemetry.CollectTasks(h.ctx, h.db)
+			require.NoError(t, err, "unexpected error collecting tasks telemetry")
+			// Invariant: deleted tasks should NEVER appear in results.
+			require.Len(t, actualTasks, 1, "expected exactly one task")
+
+			if diff := cmp.Diff(expectedTask, actualTasks[0]); diff != "" {
+				t.Fatalf("test case %q: task diff (-want +got):\n%s", tt.name, diff)
+			}
+
+			actualEvents, err := telemetry.CollectTaskEvents(h.ctx, h.db, now.Add(-1*time.Hour), now)
+			require.NoError(t, err)
+			if !tt.expectEvent {
+				require.Empty(t, actualEvents)
+			} else {
+				expectedEvent := telemetry.TaskEvent{
+					TaskID: expectedTask.ID,
+				}
+				if tt.lastPausedOffset != nil {
+					t := now.Add(*tt.lastPausedOffset)
+					expectedEvent.LastPausedAt = &t
+				}
+				if tt.lastResumedOffset != nil {
+					t := now.Add(*tt.lastResumedOffset)
+					expectedEvent.LastResumedAt = &t
+				}
+				expectedEvent.PauseReason = tt.pauseReason
+				expectedEvent.ResumeReason = tt.resumeReason
+				expectedEvent.IdleDurationMS = tt.idleDurationMS
+				expectedEvent.PausedDurationMS = tt.pausedDurationMS
+				expectedEvent.ResumeToStatusMS = tt.resumeToStatusMS
+				expectedEvent.ActiveDurationMS = tt.activeDurationMS
+
+				// Each test case creates exactly one workspace with lifecycle
+				// activity, so we expect exactly one event.
+				require.Len(t, actualEvents, 1)
+				actual := actualEvents[0]
+
+				if diff := cmp.Diff(expectedEvent, actual); diff != "" {
+					t.Fatalf("test case %q: event diff (-want +got):\n%s", tt.name, diff)
+				}
+			}
+		})
+	}
+}
+
 type mockDB struct {
 	database.Store
 }
@@ -612,7 +1354,7 @@ func TestRecordTelemetryStatus(t *testing.T) {
 				require.Nil(t, snapshot1)
 			}
 
-			for i := 0; i < 3; i++ {
+			for range 3 {
 				// Whatever happens, subsequent calls should not report if telemetryEnabled didn't change
 				snapshot2, err := telemetry.RecordTelemetryStatus(ctx, logger, db, testCase.telemetryEnabled)
 				require.NoError(t, err)
@@ -686,4 +1428,426 @@ func collectSnapshot(
 	t.Cleanup(reporter.Close)
 
 	return testutil.RequireReceive(ctx, t, deployment), testutil.RequireReceive(ctx, t, snapshot)
+}
+
+func TestTelemetry_BoundaryUsageSummary(t *testing.T) {
+	t.Parallel()
+
+	t.Run("IncludedInSnapshot", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		tracker := boundaryusage.NewTracker()
+		workspace1, workspace2 := uuid.New(), uuid.New()
+		user1, user2 := uuid.New(), uuid.New()
+		replicaID := uuid.New()
+
+		tracker.Track(workspace1, user1, 10, 2)
+		tracker.Track(workspace2, user1, 5, 1)
+		tracker.Track(workspace2, user2, 3, 0)
+
+		// Flush the tracker to the database.
+		err := tracker.FlushToDB(ctx, db, replicaID)
+		require.NoError(t, err)
+
+		// Collect a snapshot and verify boundary usage is included.
+		clock := quartz.NewMock(t)
+		clock.Set(dbtime.Now())
+
+		_, snapshot := collectSnapshot(ctx, t, db, func(opts telemetry.Options) telemetry.Options {
+			opts.Clock = clock
+			return opts
+		})
+
+		require.NotNil(t, snapshot.BoundaryUsageSummary)
+		require.Equal(t, int64(2), snapshot.BoundaryUsageSummary.UniqueWorkspaces)
+		require.Equal(t, int64(2), snapshot.BoundaryUsageSummary.UniqueUsers)
+		require.Equal(t, int64(10+5+3), snapshot.BoundaryUsageSummary.AllowedRequests)
+		require.Equal(t, int64(2+1+0), snapshot.BoundaryUsageSummary.DeniedRequests)
+		require.Equal(t, clock.Now().Add(-telemetry.DefaultSnapshotFrequency), snapshot.BoundaryUsageSummary.PeriodStart)
+		require.Equal(t, int64(telemetry.DefaultSnapshotFrequency/time.Millisecond), snapshot.BoundaryUsageSummary.PeriodDurationMilliseconds)
+	})
+
+	t.Run("ResetAfterCollection", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		tracker := boundaryusage.NewTracker()
+		replicaID := uuid.New()
+
+		tracker.Track(uuid.New(), uuid.New(), 5, 1)
+		err := tracker.FlushToDB(ctx, db, replicaID)
+		require.NoError(t, err)
+
+		clock := quartz.NewMock(t)
+		clock.Set(dbtime.Now())
+
+		// First snapshot should have the data.
+		_, snapshot1 := collectSnapshot(ctx, t, db, func(opts telemetry.Options) telemetry.Options {
+			opts.Clock = clock
+			return opts
+		})
+		require.NotNil(t, snapshot1.BoundaryUsageSummary)
+		require.Equal(t, int64(5), snapshot1.BoundaryUsageSummary.AllowedRequests)
+
+		// Advance clock to next snapshot period to avoid lock conflict.
+		clock.Advance(30 * time.Minute)
+
+		// Second snapshot should have no data (stats were reset).
+		_, snapshot2 := collectSnapshot(ctx, t, db, func(opts telemetry.Options) telemetry.Options {
+			opts.Clock = clock
+			return opts
+		})
+		// Summary should be nil or have zero values since stats were reset.
+		if snapshot2.BoundaryUsageSummary != nil {
+			require.Equal(t, int64(0), snapshot2.BoundaryUsageSummary.AllowedRequests)
+		}
+	})
+
+	t.Run("OnlyOneReplicaCollects", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		// Set up boundary usage stats from two replicas.
+		tracker1 := boundaryusage.NewTracker()
+		tracker2 := boundaryusage.NewTracker()
+		replica1ID := uuid.New()
+		replica2ID := uuid.New()
+
+		tracker1.Track(uuid.New(), uuid.New(), 10, 1)
+		tracker2.Track(uuid.New(), uuid.New(), 20, 2)
+
+		err := tracker1.FlushToDB(ctx, db, replica1ID)
+		require.NoError(t, err)
+		err = tracker2.FlushToDB(ctx, db, replica2ID)
+		require.NoError(t, err)
+
+		clock := quartz.NewMock(t)
+		clock.Set(dbtime.Now())
+
+		// First snapshot collects and resets.
+		_, snapshot1 := collectSnapshot(ctx, t, db, func(opts telemetry.Options) telemetry.Options {
+			opts.Clock = clock
+			return opts
+		})
+		require.NotNil(t, snapshot1.BoundaryUsageSummary)
+		require.Equal(t, int64(10+20), snapshot1.BoundaryUsageSummary.AllowedRequests)
+
+		// Second snapshot in same period should skip (lock already claimed).
+		_, snapshot2 := collectSnapshot(ctx, t, db, func(opts telemetry.Options) telemetry.Options {
+			opts.Clock = clock
+			return opts
+		})
+		// The second snapshot should have nil because another "replica" already
+		// claimed the lock for this period.
+		require.Nil(t, snapshot2.BoundaryUsageSummary)
+	})
+}
+
+func TestChatsTelemetry(t *testing.T) {
+	t.Parallel()
+
+	ctx := testutil.Context(t, testutil.WaitMedium)
+	db, _ := dbtestutil.NewDB(t)
+
+	user := dbgen.User(t, db, database.User{})
+
+	// Create chat providers (required FK for model configs).
+	_, err := db.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             "anthropic",
+		DisplayName:          "Anthropic",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+	_, err = db.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             "openai",
+		DisplayName:          "OpenAI",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	// Create a model config.
+	modelCfg, err := db.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "anthropic",
+		Model:                "claude-sonnet-4-20250514",
+		DisplayName:          "Claude Sonnet",
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         200000,
+		CompressionThreshold: 70,
+		Options:              json.RawMessage("{}"),
+	})
+	require.NoError(t, err)
+
+	// Create a second model config to test full dump.
+	modelCfg2, err := db.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "openai",
+		Model:                "gpt-4o",
+		DisplayName:          "GPT-4o",
+		Enabled:              true,
+		IsDefault:            false,
+		ContextLimit:         128000,
+		CompressionThreshold: 70,
+		Options:              json.RawMessage("{}"),
+	})
+	require.NoError(t, err)
+
+	// Create a soft-deleted model config — should NOT appear in telemetry.
+	deletedCfg, err := db.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "anthropic",
+		Model:                "claude-deleted",
+		DisplayName:          "Deleted Model",
+		Enabled:              true,
+		IsDefault:            false,
+		ContextLimit:         100000,
+		CompressionThreshold: 70,
+		Options:              json.RawMessage("{}"),
+	})
+	require.NoError(t, err)
+	err = db.DeleteChatModelConfigByID(ctx, deletedCfg.ID)
+	require.NoError(t, err)
+
+	// Create a root chat with a workspace.
+	org, err := db.GetDefaultOrganization(ctx)
+	require.NoError(t, err)
+	job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+		OrganizationID: org.ID,
+		Type:           database.ProvisionerJobTypeTemplateVersionDryRun,
+	})
+	tpl := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		CreatedBy:      user.ID,
+	})
+	tv := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		OrganizationID: org.ID,
+		TemplateID:     uuid.NullUUID{UUID: tpl.ID, Valid: true},
+		CreatedBy:      user.ID,
+		JobID:          job.ID,
+	})
+	ws := dbgen.Workspace(t, db, database.WorkspaceTable{
+		OwnerID:        user.ID,
+		OrganizationID: org.ID,
+		TemplateID:     tpl.ID,
+	})
+	_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+		Transition:        database.WorkspaceTransitionStart,
+		Reason:            database.BuildReasonInitiator,
+		WorkspaceID:       ws.ID,
+		TemplateVersionID: tv.ID,
+		JobID:             job.ID,
+	})
+
+	rootChat, err := db.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "Root Chat",
+		Status:            database.ChatStatusRunning,
+		WorkspaceID:       uuid.NullUUID{UUID: ws.ID, Valid: true},
+		Mode:              database.NullChatMode{ChatMode: database.ChatModeComputerUse, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Create a child chat (has parent + root).
+	childChat, err := db.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg2.ID,
+		Title:             "Child Chat",
+		Status:            database.ChatStatusCompleted,
+		ParentChatID:      uuid.NullUUID{UUID: rootChat.ID, Valid: true},
+		RootChatID:        uuid.NullUUID{UUID: rootChat.ID, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Insert messages for root chat: 2 user, 2 assistant, 1 tool.
+	_, err = db.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+		ChatID:              rootChat.ID,
+		CreatedBy:           []uuid.UUID{user.ID, uuid.Nil, user.ID, uuid.Nil, uuid.Nil},
+		ModelConfigID:       []uuid.UUID{modelCfg.ID, modelCfg.ID, modelCfg.ID, modelCfg.ID, modelCfg.ID},
+		Role:                []database.ChatMessageRole{database.ChatMessageRoleUser, database.ChatMessageRoleAssistant, database.ChatMessageRoleUser, database.ChatMessageRoleAssistant, database.ChatMessageRoleTool},
+		Content:             []string{`[{"type":"text","text":"hello"}]`, `[{"type":"text","text":"hi"}]`, `[{"type":"text","text":"help"}]`, `[{"type":"text","text":"sure"}]`, `[{"type":"text","text":"result"}]`},
+		ContentVersion:      []int16{1, 1, 1, 1, 1},
+		Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth},
+		InputTokens:         []int64{100, 200, 150, 300, 0},
+		OutputTokens:        []int64{0, 50, 0, 100, 0},
+		TotalTokens:         []int64{100, 250, 150, 400, 0},
+		ReasoningTokens:     []int64{0, 10, 0, 20, 0},
+		CacheCreationTokens: []int64{50, 0, 30, 0, 0},
+		CacheReadTokens:     []int64{0, 25, 0, 40, 0},
+		ContextLimit:        []int64{200000, 200000, 200000, 200000, 200000},
+		Compressed:          []bool{false, false, false, false, false},
+		TotalCostMicros:     []int64{1000, 2000, 1500, 3000, 0},
+		RuntimeMs:           []int64{0, 500, 0, 800, 100},
+		ProviderResponseID:  []string{"", "resp-1", "", "resp-2", ""},
+	})
+	require.NoError(t, err)
+
+	// Insert messages for child chat: 1 user, 1 assistant (compressed).
+	_, err = db.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+		ChatID:              childChat.ID,
+		CreatedBy:           []uuid.UUID{user.ID, uuid.Nil},
+		ModelConfigID:       []uuid.UUID{modelCfg2.ID, modelCfg2.ID},
+		Role:                []database.ChatMessageRole{database.ChatMessageRoleUser, database.ChatMessageRoleAssistant},
+		Content:             []string{`[{"type":"text","text":"q"}]`, `[{"type":"text","text":"a"}]`},
+		ContentVersion:      []int16{1, 1},
+		Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth},
+		InputTokens:         []int64{500, 600},
+		OutputTokens:        []int64{0, 200},
+		TotalTokens:         []int64{500, 800},
+		ReasoningTokens:     []int64{0, 50},
+		CacheCreationTokens: []int64{100, 0},
+		CacheReadTokens:     []int64{0, 75},
+		ContextLimit:        []int64{128000, 128000},
+		Compressed:          []bool{false, true},
+		TotalCostMicros:     []int64{5000, 8000},
+		RuntimeMs:           []int64{0, 1200},
+		ProviderResponseID:  []string{"", "resp-3"},
+	})
+	require.NoError(t, err)
+
+	// Insert a soft-deleted message on root chat with large token values.
+	// This acts as "poison" — if the deleted filter is missing, totals
+	// will be inflated and assertions below will fail.
+	poisonMsgs, err := db.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+		ChatID:              rootChat.ID,
+		CreatedBy:           []uuid.UUID{uuid.Nil},
+		ModelConfigID:       []uuid.UUID{modelCfg.ID},
+		Role:                []database.ChatMessageRole{database.ChatMessageRoleAssistant},
+		Content:             []string{`[{"type":"text","text":"poison"}]`},
+		ContentVersion:      []int16{1},
+		Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth},
+		InputTokens:         []int64{999999},
+		OutputTokens:        []int64{999999},
+		TotalTokens:         []int64{999999},
+		ReasoningTokens:     []int64{999999},
+		CacheCreationTokens: []int64{999999},
+		CacheReadTokens:     []int64{999999},
+		ContextLimit:        []int64{200000},
+		Compressed:          []bool{false},
+		TotalCostMicros:     []int64{999999},
+		RuntimeMs:           []int64{999999},
+		ProviderResponseID:  []string{""},
+	})
+	require.NoError(t, err)
+	err = db.SoftDeleteChatMessageByID(ctx, poisonMsgs[0].ID)
+	require.NoError(t, err)
+
+	_, snapshot := collectSnapshot(ctx, t, db, nil)
+
+	// --- Assert Chats ---
+	require.Len(t, snapshot.Chats, 2)
+
+	// Find root and child by HasParent flag.
+	var foundRoot, foundChild *telemetry.Chat
+	for i := range snapshot.Chats {
+		if !snapshot.Chats[i].HasParent {
+			foundRoot = &snapshot.Chats[i]
+		} else {
+			foundChild = &snapshot.Chats[i]
+		}
+	}
+	require.NotNil(t, foundRoot, "expected root chat")
+	require.NotNil(t, foundChild, "expected child chat")
+
+	// Root chat assertions.
+	assert.Equal(t, rootChat.ID, foundRoot.ID)
+	assert.Equal(t, user.ID, foundRoot.OwnerID)
+	assert.Equal(t, "running", foundRoot.Status)
+	assert.False(t, foundRoot.HasParent)
+	assert.Nil(t, foundRoot.RootChatID)
+	require.NotNil(t, foundRoot.WorkspaceID)
+	assert.Equal(t, ws.ID, *foundRoot.WorkspaceID)
+	assert.Equal(t, modelCfg.ID, foundRoot.LastModelConfigID)
+	require.NotNil(t, foundRoot.Mode)
+	assert.Equal(t, "computer_use", *foundRoot.Mode)
+	assert.False(t, foundRoot.Archived)
+
+	// Child chat assertions.
+	assert.Equal(t, childChat.ID, foundChild.ID)
+	assert.Equal(t, user.ID, foundChild.OwnerID)
+	assert.True(t, foundChild.HasParent)
+	require.NotNil(t, foundChild.RootChatID)
+	assert.Equal(t, rootChat.ID, *foundChild.RootChatID)
+	assert.Nil(t, foundChild.WorkspaceID)
+	assert.Equal(t, "completed", foundChild.Status)
+	assert.Equal(t, modelCfg2.ID, foundChild.LastModelConfigID)
+	assert.Nil(t, foundChild.Mode)
+	assert.False(t, foundChild.Archived)
+
+	// --- Assert ChatMessageSummaries ---
+	require.Len(t, snapshot.ChatMessageSummaries, 2)
+
+	summaryMap := make(map[uuid.UUID]telemetry.ChatMessageSummary)
+	for _, s := range snapshot.ChatMessageSummaries {
+		summaryMap[s.ChatID] = s
+	}
+
+	// Root chat summary: 2 user + 2 assistant + 1 tool = 5 messages.
+	rootSummary, ok := summaryMap[rootChat.ID]
+	require.True(t, ok, "expected summary for root chat")
+	assert.Equal(t, int64(5), rootSummary.MessageCount)
+	assert.Equal(t, int64(2), rootSummary.UserMessageCount)
+	assert.Equal(t, int64(2), rootSummary.AssistantMessageCount)
+	assert.Equal(t, int64(1), rootSummary.ToolMessageCount)
+	assert.Equal(t, int64(0), rootSummary.SystemMessageCount)
+	assert.Equal(t, int64(750), rootSummary.TotalInputTokens)        // 100+200+150+300+0
+	assert.Equal(t, int64(150), rootSummary.TotalOutputTokens)       // 0+50+0+100+0
+	assert.Equal(t, int64(30), rootSummary.TotalReasoningTokens)     // 0+10+0+20+0
+	assert.Equal(t, int64(80), rootSummary.TotalCacheCreationTokens) // 50+0+30+0+0
+	assert.Equal(t, int64(65), rootSummary.TotalCacheReadTokens)     // 0+25+0+40+0
+	assert.Equal(t, int64(7500), rootSummary.TotalCostMicros)        // 1000+2000+1500+3000+0
+	assert.Equal(t, int64(1400), rootSummary.TotalRuntimeMs)         // 0+500+0+800+100
+	assert.Equal(t, int64(1), rootSummary.DistinctModelCount)
+	assert.Equal(t, int64(0), rootSummary.CompressedMessageCount)
+
+	// Child chat summary: 1 user + 1 assistant = 2 messages, 1 compressed.
+	childSummary, ok := summaryMap[childChat.ID]
+	require.True(t, ok, "expected summary for child chat")
+	assert.Equal(t, int64(2), childSummary.MessageCount)
+	assert.Equal(t, int64(1), childSummary.UserMessageCount)
+	assert.Equal(t, int64(1), childSummary.AssistantMessageCount)
+	assert.Equal(t, int64(1100), childSummary.TotalInputTokens)   // 500+600
+	assert.Equal(t, int64(200), childSummary.TotalOutputTokens)   // 0+200
+	assert.Equal(t, int64(50), childSummary.TotalReasoningTokens) // 0+50
+	assert.Equal(t, int64(0), childSummary.ToolMessageCount)
+	assert.Equal(t, int64(0), childSummary.SystemMessageCount)
+	assert.Equal(t, int64(100), childSummary.TotalCacheCreationTokens) // 100+0
+	assert.Equal(t, int64(75), childSummary.TotalCacheReadTokens)      // 0+75
+	assert.Equal(t, int64(13000), childSummary.TotalCostMicros)        // 5000+8000
+	assert.Equal(t, int64(1200), childSummary.TotalRuntimeMs)          // 0+1200
+	assert.Equal(t, int64(1), childSummary.DistinctModelCount)
+	assert.Equal(t, int64(1), childSummary.CompressedMessageCount)
+
+	// --- Assert ChatModelConfigs ---
+	require.Len(t, snapshot.ChatModelConfigs, 2)
+
+	configMap := make(map[uuid.UUID]telemetry.ChatModelConfig)
+	for _, c := range snapshot.ChatModelConfigs {
+		configMap[c.ID] = c
+	}
+
+	cfg1, ok := configMap[modelCfg.ID]
+	require.True(t, ok)
+	assert.Equal(t, "anthropic", cfg1.Provider)
+	assert.Equal(t, "claude-sonnet-4-20250514", cfg1.Model)
+	assert.Equal(t, int64(200000), cfg1.ContextLimit)
+	assert.True(t, cfg1.Enabled)
+	assert.True(t, cfg1.IsDefault)
+
+	cfg2, ok := configMap[modelCfg2.ID]
+	require.True(t, ok)
+	assert.Equal(t, "openai", cfg2.Provider)
+	assert.Equal(t, "gpt-4o", cfg2.Model)
+	assert.Equal(t, int64(128000), cfg2.ContextLimit)
+	assert.True(t, cfg2.Enabled)
+	assert.False(t, cfg2.IsDefault)
 }

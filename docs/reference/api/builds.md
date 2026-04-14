@@ -27,7 +27,6 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/workspace/{workspacenam
 
 ```json
 {
-  "ai_task_sidebar_app_id": "852ddafb-2cb9-4cbf-8a8c-075389fb3d3d",
   "build_number": 0,
   "created_at": "2019-08-24T14:15:22Z",
   "daily_cost": 0,
@@ -61,6 +60,7 @@ curl -X GET http://coder-server:8080/api/v2/users/{user}/workspace/{workspacenam
       "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
       "template_name": "string",
       "template_version_name": "string",
+      "workspace_build_transition": "start",
       "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
       "workspace_name": "string"
     },
@@ -268,7 +268,6 @@ curl -X GET http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild} \
 
 ```json
 {
-  "ai_task_sidebar_app_id": "852ddafb-2cb9-4cbf-8a8c-075389fb3d3d",
   "build_number": 0,
   "created_at": "2019-08-24T14:15:22Z",
   "daily_cost": 0,
@@ -302,6 +301,7 @@ curl -X GET http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild} \
       "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
       "template_name": "string",
       "template_version_name": "string",
+      "workspace_build_transition": "start",
       "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
       "workspace_name": "string"
     },
@@ -506,10 +506,9 @@ curl -X PATCH http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild}/c
 
 #### Enumerated Values
 
-| Parameter       | Value     |
-|-----------------|-----------|
-| `expect_status` | `running` |
-| `expect_status` | `pending` |
+| Parameter       | Value(s)             |
+|-----------------|----------------------|
+| `expect_status` | `pending`, `running` |
 
 ### Example responses
 
@@ -551,12 +550,19 @@ curl -X GET http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild}/log
 
 ### Parameters
 
-| Name             | In    | Type    | Required | Description        |
-|------------------|-------|---------|----------|--------------------|
-| `workspacebuild` | path  | string  | true     | Workspace build ID |
-| `before`         | query | integer | false    | Before log id      |
-| `after`          | query | integer | false    | After log id       |
-| `follow`         | query | boolean | false    | Follow log stream  |
+| Name             | In    | Type    | Required | Description                                                                                                                                 |
+|------------------|-------|---------|----------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `workspacebuild` | path  | string  | true     | Workspace build ID                                                                                                                          |
+| `before`         | query | integer | false    | Before log id                                                                                                                               |
+| `after`          | query | integer | false    | After log id                                                                                                                                |
+| `follow`         | query | boolean | false    | Follow log stream                                                                                                                           |
+| `format`         | query | string  | false    | Log output format. Accepted: 'json' (default), 'text' (plain text with RFC3339 timestamps and ANSI colors). Not supported with follow=true. |
+
+#### Enumerated Values
+
+| Parameter | Value(s)       |
+|-----------|----------------|
+| `format`  | `json`, `text` |
 
 ### Example responses
 
@@ -597,15 +603,10 @@ Status Code **200**
 
 #### Enumerated Values
 
-| Property     | Value                |
-|--------------|----------------------|
-| `log_level`  | `trace`              |
-| `log_level`  | `debug`              |
-| `log_level`  | `info`               |
-| `log_level`  | `warn`               |
-| `log_level`  | `error`              |
-| `log_source` | `provisioner_daemon` |
-| `log_source` | `provisioner`        |
+| Property     | Value(s)                                  |
+|--------------|-------------------------------------------|
+| `log_level`  | `debug`, `error`, `info`, `trace`, `warn` |
+| `log_source` | `provisioner`, `provisioner_daemon`       |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -938,40 +939,16 @@ Status Code **200**
 
 #### Enumerated Values
 
-| Property                  | Value              |
-|---------------------------|--------------------|
-| `health`                  | `disabled`         |
-| `health`                  | `initializing`     |
-| `health`                  | `healthy`          |
-| `health`                  | `unhealthy`        |
-| `open_in`                 | `slim-window`      |
-| `open_in`                 | `tab`              |
-| `sharing_level`           | `owner`            |
-| `sharing_level`           | `authenticated`    |
-| `sharing_level`           | `organization`     |
-| `sharing_level`           | `public`           |
-| `state`                   | `working`          |
-| `state`                   | `idle`             |
-| `state`                   | `complete`         |
-| `state`                   | `failure`          |
-| `lifecycle_state`         | `created`          |
-| `lifecycle_state`         | `starting`         |
-| `lifecycle_state`         | `start_timeout`    |
-| `lifecycle_state`         | `start_error`      |
-| `lifecycle_state`         | `ready`            |
-| `lifecycle_state`         | `shutting_down`    |
-| `lifecycle_state`         | `shutdown_timeout` |
-| `lifecycle_state`         | `shutdown_error`   |
-| `lifecycle_state`         | `off`              |
-| `startup_script_behavior` | `blocking`         |
-| `startup_script_behavior` | `non-blocking`     |
-| `status`                  | `connecting`       |
-| `status`                  | `connected`        |
-| `status`                  | `disconnected`     |
-| `status`                  | `timeout`          |
-| `workspace_transition`    | `start`            |
-| `workspace_transition`    | `stop`             |
-| `workspace_transition`    | `delete`           |
+| Property                  | Value(s)                                                                                                                     |
+|---------------------------|------------------------------------------------------------------------------------------------------------------------------|
+| `health`                  | `disabled`, `healthy`, `initializing`, `unhealthy`                                                                           |
+| `open_in`                 | `slim-window`, `tab`                                                                                                         |
+| `sharing_level`           | `authenticated`, `organization`, `owner`, `public`                                                                           |
+| `state`                   | `complete`, `failure`, `idle`, `working`                                                                                     |
+| `lifecycle_state`         | `created`, `off`, `ready`, `shutdown_error`, `shutdown_timeout`, `shutting_down`, `start_error`, `start_timeout`, `starting` |
+| `startup_script_behavior` | `blocking`, `non-blocking`                                                                                                   |
+| `status`                  | `connected`, `connecting`, `disconnected`, `timeout`                                                                         |
+| `workspace_transition`    | `delete`, `start`, `stop`                                                                                                    |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -1000,7 +977,6 @@ curl -X GET http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild}/sta
 
 ```json
 {
-  "ai_task_sidebar_app_id": "852ddafb-2cb9-4cbf-8a8c-075389fb3d3d",
   "build_number": 0,
   "created_at": "2019-08-24T14:15:22Z",
   "daily_cost": 0,
@@ -1034,6 +1010,7 @@ curl -X GET http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild}/sta
       "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
       "template_name": "string",
       "template_version_name": "string",
+      "workspace_build_transition": "start",
       "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
       "workspace_name": "string"
     },
@@ -1216,6 +1193,44 @@ curl -X GET http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild}/sta
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
+## Update workspace build state
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X PUT http://coder-server:8080/api/v2/workspacebuilds/{workspacebuild}/state \
+  -H 'Content-Type: application/json' \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`PUT /workspacebuilds/{workspacebuild}/state`
+
+> Body parameter
+
+```json
+{
+  "state": [
+    0
+  ]
+}
+```
+
+### Parameters
+
+| Name             | In   | Type                                                                                             | Required | Description        |
+|------------------|------|--------------------------------------------------------------------------------------------------|----------|--------------------|
+| `workspacebuild` | path | string(uuid)                                                                                     | true     | Workspace build ID |
+| `body`           | body | [codersdk.UpdateWorkspaceBuildStateRequest](schemas.md#codersdkupdateworkspacebuildstaterequest) | true     | Request body       |
+
+### Responses
+
+| Status | Meaning                                                         | Description | Schema |
+|--------|-----------------------------------------------------------------|-------------|--------|
+| 204    | [No Content](https://tools.ietf.org/html/rfc7231#section-6.3.5) | No Content  |        |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
 ## Get workspace build timings by ID
 
 ### Code samples
@@ -1314,7 +1329,6 @@ curl -X GET http://coder-server:8080/api/v2/workspaces/{workspace}/builds \
 ```json
 [
   {
-    "ai_task_sidebar_app_id": "852ddafb-2cb9-4cbf-8a8c-075389fb3d3d",
     "build_number": 0,
     "created_at": "2019-08-24T14:15:22Z",
     "daily_cost": 0,
@@ -1348,6 +1362,7 @@ curl -X GET http://coder-server:8080/api/v2/workspaces/{workspace}/builds \
         "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
         "template_name": "string",
         "template_version_name": "string",
+        "workspace_build_transition": "start",
         "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
         "workspace_name": "string"
       },
@@ -1536,12 +1551,11 @@ Status Code **200**
 | Name                             | Type                                                                                                   | Required | Restrictions | Description                                                                                                                                                                                                                                    |
 |----------------------------------|--------------------------------------------------------------------------------------------------------|----------|--------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `[array item]`                   | array                                                                                                  | false    |              |                                                                                                                                                                                                                                                |
-| `» ai_task_sidebar_app_id`       | string(uuid)                                                                                           | false    |              |                                                                                                                                                                                                                                                |
 | `» build_number`                 | integer                                                                                                | false    |              |                                                                                                                                                                                                                                                |
 | `» created_at`                   | string(date-time)                                                                                      | false    |              |                                                                                                                                                                                                                                                |
 | `» daily_cost`                   | integer                                                                                                | false    |              |                                                                                                                                                                                                                                                |
 | `» deadline`                     | string(date-time)                                                                                      | false    |              |                                                                                                                                                                                                                                                |
-| `» has_ai_task`                  | boolean                                                                                                | false    |              |                                                                                                                                                                                                                                                |
+| `» has_ai_task`                  | boolean                                                                                                | false    |              | Deprecated: This field has been deprecated in favor of Task WorkspaceID.                                                                                                                                                                       |
 | `» has_external_agent`           | boolean                                                                                                | false    |              |                                                                                                                                                                                                                                                |
 | `» id`                           | string(uuid)                                                                                           | false    |              |                                                                                                                                                                                                                                                |
 | `» initiator_id`                 | string(uuid)                                                                                           | false    |              |                                                                                                                                                                                                                                                |
@@ -1567,6 +1581,7 @@ Status Code **200**
 | `»»» template_id`                | string(uuid)                                                                                           | false    |              |                                                                                                                                                                                                                                                |
 | `»»» template_name`              | string                                                                                                 | false    |              |                                                                                                                                                                                                                                                |
 | `»»» template_version_name`      | string                                                                                                 | false    |              |                                                                                                                                                                                                                                                |
+| `»»» workspace_build_transition` | [codersdk.WorkspaceTransition](schemas.md#codersdkworkspacetransition)                                 | false    |              |                                                                                                                                                                                                                                                |
 | `»»» workspace_id`               | string(uuid)                                                                                           | false    |              |                                                                                                                                                                                                                                                |
 | `»»» workspace_name`             | string                                                                                                 | false    |              |                                                                                                                                                                                                                                                |
 | `»» organization_id`             | string(uuid)                                                                                           | false    |              |                                                                                                                                                                                                                                                |
@@ -1700,66 +1715,21 @@ Status Code **200**
 
 #### Enumerated Values
 
-| Property                  | Value                         |
-|---------------------------|-------------------------------|
-| `error_code`              | `REQUIRED_TEMPLATE_VARIABLES` |
-| `status`                  | `pending`                     |
-| `status`                  | `running`                     |
-| `status`                  | `succeeded`                   |
-| `status`                  | `canceling`                   |
-| `status`                  | `canceled`                    |
-| `status`                  | `failed`                      |
-| `type`                    | `template_version_import`     |
-| `type`                    | `workspace_build`             |
-| `type`                    | `template_version_dry_run`    |
-| `reason`                  | `initiator`                   |
-| `reason`                  | `autostart`                   |
-| `reason`                  | `autostop`                    |
-| `health`                  | `disabled`                    |
-| `health`                  | `initializing`                |
-| `health`                  | `healthy`                     |
-| `health`                  | `unhealthy`                   |
-| `open_in`                 | `slim-window`                 |
-| `open_in`                 | `tab`                         |
-| `sharing_level`           | `owner`                       |
-| `sharing_level`           | `authenticated`               |
-| `sharing_level`           | `organization`                |
-| `sharing_level`           | `public`                      |
-| `state`                   | `working`                     |
-| `state`                   | `idle`                        |
-| `state`                   | `complete`                    |
-| `state`                   | `failure`                     |
-| `lifecycle_state`         | `created`                     |
-| `lifecycle_state`         | `starting`                    |
-| `lifecycle_state`         | `start_timeout`               |
-| `lifecycle_state`         | `start_error`                 |
-| `lifecycle_state`         | `ready`                       |
-| `lifecycle_state`         | `shutting_down`               |
-| `lifecycle_state`         | `shutdown_timeout`            |
-| `lifecycle_state`         | `shutdown_error`              |
-| `lifecycle_state`         | `off`                         |
-| `startup_script_behavior` | `blocking`                    |
-| `startup_script_behavior` | `non-blocking`                |
-| `status`                  | `connecting`                  |
-| `status`                  | `connected`                   |
-| `status`                  | `disconnected`                |
-| `status`                  | `timeout`                     |
-| `workspace_transition`    | `start`                       |
-| `workspace_transition`    | `stop`                        |
-| `workspace_transition`    | `delete`                      |
-| `status`                  | `pending`                     |
-| `status`                  | `starting`                    |
-| `status`                  | `running`                     |
-| `status`                  | `stopping`                    |
-| `status`                  | `stopped`                     |
-| `status`                  | `failed`                      |
-| `status`                  | `canceling`                   |
-| `status`                  | `canceled`                    |
-| `status`                  | `deleting`                    |
-| `status`                  | `deleted`                     |
-| `transition`              | `start`                       |
-| `transition`              | `stop`                        |
-| `transition`              | `delete`                      |
+| Property                     | Value(s)                                                                                                                                                                             |
+|------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `error_code`                 | `REQUIRED_TEMPLATE_VARIABLES`                                                                                                                                                        |
+| `workspace_build_transition` | `delete`, `start`, `stop`                                                                                                                                                            |
+| `status`                     | `canceled`, `canceling`, `connected`, `connecting`, `deleted`, `deleting`, `disconnected`, `failed`, `pending`, `running`, `starting`, `stopped`, `stopping`, `succeeded`, `timeout` |
+| `type`                       | `template_version_dry_run`, `template_version_import`, `workspace_build`                                                                                                             |
+| `reason`                     | `autostart`, `autostop`, `initiator`                                                                                                                                                 |
+| `health`                     | `disabled`, `healthy`, `initializing`, `unhealthy`                                                                                                                                   |
+| `open_in`                    | `slim-window`, `tab`                                                                                                                                                                 |
+| `sharing_level`              | `authenticated`, `organization`, `owner`, `public`                                                                                                                                   |
+| `state`                      | `complete`, `failure`, `idle`, `working`                                                                                                                                             |
+| `lifecycle_state`            | `created`, `off`, `ready`, `shutdown_error`, `shutdown_timeout`, `shutting_down`, `start_error`, `start_timeout`, `starting`                                                         |
+| `startup_script_behavior`    | `blocking`, `non-blocking`                                                                                                                                                           |
+| `workspace_transition`       | `delete`, `start`, `stop`                                                                                                                                                            |
+| `transition`                 | `delete`, `start`, `stop`                                                                                                                                                            |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -1813,7 +1783,6 @@ curl -X POST http://coder-server:8080/api/v2/workspaces/{workspace}/builds \
 
 ```json
 {
-  "ai_task_sidebar_app_id": "852ddafb-2cb9-4cbf-8a8c-075389fb3d3d",
   "build_number": 0,
   "created_at": "2019-08-24T14:15:22Z",
   "daily_cost": 0,
@@ -1847,6 +1816,7 @@ curl -X POST http://coder-server:8080/api/v2/workspaces/{workspace}/builds \
       "template_id": "c6d67e98-83ea-49f0-8812-e4abae2b68bc",
       "template_name": "string",
       "template_version_name": "string",
+      "workspace_build_transition": "start",
       "workspace_id": "0967198e-ec7b-4c6b-b4d3-f71244cadbe9",
       "workspace_name": "string"
     },

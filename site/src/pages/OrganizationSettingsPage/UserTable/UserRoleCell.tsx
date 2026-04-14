@@ -14,17 +14,16 @@
  * users like that, though, know that it will be painful
  */
 import { type Interpolation, type Theme, useTheme } from "@emotion/react";
-import MUITooltip from "@mui/material/Tooltip";
-import type { LoginType, SlimRole } from "api/typesGenerated";
-import { Pill } from "components/Pill/Pill";
-import { TableCell } from "components/Table/Table";
+import type { FC } from "react";
+import type { LoginType, SlimRole } from "#/api/typesGenerated";
+import { Pill } from "#/components/Pill/Pill";
+import { TableCell } from "#/components/Table/Table";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import type { FC } from "react";
+} from "#/components/Tooltip/Tooltip";
 import { EditRolesButton } from "./EditRolesButton";
 
 type UserRoleCellProps = {
@@ -88,9 +87,14 @@ export const UserRoleCell: FC<UserRoleCellProps> = ({
 					}
 				>
 					{mainDisplayRole.global ? (
-						<MUITooltip title="This user has this role for all organizations.">
-							<span>{displayName}*</span>
-						</MUITooltip>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<span>{displayName}*</span>
+							</TooltipTrigger>
+							<TooltipContent side="bottom" sideOffset={8}>
+								This user has this role for all organizations.
+							</TooltipContent>
+						</Tooltip>
 					) : (
 						displayName
 					)}
@@ -130,9 +134,9 @@ const OverflowRolePill: FC<OverflowRolePillProps> = ({ roles }) => {
 							css={role.global ? styles.globalRoleBadge : styles.roleBadge}
 						>
 							{role.global ? (
-								<MUITooltip title="This user has this role for all organizations.">
-									<span>{role.display_name || role.name}*</span>
-								</MUITooltip>
+								<span title="This user has this role for all organizations.">
+									{role.display_name || role.name}*
+								</span>
 							) : (
 								role.display_name || role.name
 							)}
@@ -173,6 +177,7 @@ const roleNamesByAccessLevel: readonly string[] = [
 	"organization-template-admin",
 	"auditor",
 	"organization-auditor",
+	"agents-access",
 ];
 
 function sortRolesByAccessLevel<T extends SlimRole>(

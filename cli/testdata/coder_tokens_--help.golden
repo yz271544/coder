@@ -16,6 +16,10 @@ USAGE:
   
        $ coder tokens ls
   
+    - Create a scoped token:
+  
+       $ coder tokens create --scope workspace:read --allow workspace:<uuid>
+  
     - Remove a token by ID:
   
        $ coder tokens rm WuoWs4ZsMX
@@ -23,7 +27,8 @@ USAGE:
 SUBCOMMANDS:
     create    Create a token
     list      List tokens
-    remove    Delete a token
+    remove    Expire or delete a token
+    view      Display detailed information about a token
 
 ———
 Run `coder --help` for a list of global options.

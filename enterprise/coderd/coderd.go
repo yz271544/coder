@@ -3,7 +3,9 @@ package coderd
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -13,54 +15,55 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/xerrors"
+	"tailscale.com/tailcfg"
+
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/buildinfo"
+	"github.com/coder/coder/v2/coderd"
 	"github.com/coder/coder/v2/coderd/appearance"
+	agplaudit "github.com/coder/coder/v2/coderd/audit"
+	"github.com/coder/coder/v2/coderd/boundaryusage"
+	agplconnectionlog "github.com/coder/coder/v2/coderd/connectionlog"
 	"github.com/coder/coder/v2/coderd/database"
+	agpldbauthz "github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/entitlements"
+	"github.com/coder/coder/v2/coderd/healthcheck"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	"github.com/coder/coder/v2/coderd/httpmw"
 	"github.com/coder/coder/v2/coderd/idpsync"
 	agplportsharing "github.com/coder/coder/v2/coderd/portsharing"
 	"github.com/coder/coder/v2/coderd/pproflabel"
 	agplprebuilds "github.com/coder/coder/v2/coderd/prebuilds"
+	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
+	agplschedule "github.com/coder/coder/v2/coderd/schedule"
 	agplusage "github.com/coder/coder/v2/coderd/usage"
 	"github.com/coder/coder/v2/coderd/wsbuilder"
-	"github.com/coder/coder/v2/enterprise/coderd/connectionlog"
-	"github.com/coder/coder/v2/enterprise/coderd/enidpsync"
-	"github.com/coder/coder/v2/enterprise/coderd/portsharing"
-	"github.com/coder/coder/v2/enterprise/coderd/usage"
-	"github.com/coder/quartz"
-
-	"golang.org/x/xerrors"
-	"tailscale.com/tailcfg"
-
-	"github.com/cenkalti/backoff/v4"
-	"github.com/go-chi/chi/v5"
-	"github.com/prometheus/client_golang/prometheus"
-
-	"cdr.dev/slog"
-
-	"github.com/coder/coder/v2/coderd"
-	agplaudit "github.com/coder/coder/v2/coderd/audit"
-	agplconnectionlog "github.com/coder/coder/v2/coderd/connectionlog"
-	agpldbauthz "github.com/coder/coder/v2/coderd/database/dbauthz"
-	"github.com/coder/coder/v2/coderd/database/dbtime"
-	"github.com/coder/coder/v2/coderd/healthcheck"
-	"github.com/coder/coder/v2/coderd/httpapi"
-	"github.com/coder/coder/v2/coderd/httpmw"
-	"github.com/coder/coder/v2/coderd/rbac"
-	agplschedule "github.com/coder/coder/v2/coderd/schedule"
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/enterprise/aiseats"
+	"github.com/coder/coder/v2/enterprise/coderd/connectionlog"
 	"github.com/coder/coder/v2/enterprise/coderd/dbauthz"
+	"github.com/coder/coder/v2/enterprise/coderd/enidpsync"
 	"github.com/coder/coder/v2/enterprise/coderd/license"
+	"github.com/coder/coder/v2/enterprise/coderd/portsharing"
 	"github.com/coder/coder/v2/enterprise/coderd/prebuilds"
 	"github.com/coder/coder/v2/enterprise/coderd/proxyhealth"
 	"github.com/coder/coder/v2/enterprise/coderd/schedule"
+	"github.com/coder/coder/v2/enterprise/coderd/usage"
+	entchatd "github.com/coder/coder/v2/enterprise/coderd/x/chatd"
 	"github.com/coder/coder/v2/enterprise/dbcrypt"
 	"github.com/coder/coder/v2/enterprise/derpmesh"
 	"github.com/coder/coder/v2/enterprise/replicasync"
 	"github.com/coder/coder/v2/enterprise/tailnet"
 	"github.com/coder/coder/v2/provisionerd/proto"
 	agpltailnet "github.com/coder/coder/v2/tailnet"
+	"github.com/coder/quartz"
 )
 
 // New constructs an Enterprise coderd API instance.
@@ -102,6 +105,11 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 	}
 
 	ctx, cancelFunc := context.WithCancel(ctx)
+	defer func() {
+		if err != nil {
+			cancelFunc()
+		}
+	}()
 
 	if options.ExternalTokenEncryption == nil {
 		options.ExternalTokenEncryption = make([]dbcrypt.Cipher, 0)
@@ -137,10 +145,38 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 	}
 
 	if options.ConnectionLogger == nil {
-		options.ConnectionLogger = connectionlog.NewConnectionLogger(
-			connectionlog.NewDBBackend(options.Database),
+		connLogger := connectionlog.New(
+			connectionlog.NewDBBatcher(ctx, options.Database, options.Logger),
 			connectionlog.NewSlogBackend(options.Logger),
 		)
+		options.ConnectionLogger = connLogger
+	}
+
+	meshTLSConfig, err := replicasync.CreateDERPMeshTLSConfig(options.AccessURL.Hostname(), options.TLSCertificates)
+	if err != nil {
+		return nil, xerrors.Errorf("create DERP mesh TLS config: %w", err)
+	}
+
+	var replicaManagerPtr atomic.Pointer[replicasync.Manager]
+	resolveReplicaAddress := func(
+		_ context.Context,
+		replicaID uuid.UUID,
+	) (string, bool) {
+		manager := replicaManagerPtr.Load()
+		if manager == nil {
+			return "", false
+		}
+		for _, replica := range manager.AllPrimary() {
+			if replica.ID != replicaID {
+				continue
+			}
+			relayAddress := strings.TrimSpace(replica.RelayAddress)
+			if relayAddress == "" {
+				return "", false
+			}
+			return relayAddress, true
+		}
+		return "", false
 	}
 
 	api := &API{
@@ -158,7 +194,35 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 	}
 	// This must happen before coderd initialization!
 	options.PostAuthAdditionalHeadersFunc = api.writeEntitlementWarningsHeader
+
+	// Wire up enterprise chat subscription with cross-replica relay
+	// and pubsub coordination. Must be set before coderd.New so the
+	// chat processor receives it.
+	replicaHTTPClient := replicaRelayHTTPClient(options.HTTPClient, meshTLSConfig)
+	if replicaHTTPClient == nil {
+		replicaHTTPClient = options.Options.HTTPClient
+	}
+	if replicaHTTPClient == nil {
+		replicaHTTPClient = http.DefaultClient
+	}
+	// Use a closure that captures api by reference so it can access
+	// api.AGPL.ID after coderd.New is called. The SubscribeFn is
+	// only invoked from Subscribe, which happens after init.
+	options.Options.ChatSubscribeFn = entchatd.NewMultiReplicaSubscribeFn(entchatd.MultiReplicaSubscribeConfig{
+		ResolveReplicaAddress: resolveReplicaAddress,
+		ReplicaHTTPClient:     replicaHTTPClient,
+		ReplicaIDFn: func() uuid.UUID {
+			id := api.AGPL.ID
+			if id == uuid.Nil {
+				return uuid.New()
+			}
+			return id
+		},
+	})
+
 	api.AGPL = coderd.New(options.Options)
+	api.aiSeatTracker = aiseats.New(options.Database, api.Logger.Named("aiseats"), quartz.NewReal(), &api.AGPL.Auditor)
+	api.AGPL.AISeatTracker = api.aiSeatTracker
 	defer func() {
 		if err != nil {
 			_ = api.Close()
@@ -226,29 +290,12 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 		return api.refreshEntitlements(ctx)
 	}
 
-	api.AGPL.ExperimentalHandler.Group(func(r chi.Router) {
-		r.Route("/aibridge", func(r chi.Router) {
-			r.Use(
-				api.RequireFeatureMW(codersdk.FeatureAIBridge),
-				httpmw.RequireExperimentWithDevBypass(api.AGPL.Experiments, codersdk.ExperimentAIBridge),
-			)
-			r.Group(func(r chi.Router) {
-				r.Use(apiKeyMiddleware)
-				r.Get("/interceptions", api.aiBridgeListInterceptions)
-			})
+	api.AGPL.APIHandler.Group(func(r chi.Router) {
+		r.Route("/aibridge", aibridgeHandler(api, apiKeyMiddleware))
+	})
 
-			// This is a bit funky but since aibridge only exposes a HTTP
-			// handler, this is how it has to be.
-			r.HandleFunc("/*", func(rw http.ResponseWriter, r *http.Request) {
-				if api.aibridgedHandler == nil {
-					httpapi.Write(r.Context(), rw, http.StatusNotFound, codersdk.Response{
-						Message: "aibridged handler not mounted",
-					})
-					return
-				}
-				http.StripPrefix("/api/experimental/aibridge", api.aibridgedHandler).ServeHTTP(rw, r)
-			})
-		})
+	api.AGPL.APIHandler.Group(func(r chi.Router) {
+		r.Route("/aibridge/proxy", aibridgeproxyHandler(api, apiKeyMiddleware))
 	})
 
 	api.AGPL.APIHandler.Group(func(r chi.Router) {
@@ -381,6 +428,11 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 
 				r.Get("/idpsync/available-fields", api.organizationIDPSyncClaimFields)
 				r.Get("/idpsync/field-values", api.organizationIDPSyncClaimFieldValues)
+
+				r.Route("/workspace-sharing", func(r chi.Router) {
+					r.Get("/", api.workspaceSharingSettings)
+					r.Patch("/", api.patchWorkspaceSharingSettings)
+				})
 			})
 		})
 
@@ -411,6 +463,7 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 				)
 
 				r.Get("/", api.groupByOrganization)
+				r.Get("/members", api.groupMembersByOrganization)
 			})
 		})
 		r.Route("/provisionerkeys", func(r chi.Router) {
@@ -473,6 +526,15 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 			r.Get("/", api.templateACL)
 			r.Patch("/", api.patchTemplateACL)
 		})
+		r.Route("/templates/{template}/prebuilds", func(r chi.Router) {
+			r.Use(
+				api.RequireFeatureMW(codersdk.FeatureWorkspacePrebuilds),
+				apiKeyMiddleware,
+				httpmw.ExtractTemplateParam(api.Database),
+			)
+			r.Post("/invalidate", api.postInvalidateTemplatePresets)
+		})
+
 		r.Route("/groups", func(r chi.Router) {
 			r.Use(
 				api.templateRBACEnabledMW,
@@ -486,6 +548,7 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 				r.Get("/", api.group)
 				r.Patch("/", api.patchGroup)
 				r.Delete("/", api.deleteGroup)
+				r.Get("/members", api.groupMembers)
 			})
 		})
 		r.Route("/workspace-quota", func(r chi.Router) {
@@ -588,10 +651,6 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 		})))
 	}
 
-	meshTLSConfig, err := replicasync.CreateDERPMeshTLSConfig(options.AccessURL.Hostname(), options.TLSCertificates)
-	if err != nil {
-		return nil, xerrors.Errorf("create DERP mesh TLS config: %w", err)
-	}
 	// We always want to run the replica manager even if we don't have DERP
 	// enabled, since it's used to detect other coder servers for licensing.
 	api.replicaManager, err = replicasync.New(ctx, options.Logger, options.Database, options.Pubsub, &replicasync.Options{
@@ -605,6 +664,7 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 	if err != nil {
 		return nil, xerrors.Errorf("initialize replica: %w", err)
 	}
+	replicaManagerPtr.Store(api.replicaManager)
 	if api.DERPServer != nil {
 		api.derpMesh = derpmesh.New(options.Logger.Named("derpmesh"), api.DERPServer, meshTLSConfig)
 	}
@@ -648,7 +708,34 @@ func New(ctx context.Context, options *Options) (_ *API, err error) {
 	}
 	go api.runEntitlementsLoop(ctx)
 
+	api.BoundaryUsageTracker = boundaryusage.NewTracker()
+	// If there is no boundary usage nothing gets written to the database and
+	// nothing gets reported in telemetry, so we launch this unconditionally.
+	go api.BoundaryUsageTracker.StartFlushLoop(ctx, options.Logger.Named("boundary_usage_tracker"), options.Database, api.AGPL.ID)
+
 	return api, nil
+}
+
+func replicaRelayHTTPClient(base *http.Client, tlsConfig *tls.Config) *http.Client {
+	if base == nil {
+		base = http.DefaultClient
+	}
+
+	clone := *base
+	var transport *http.Transport
+	switch t := base.Transport.(type) {
+	case *http.Transport:
+		transport = t.Clone()
+	default:
+		if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+			transport = defaultTransport.Clone()
+		} else {
+			transport = &http.Transport{}
+		}
+	}
+	transport.TLSClientConfig = tlsConfig
+	clone.Transport = transport
+	return &clone
 }
 
 type Options struct {
@@ -703,7 +790,9 @@ type API struct {
 	licenseMetricsCollector *license.MetricsCollector
 	tailnetService          *tailnet.ClientService
 
-	aibridgedHandler http.Handler
+	aibridgedHandler      http.Handler
+	aibridgeproxydHandler http.Handler
+	aiSeatTracker         *aiseats.SeatTracker
 }
 
 // writeEntitlementWarningsHeader writes the entitlement warnings to the response header
@@ -733,6 +822,12 @@ func (api *API) Close() error {
 
 	if api.Options.CheckInactiveUsersCancelFunc != nil {
 		api.Options.CheckInactiveUsersCancelFunc()
+	}
+
+	// Close the connection logger to flush any remaining batched
+	// entries before shutting down the database connection.
+	if cl, ok := api.Options.ConnectionLogger.(io.Closer); ok {
+		_ = cl.Close()
 	}
 
 	return api.AGPL.Close()
@@ -771,7 +866,7 @@ func (api *API) updateEntitlements(ctx context.Context) error {
 				codersdk.FeatureUserRoleManagement:         true,
 				codersdk.FeatureAccessControl:              true,
 				codersdk.FeatureControlSharedPorts:         true,
-				codersdk.FeatureAIBridge:                   true,
+				codersdk.FeatureAIBridge:                   api.DeploymentValues.AI.BridgeConfig.Enabled.Value(),
 			})
 		if err != nil {
 			return codersdk.Entitlements{}, err
@@ -942,13 +1037,15 @@ func (api *API) updateEntitlements(ctx context.Context) error {
 		}
 
 		if initial, changed, enabled := featureChanged(codersdk.FeatureWorkspacePrebuilds); shouldUpdate(initial, changed, enabled) {
-			reconciler, claimer := api.setupPrebuilds(enabled)
+			// Stop the old reconciler first to unregister its metrics before
+			// creating a new one. This prevents duplicate metric registration panics.
 			if current := api.AGPL.PrebuildsReconciler.Load(); current != nil {
 				stopCtx, giveUp := context.WithTimeoutCause(context.Background(), time.Second*30, xerrors.New("gave up waiting for reconciler to stop"))
 				defer giveUp()
 				(*current).Stop(stopCtx, xerrors.New("entitlements change"))
 			}
 
+			reconciler, claimer := api.setupPrebuilds(enabled)
 			api.AGPL.PrebuildsReconciler.Store(&reconciler)
 			// TODO: Should this context be the api.ctx context? To cancel when
 			// 	the API (and entire app) is closed via shutdown?
@@ -977,7 +1074,13 @@ func (api *API) updateEntitlements(ctx context.Context) error {
 
 var _ wsbuilder.UsageChecker = &API{}
 
-func (api *API) CheckBuildUsage(ctx context.Context, store database.Store, templateVersion *database.TemplateVersion) (wsbuilder.UsageCheckResponse, error) {
+func (api *API) CheckBuildUsage(
+	_ context.Context,
+	_ database.Store,
+	templateVersion *database.TemplateVersion,
+	task *database.Task,
+	transition database.WorkspaceTransition,
+) (wsbuilder.UsageCheckResponse, error) {
 	// If the template version has an external agent, we need to check that the
 	// license is entitled to this feature.
 	if templateVersion.HasExternalAgent.Valid && templateVersion.HasExternalAgent.Bool {
@@ -990,48 +1093,26 @@ func (api *API) CheckBuildUsage(ctx context.Context, store database.Store, templ
 		}
 	}
 
-	// If the template version doesn't have an AI task, we don't need to check
-	// usage.
-	if !templateVersion.HasAITask.Valid || !templateVersion.HasAITask.Bool {
+	// Verify managed agent entitlement for AI task builds.
+	// The count/limit check is intentionally omitted — breaching the
+	// limit is advisory only and surfaced as a warning via entitlements.
+	if transition != database.WorkspaceTransitionStart || task == nil {
+		return wsbuilder.UsageCheckResponse{Permitted: true}, nil
+	}
+
+	if !api.Entitlements.HasLicense() {
+		return wsbuilder.UsageCheckResponse{Permitted: true}, nil
+	}
+
+	managedAgentLimit, ok := api.Entitlements.Feature(codersdk.FeatureManagedAgentLimit)
+	if !ok || !managedAgentLimit.Enabled {
 		return wsbuilder.UsageCheckResponse{
-			Permitted: true,
+			Permitted: false,
+			Message:   "Your license is not entitled to managed agents. Please contact sales to continue using managed agents.",
 		}, nil
 	}
 
-	// When unlicensed, we need to check that we haven't breached the managed agent
-	// limit.
-	// Unlicensed deployments are allowed to use unlimited managed agents.
-	if api.Entitlements.HasLicense() {
-		managedAgentLimit, ok := api.Entitlements.Feature(codersdk.FeatureManagedAgentLimit)
-		if !ok || !managedAgentLimit.Enabled || managedAgentLimit.Limit == nil || managedAgentLimit.UsagePeriod == nil {
-			return wsbuilder.UsageCheckResponse{
-				Permitted: false,
-				Message:   "Your license is not entitled to managed agents. Please contact sales to continue using managed agents.",
-			}, nil
-		}
-
-		// This check is intentionally not committed to the database. It's fine if
-		// it's not 100% accurate or allows for minor breaches due to build races.
-		// nolint:gocritic // Requires permission to read all usage events.
-		managedAgentCount, err := store.GetTotalUsageDCManagedAgentsV1(agpldbauthz.AsSystemRestricted(ctx), database.GetTotalUsageDCManagedAgentsV1Params{
-			StartDate: managedAgentLimit.UsagePeriod.Start,
-			EndDate:   managedAgentLimit.UsagePeriod.End,
-		})
-		if err != nil {
-			return wsbuilder.UsageCheckResponse{}, xerrors.Errorf("get managed agent count: %w", err)
-		}
-
-		if managedAgentCount >= *managedAgentLimit.Limit {
-			return wsbuilder.UsageCheckResponse{
-				Permitted: false,
-				Message:   "You have breached the managed agent limit in your license. Please contact sales to continue using managed agents.",
-			}, nil
-		}
-	}
-
-	return wsbuilder.UsageCheckResponse{
-		Permitted: true,
-	}, nil
+	return wsbuilder.UsageCheckResponse{Permitted: true}, nil
 }
 
 // getProxyDERPStartingRegionID returns the starting region ID that should be
@@ -1299,7 +1380,19 @@ func (api *API) setupPrebuilds(featureEnabled bool) (agplprebuilds.Reconciliatio
 		return agplprebuilds.DefaultReconciler, agplprebuilds.DefaultClaimer
 	}
 
-	reconciler := prebuilds.NewStoreReconciler(api.Database, api.Pubsub, api.AGPL.FileCache, api.DeploymentValues.Prebuilds,
-		api.Logger.Named("prebuilds"), quartz.NewReal(), api.PrometheusRegistry, api.NotificationsEnqueuer, api.AGPL.BuildUsageChecker)
-	return reconciler, prebuilds.NewEnterpriseClaimer(api.Database)
+	reconciler := prebuilds.NewStoreReconciler(
+		api.Database,
+		api.Pubsub,
+		api.AGPL.FileCache,
+		api.DeploymentValues.Prebuilds,
+		api.Logger.Named("prebuilds"),
+		quartz.NewReal(),
+		api.PrometheusRegistry,
+		api.NotificationsEnqueuer,
+		api.AGPL.BuildUsageChecker,
+		api.TracerProvider,
+		int(api.DeploymentValues.PostgresConnMaxOpen.Value()),
+		api.AGPL.WorkspaceBuilderMetrics,
+	)
+	return reconciler, prebuilds.NewEnterpriseClaimer()
 }

@@ -1,22 +1,21 @@
-import { chromaticWithTablet } from "testHelpers/chromatic";
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import {
+	getDefaultFilterProps,
+	MockMenu,
+} from "#/components/Filter/storyHelpers";
+import { chromaticWithTablet } from "#/testHelpers/chromatic";
 import {
 	MockTemplate,
 	MockTemplateExample,
 	MockTemplateExample2,
 	MockUserOwner,
 	mockApiError,
-} from "testHelpers/entities";
-import { withDashboardProvider } from "testHelpers/storybook";
-import type { Meta, StoryObj } from "@storybook/react-vite";
-import {
-	getDefaultFilterProps,
-	MockMenu,
-} from "components/Filter/storyHelpers";
+} from "#/testHelpers/entities";
+import { withDashboardProvider } from "#/testHelpers/storybook";
 import type { TemplateFilterState } from "./TemplatesPage";
 import { TemplatesPageView } from "./TemplatesPageView";
 
 const defaultFilterProps = getDefaultFilterProps<TemplateFilterState>({
-	query: "deprecated:false",
 	menus: {
 		organizations: MockMenu,
 	},
@@ -83,6 +82,13 @@ export const WithTemplates: Story = {
 				display_name: "Deprecated",
 				description: "Template is incompatible",
 			},
+			{
+				...MockTemplate,
+				name: "deleted-template",
+				display_name: "Deleted",
+				description: "Template has been deleted",
+				deleted: true,
+			},
 		],
 		examples: [],
 		workspacePermissions: {
@@ -118,7 +124,7 @@ export const WithFilteredAllTemplates: Story = {
 		filterState: {
 			filter: {
 				...defaultFilterProps.filter,
-				query: "deprecated:false searchnotfound",
+				query: "searchnotfound",
 				values: {},
 				used: true,
 			},

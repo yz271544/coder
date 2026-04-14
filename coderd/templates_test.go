@@ -17,6 +17,7 @@ import (
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
+	"github.com/coder/coder/v2/coderd/database/dbfake"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
@@ -480,7 +481,7 @@ func TestTemplates(t *testing.T) {
 
 		// Deprecate bar template
 		deprecationMessage := "Some deprecated message"
-		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   bar.ID,
 			RequireActiveVersion: false,
 			Deprecated:           deprecationMessage,
@@ -522,13 +523,13 @@ func TestTemplates(t *testing.T) {
 
 		// Deprecate foo and bar templates
 		deprecationMessage := "Some deprecated message"
-		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   foo.ID,
 			RequireActiveVersion: false,
 			Deprecated:           deprecationMessage,
 		})
 		require.NoError(t, err)
-		err = db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err = db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   bar.ID,
 			RequireActiveVersion: false,
 			Deprecated:           deprecationMessage,
@@ -637,7 +638,7 @@ func TestTemplates(t *testing.T) {
 
 		// Deprecate bar template
 		deprecationMessage := "Some deprecated message"
-		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   bar.ID,
 			RequireActiveVersion: false,
 			Deprecated:           deprecationMessage,
@@ -650,7 +651,7 @@ func TestTemplates(t *testing.T) {
 		require.Equal(t, deprecationMessage, updatedBar.DeprecationMessage)
 
 		// Re-enable bar template
-		err = db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err = db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   bar.ID,
 			RequireActiveVersion: false,
 			Deprecated:           "",
@@ -793,7 +794,7 @@ func TestTemplatesByOrganization(t *testing.T) {
 
 		// Deprecate bar template
 		deprecationMessage := "Some deprecated message"
-		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   bar.ID,
 			RequireActiveVersion: false,
 			Deprecated:           deprecationMessage,
@@ -944,10 +945,6 @@ func TestPatchTemplateMeta(t *testing.T) {
 	t.Run("AlreadyExists", func(t *testing.T) {
 		t.Parallel()
 
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("This test requires Postgres constraints")
-		}
-
 		ownerClient := coderdtest.New(t, nil)
 		owner := coderdtest.CreateFirstUser(t, ownerClient)
 		client, _ := coderdtest.CreateAnotherUser(t, ownerClient, owner.OrganizationID, rbac.ScopedRoleOrgTemplateAdmin(owner.OrganizationID))
@@ -1008,7 +1005,7 @@ func TestPatchTemplateMeta(t *testing.T) {
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// nolint:gocritic // Setting up unit test data
-		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin, user.OrganizationID)), database.UpdateTemplateAccessControlByIDParams{
+		err := db.UpdateTemplateAccessControlByID(dbauthz.As(ctx, coderdtest.AuthzUserSubject(tplAdmin)), database.UpdateTemplateAccessControlByIDParams{
 			ID:                   template.ID,
 			RequireActiveVersion: false,
 			Deprecated:           "Some deprecated message",
@@ -1619,6 +1616,39 @@ func TestPatchTemplateMeta(t *testing.T) {
 		assert.False(t, updated.UseClassicParameterFlow, "expected false")
 	})
 
+	t.Run("DisableModuleCache", func(t *testing.T) {
+		t.Parallel()
+
+		client := coderdtest.New(t, nil)
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		require.False(t, template.DisableModuleCache, "default is false")
+
+		req := codersdk.UpdateTemplateMeta{
+			DisableModuleCache: ptr.Ref(true),
+		}
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		// set to true
+		updated, err := client.UpdateTemplateMeta(ctx, template.ID, req)
+		require.NoError(t, err)
+		assert.True(t, updated.DisableModuleCache, "expected true")
+
+		// noop - should stay true when not specified
+		req.DisableModuleCache = nil
+		updated, err = client.UpdateTemplateMeta(ctx, template.ID, req)
+		require.NoError(t, err)
+		assert.True(t, updated.DisableModuleCache, "expected true")
+
+		// back to false
+		req.DisableModuleCache = ptr.Ref(false)
+		updated, err = client.UpdateTemplateMeta(ctx, template.ID, req)
+		require.NoError(t, err)
+		assert.False(t, updated.DisableModuleCache, "expected false")
+	})
+
 	t.Run("SupportEmptyOrDefaultFields", func(t *testing.T) {
 		t.Parallel()
 
@@ -1757,6 +1787,124 @@ func TestDeleteTemplate(t *testing.T) {
 		require.ErrorAs(t, err, &apiErr)
 		require.Equal(t, http.StatusBadRequest, apiErr.StatusCode())
 	})
+
+	t.Run("NoPermission", func(t *testing.T) {
+		t.Parallel()
+		client, db := coderdtest.NewWithDatabase(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		owner := coderdtest.CreateFirstUser(t, client)
+		memberClient, _ := coderdtest.CreateAnotherUser(t, client, owner.OrganizationID)
+		tpl := dbfake.TemplateVersion(t, db).Seed(database.TemplateVersion{CreatedBy: owner.UserID, OrganizationID: owner.OrganizationID}).Do()
+
+		ctx := testutil.Context(t, testutil.WaitShort)
+		err := memberClient.DeleteTemplate(ctx, tpl.Template.ID)
+		var apiErr *codersdk.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusForbidden, apiErr.StatusCode())
+	})
+
+	t.Run("OnlyPrebuilds", func(t *testing.T) {
+		t.Parallel()
+		client, db := coderdtest.NewWithDatabase(t, nil)
+		owner := coderdtest.CreateFirstUser(t, client)
+		tpl := dbfake.TemplateVersion(t, db).
+			Seed(database.TemplateVersion{
+				CreatedBy:      owner.UserID,
+				OrganizationID: owner.OrganizationID,
+			}).Do()
+
+		// Create a workspace owned by the prebuilds system user.
+		dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        database.PrebuildsSystemUserID,
+			OrganizationID: owner.OrganizationID,
+			TemplateID:     tpl.Template.ID,
+		}).Seed(database.WorkspaceBuild{
+			TemplateVersionID: tpl.TemplateVersion.ID,
+		}).Do()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		err := client.DeleteTemplate(ctx, tpl.Template.ID)
+		require.NoError(t, err)
+	})
+
+	t.Run("PrebuildsAndHumanWorkspaces", func(t *testing.T) {
+		t.Parallel()
+		client, db := coderdtest.NewWithDatabase(t, nil)
+		owner := coderdtest.CreateFirstUser(t, client)
+		tpl := dbfake.TemplateVersion(t, db).
+			Seed(database.TemplateVersion{
+				CreatedBy:      owner.UserID,
+				OrganizationID: owner.OrganizationID,
+			}).Do()
+
+		// Create a prebuild workspace.
+		dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        database.PrebuildsSystemUserID,
+			OrganizationID: owner.OrganizationID,
+			TemplateID:     tpl.Template.ID,
+		}).Seed(database.WorkspaceBuild{
+			TemplateVersionID: tpl.TemplateVersion.ID,
+		}).Do()
+
+		// Create a human-owned workspace.
+		dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        owner.UserID,
+			OrganizationID: owner.OrganizationID,
+			TemplateID:     tpl.Template.ID,
+		}).Seed(database.WorkspaceBuild{
+			TemplateVersionID: tpl.TemplateVersion.ID,
+		}).Do()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		err := client.DeleteTemplate(ctx, tpl.Template.ID)
+		var apiErr *codersdk.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusBadRequest, apiErr.StatusCode())
+	})
+
+	t.Run("DeletedIsSet", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		// Verify the deleted field is exposed in the SDK and set to false for active templates
+		got, err := client.Template(ctx, template.ID)
+		require.NoError(t, err)
+		require.False(t, got.Deleted)
+	})
+
+	t.Run("DeletedIsTrue", func(t *testing.T) {
+		t.Parallel()
+		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+		user := coderdtest.CreateFirstUser(t, client)
+		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
+		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+
+		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		err := client.DeleteTemplate(ctx, template.ID)
+		require.NoError(t, err)
+
+		// Verify the deleted field is set to true by listing templates with
+		// deleted:true filter.
+		templates, err := client.Templates(ctx, codersdk.TemplateFilter{
+			OrganizationID: user.OrganizationID,
+			SearchQuery:    "deleted:true",
+		})
+		require.NoError(t, err)
+
+		require.Len(t, templates, 1)
+		require.Equal(t, template.ID, templates[0].ID)
+		require.True(t, templates[0].Deleted)
+	})
 }
 
 func TestTemplateMetrics(t *testing.T) {
@@ -1775,7 +1923,7 @@ func TestTemplateMetrics(t *testing.T) {
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 		Parse:          echo.ParseComplete,
 		ProvisionPlan:  echo.PlanComplete,
-		ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+		ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 	})
 	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
 	require.Equal(t, -1, template.ActiveUserCount)

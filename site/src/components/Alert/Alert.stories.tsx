@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { Button } from "components/Button/Button";
+import { Button } from "#/components/Button/Button";
 import { Alert } from "./Alert";
 
 const meta: Meta<typeof Alert> = {
@@ -11,7 +11,7 @@ export default meta;
 type Story = StoryObj<typeof Alert>;
 
 const ExampleAction = (
-	<Button onClick={() => null} size="sm" variant="subtle">
+	<Button onClick={() => null} size="sm">
 		Button
 	</Button>
 );
@@ -52,5 +52,39 @@ export const WarningWithActionAndDismiss: Story = {
 		actions: [ExampleAction],
 		dismissible: true,
 		severity: "warning",
+	},
+};
+
+export const Info: Story = {
+	args: {
+		children: "This is an informational message",
+		severity: "info",
+	},
+};
+
+export const ErrorSeverity: Story = {
+	args: {
+		children: "This is an error message",
+		severity: "error",
+	},
+};
+
+export const WarningProminent: Story = {
+	args: {
+		children:
+			"This is a high risk warning. Use this design only for high risk warnings.",
+		severity: "warning",
+		prominent: true,
+		dismissible: true,
+	},
+};
+
+export const ErrorProminent: Story = {
+	args: {
+		children:
+			"This is a crucial error. Use this design only for crucial errors.",
+		severity: "error",
+		prominent: true,
+		dismissible: true,
 	},
 };

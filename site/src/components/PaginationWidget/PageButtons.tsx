@@ -1,5 +1,5 @@
-import { Button } from "components/Button/Button";
 import type { FC, ReactNode } from "react";
+import { Button } from "#/components/Button/Button";
 
 type NumberedPageButtonProps = {
 	pageNumber: number;
@@ -74,6 +74,7 @@ const BasePageButton: FC<BasePageButtonProps> = ({
 			name={name}
 			disabled={disabled}
 			onClick={onClick}
+			className="min-w-8 w-auto"
 		>
 			{children}
 		</Button>

@@ -206,6 +206,24 @@ const (
 	ApiKeyScopeWorkspaceAgentResourceMonitor       APIKeyScope = "workspace_agent_resource_monitor:*"
 	ApiKeyScopeWorkspaceDormant                    APIKeyScope = "workspace_dormant:*"
 	ApiKeyScopeWorkspaceProxy                      APIKeyScope = "workspace_proxy:*"
+	ApiKeyScopeTaskCreate                          APIKeyScope = "task:create"
+	ApiKeyScopeTaskRead                            APIKeyScope = "task:read"
+	ApiKeyScopeTaskUpdate                          APIKeyScope = "task:update"
+	ApiKeyScopeTaskDelete                          APIKeyScope = "task:delete"
+	ApiKeyScopeTask                                APIKeyScope = "task:*"
+	ApiKeyScopeWorkspaceShare                      APIKeyScope = "workspace:share"
+	ApiKeyScopeWorkspaceDormantShare               APIKeyScope = "workspace_dormant:share"
+	ApiKeyScopeBoundaryUsage                       APIKeyScope = "boundary_usage:*"
+	ApiKeyScopeBoundaryUsageDelete                 APIKeyScope = "boundary_usage:delete"
+	ApiKeyScopeBoundaryUsageRead                   APIKeyScope = "boundary_usage:read"
+	ApiKeyScopeBoundaryUsageUpdate                 APIKeyScope = "boundary_usage:update"
+	ApiKeyScopeWorkspaceUpdateAgent                APIKeyScope = "workspace:update_agent"
+	ApiKeyScopeWorkspaceDormantUpdateAgent         APIKeyScope = "workspace_dormant:update_agent"
+	ApiKeyScopeChatCreate                          APIKeyScope = "chat:create"
+	ApiKeyScopeChatRead                            APIKeyScope = "chat:read"
+	ApiKeyScopeChatUpdate                          APIKeyScope = "chat:update"
+	ApiKeyScopeChatDelete                          APIKeyScope = "chat:delete"
+	ApiKeyScopeChat                                APIKeyScope = "chat:*"
 )
 
 func (e *APIKeyScope) Scan(src interface{}) error {
@@ -431,7 +449,25 @@ func (e APIKeyScope) Valid() bool {
 		ApiKeyScopeWorkspaceAgentDevcontainers,
 		ApiKeyScopeWorkspaceAgentResourceMonitor,
 		ApiKeyScopeWorkspaceDormant,
-		ApiKeyScopeWorkspaceProxy:
+		ApiKeyScopeWorkspaceProxy,
+		ApiKeyScopeTaskCreate,
+		ApiKeyScopeTaskRead,
+		ApiKeyScopeTaskUpdate,
+		ApiKeyScopeTaskDelete,
+		ApiKeyScopeTask,
+		ApiKeyScopeWorkspaceShare,
+		ApiKeyScopeWorkspaceDormantShare,
+		ApiKeyScopeBoundaryUsage,
+		ApiKeyScopeBoundaryUsageDelete,
+		ApiKeyScopeBoundaryUsageRead,
+		ApiKeyScopeBoundaryUsageUpdate,
+		ApiKeyScopeWorkspaceUpdateAgent,
+		ApiKeyScopeWorkspaceDormantUpdateAgent,
+		ApiKeyScopeChatCreate,
+		ApiKeyScopeChatRead,
+		ApiKeyScopeChatUpdate,
+		ApiKeyScopeChatDelete,
+		ApiKeyScopeChat:
 		return true
 	}
 	return false
@@ -626,6 +662,24 @@ func AllAPIKeyScopeValues() []APIKeyScope {
 		ApiKeyScopeWorkspaceAgentResourceMonitor,
 		ApiKeyScopeWorkspaceDormant,
 		ApiKeyScopeWorkspaceProxy,
+		ApiKeyScopeTaskCreate,
+		ApiKeyScopeTaskRead,
+		ApiKeyScopeTaskUpdate,
+		ApiKeyScopeTaskDelete,
+		ApiKeyScopeTask,
+		ApiKeyScopeWorkspaceShare,
+		ApiKeyScopeWorkspaceDormantShare,
+		ApiKeyScopeBoundaryUsage,
+		ApiKeyScopeBoundaryUsageDelete,
+		ApiKeyScopeBoundaryUsageRead,
+		ApiKeyScopeBoundaryUsageUpdate,
+		ApiKeyScopeWorkspaceUpdateAgent,
+		ApiKeyScopeWorkspaceDormantUpdateAgent,
+		ApiKeyScopeChatCreate,
+		ApiKeyScopeChatRead,
+		ApiKeyScopeChatUpdate,
+		ApiKeyScopeChatDelete,
+		ApiKeyScopeChat,
 	}
 }
 
@@ -684,6 +738,64 @@ func AllAgentKeyScopeEnumValues() []AgentKeyScopeEnum {
 	return []AgentKeyScopeEnum{
 		AgentKeyScopeEnumAll,
 		AgentKeyScopeEnumNoUserData,
+	}
+}
+
+type AiSeatUsageReason string
+
+const (
+	AiSeatUsageReasonAibridge AiSeatUsageReason = "aibridge"
+	AiSeatUsageReasonTask     AiSeatUsageReason = "task"
+)
+
+func (e *AiSeatUsageReason) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = AiSeatUsageReason(s)
+	case string:
+		*e = AiSeatUsageReason(s)
+	default:
+		return fmt.Errorf("unsupported scan type for AiSeatUsageReason: %T", src)
+	}
+	return nil
+}
+
+type NullAiSeatUsageReason struct {
+	AiSeatUsageReason AiSeatUsageReason `json:"ai_seat_usage_reason"`
+	Valid             bool              `json:"valid"` // Valid is true if AiSeatUsageReason is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullAiSeatUsageReason) Scan(value interface{}) error {
+	if value == nil {
+		ns.AiSeatUsageReason, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.AiSeatUsageReason.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullAiSeatUsageReason) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.AiSeatUsageReason), nil
+}
+
+func (e AiSeatUsageReason) Valid() bool {
+	switch e {
+	case AiSeatUsageReasonAibridge,
+		AiSeatUsageReasonTask:
+		return true
+	}
+	return false
+}
+
+func AllAiSeatUsageReasonValues() []AiSeatUsageReason {
+	return []AiSeatUsageReason{
+		AiSeatUsageReasonAibridge,
+		AiSeatUsageReasonTask,
 	}
 }
 
@@ -915,6 +1027,9 @@ const (
 	BuildReasonSshConnection       BuildReason = "ssh_connection"
 	BuildReasonVscodeConnection    BuildReason = "vscode_connection"
 	BuildReasonJetbrainsConnection BuildReason = "jetbrains_connection"
+	BuildReasonTaskAutoPause       BuildReason = "task_auto_pause"
+	BuildReasonTaskManualPause     BuildReason = "task_manual_pause"
+	BuildReasonTaskResume          BuildReason = "task_resume"
 )
 
 func (e *BuildReason) Scan(src interface{}) error {
@@ -964,7 +1079,10 @@ func (e BuildReason) Valid() bool {
 		BuildReasonCli,
 		BuildReasonSshConnection,
 		BuildReasonVscodeConnection,
-		BuildReasonJetbrainsConnection:
+		BuildReasonJetbrainsConnection,
+		BuildReasonTaskAutoPause,
+		BuildReasonTaskManualPause,
+		BuildReasonTaskResume:
 		return true
 	}
 	return false
@@ -983,6 +1101,262 @@ func AllBuildReasonValues() []BuildReason {
 		BuildReasonSshConnection,
 		BuildReasonVscodeConnection,
 		BuildReasonJetbrainsConnection,
+		BuildReasonTaskAutoPause,
+		BuildReasonTaskManualPause,
+		BuildReasonTaskResume,
+	}
+}
+
+type ChatMessageRole string
+
+const (
+	ChatMessageRoleSystem    ChatMessageRole = "system"
+	ChatMessageRoleUser      ChatMessageRole = "user"
+	ChatMessageRoleAssistant ChatMessageRole = "assistant"
+	ChatMessageRoleTool      ChatMessageRole = "tool"
+)
+
+func (e *ChatMessageRole) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ChatMessageRole(s)
+	case string:
+		*e = ChatMessageRole(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ChatMessageRole: %T", src)
+	}
+	return nil
+}
+
+type NullChatMessageRole struct {
+	ChatMessageRole ChatMessageRole `json:"chat_message_role"`
+	Valid           bool            `json:"valid"` // Valid is true if ChatMessageRole is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullChatMessageRole) Scan(value interface{}) error {
+	if value == nil {
+		ns.ChatMessageRole, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ChatMessageRole.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullChatMessageRole) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ChatMessageRole), nil
+}
+
+func (e ChatMessageRole) Valid() bool {
+	switch e {
+	case ChatMessageRoleSystem,
+		ChatMessageRoleUser,
+		ChatMessageRoleAssistant,
+		ChatMessageRoleTool:
+		return true
+	}
+	return false
+}
+
+func AllChatMessageRoleValues() []ChatMessageRole {
+	return []ChatMessageRole{
+		ChatMessageRoleSystem,
+		ChatMessageRoleUser,
+		ChatMessageRoleAssistant,
+		ChatMessageRoleTool,
+	}
+}
+
+type ChatMessageVisibility string
+
+const (
+	ChatMessageVisibilityUser  ChatMessageVisibility = "user"
+	ChatMessageVisibilityModel ChatMessageVisibility = "model"
+	ChatMessageVisibilityBoth  ChatMessageVisibility = "both"
+)
+
+func (e *ChatMessageVisibility) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ChatMessageVisibility(s)
+	case string:
+		*e = ChatMessageVisibility(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ChatMessageVisibility: %T", src)
+	}
+	return nil
+}
+
+type NullChatMessageVisibility struct {
+	ChatMessageVisibility ChatMessageVisibility `json:"chat_message_visibility"`
+	Valid                 bool                  `json:"valid"` // Valid is true if ChatMessageVisibility is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullChatMessageVisibility) Scan(value interface{}) error {
+	if value == nil {
+		ns.ChatMessageVisibility, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ChatMessageVisibility.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullChatMessageVisibility) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ChatMessageVisibility), nil
+}
+
+func (e ChatMessageVisibility) Valid() bool {
+	switch e {
+	case ChatMessageVisibilityUser,
+		ChatMessageVisibilityModel,
+		ChatMessageVisibilityBoth:
+		return true
+	}
+	return false
+}
+
+func AllChatMessageVisibilityValues() []ChatMessageVisibility {
+	return []ChatMessageVisibility{
+		ChatMessageVisibilityUser,
+		ChatMessageVisibilityModel,
+		ChatMessageVisibilityBoth,
+	}
+}
+
+type ChatMode string
+
+const (
+	ChatModeComputerUse ChatMode = "computer_use"
+)
+
+func (e *ChatMode) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ChatMode(s)
+	case string:
+		*e = ChatMode(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ChatMode: %T", src)
+	}
+	return nil
+}
+
+type NullChatMode struct {
+	ChatMode ChatMode `json:"chat_mode"`
+	Valid    bool     `json:"valid"` // Valid is true if ChatMode is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullChatMode) Scan(value interface{}) error {
+	if value == nil {
+		ns.ChatMode, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ChatMode.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullChatMode) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ChatMode), nil
+}
+
+func (e ChatMode) Valid() bool {
+	switch e {
+	case ChatModeComputerUse:
+		return true
+	}
+	return false
+}
+
+func AllChatModeValues() []ChatMode {
+	return []ChatMode{
+		ChatModeComputerUse,
+	}
+}
+
+type ChatStatus string
+
+const (
+	ChatStatusWaiting        ChatStatus = "waiting"
+	ChatStatusPending        ChatStatus = "pending"
+	ChatStatusRunning        ChatStatus = "running"
+	ChatStatusPaused         ChatStatus = "paused"
+	ChatStatusCompleted      ChatStatus = "completed"
+	ChatStatusError          ChatStatus = "error"
+	ChatStatusRequiresAction ChatStatus = "requires_action"
+)
+
+func (e *ChatStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ChatStatus(s)
+	case string:
+		*e = ChatStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ChatStatus: %T", src)
+	}
+	return nil
+}
+
+type NullChatStatus struct {
+	ChatStatus ChatStatus `json:"chat_status"`
+	Valid      bool       `json:"valid"` // Valid is true if ChatStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullChatStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.ChatStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ChatStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullChatStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ChatStatus), nil
+}
+
+func (e ChatStatus) Valid() bool {
+	switch e {
+	case ChatStatusWaiting,
+		ChatStatusPending,
+		ChatStatusRunning,
+		ChatStatusPaused,
+		ChatStatusCompleted,
+		ChatStatusError,
+		ChatStatusRequiresAction:
+		return true
+	}
+	return false
+}
+
+func AllChatStatusValues() []ChatStatus {
+	return []ChatStatus{
+		ChatStatusWaiting,
+		ChatStatusPending,
+		ChatStatusRunning,
+		ChatStatusPaused,
+		ChatStatusCompleted,
+		ChatStatusError,
+		ChatStatusRequiresAction,
 	}
 }
 
@@ -1169,6 +1543,64 @@ func AllCorsBehaviorValues() []CorsBehavior {
 	return []CorsBehavior{
 		CorsBehaviorSimple,
 		CorsBehaviorPassthru,
+	}
+}
+
+type CredentialKind string
+
+const (
+	CredentialKindCentralized CredentialKind = "centralized"
+	CredentialKindByok        CredentialKind = "byok"
+)
+
+func (e *CredentialKind) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = CredentialKind(s)
+	case string:
+		*e = CredentialKind(s)
+	default:
+		return fmt.Errorf("unsupported scan type for CredentialKind: %T", src)
+	}
+	return nil
+}
+
+type NullCredentialKind struct {
+	CredentialKind CredentialKind `json:"credential_kind"`
+	Valid          bool           `json:"valid"` // Valid is true if CredentialKind is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullCredentialKind) Scan(value interface{}) error {
+	if value == nil {
+		ns.CredentialKind, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.CredentialKind.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullCredentialKind) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.CredentialKind), nil
+}
+
+func (e CredentialKind) Valid() bool {
+	switch e {
+	case CredentialKindCentralized,
+		CredentialKindByok:
+		return true
+	}
+	return false
+}
+
+func AllCredentialKindValues() []CredentialKind {
+	return []CredentialKind{
+		CredentialKindCentralized,
+		CredentialKindByok,
 	}
 }
 
@@ -2655,6 +3087,8 @@ const (
 	ResourceTypeWorkspaceAgent              ResourceType = "workspace_agent"
 	ResourceTypeWorkspaceApp                ResourceType = "workspace_app"
 	ResourceTypePrebuildsSettings           ResourceType = "prebuilds_settings"
+	ResourceTypeTask                        ResourceType = "task"
+	ResourceTypeAiSeat                      ResourceType = "ai_seat"
 )
 
 func (e *ResourceType) Scan(src interface{}) error {
@@ -2718,7 +3152,9 @@ func (e ResourceType) Valid() bool {
 		ResourceTypeIdpSyncSettingsRole,
 		ResourceTypeWorkspaceAgent,
 		ResourceTypeWorkspaceApp,
-		ResourceTypePrebuildsSettings:
+		ResourceTypePrebuildsSettings,
+		ResourceTypeTask,
+		ResourceTypeAiSeat:
 		return true
 	}
 	return false
@@ -2751,6 +3187,69 @@ func AllResourceTypeValues() []ResourceType {
 		ResourceTypeWorkspaceAgent,
 		ResourceTypeWorkspaceApp,
 		ResourceTypePrebuildsSettings,
+		ResourceTypeTask,
+		ResourceTypeAiSeat,
+	}
+}
+
+type ShareableWorkspaceOwners string
+
+const (
+	ShareableWorkspaceOwnersNone            ShareableWorkspaceOwners = "none"
+	ShareableWorkspaceOwnersEveryone        ShareableWorkspaceOwners = "everyone"
+	ShareableWorkspaceOwnersServiceAccounts ShareableWorkspaceOwners = "service_accounts"
+)
+
+func (e *ShareableWorkspaceOwners) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ShareableWorkspaceOwners(s)
+	case string:
+		*e = ShareableWorkspaceOwners(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ShareableWorkspaceOwners: %T", src)
+	}
+	return nil
+}
+
+type NullShareableWorkspaceOwners struct {
+	ShareableWorkspaceOwners ShareableWorkspaceOwners `json:"shareable_workspace_owners"`
+	Valid                    bool                     `json:"valid"` // Valid is true if ShareableWorkspaceOwners is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullShareableWorkspaceOwners) Scan(value interface{}) error {
+	if value == nil {
+		ns.ShareableWorkspaceOwners, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ShareableWorkspaceOwners.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullShareableWorkspaceOwners) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ShareableWorkspaceOwners), nil
+}
+
+func (e ShareableWorkspaceOwners) Valid() bool {
+	switch e {
+	case ShareableWorkspaceOwnersNone,
+		ShareableWorkspaceOwnersEveryone,
+		ShareableWorkspaceOwnersServiceAccounts:
+		return true
+	}
+	return false
+}
+
+func AllShareableWorkspaceOwnersValues() []ShareableWorkspaceOwners {
+	return []ShareableWorkspaceOwners{
+		ShareableWorkspaceOwnersNone,
+		ShareableWorkspaceOwnersEveryone,
+		ShareableWorkspaceOwnersServiceAccounts,
 	}
 }
 
@@ -2867,6 +3366,76 @@ func AllTailnetStatusValues() []TailnetStatus {
 	return []TailnetStatus{
 		TailnetStatusOk,
 		TailnetStatusLost,
+	}
+}
+
+type TaskStatus string
+
+const (
+	TaskStatusPending      TaskStatus = "pending"
+	TaskStatusInitializing TaskStatus = "initializing"
+	TaskStatusActive       TaskStatus = "active"
+	TaskStatusPaused       TaskStatus = "paused"
+	TaskStatusUnknown      TaskStatus = "unknown"
+	TaskStatusError        TaskStatus = "error"
+)
+
+func (e *TaskStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = TaskStatus(s)
+	case string:
+		*e = TaskStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for TaskStatus: %T", src)
+	}
+	return nil
+}
+
+type NullTaskStatus struct {
+	TaskStatus TaskStatus `json:"task_status"`
+	Valid      bool       `json:"valid"` // Valid is true if TaskStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullTaskStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.TaskStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.TaskStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullTaskStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.TaskStatus), nil
+}
+
+func (e TaskStatus) Valid() bool {
+	switch e {
+	case TaskStatusPending,
+		TaskStatusInitializing,
+		TaskStatusActive,
+		TaskStatusPaused,
+		TaskStatusUnknown,
+		TaskStatusError:
+		return true
+	}
+	return false
+}
+
+func AllTaskStatusValues() []TaskStatus {
+	return []TaskStatus{
+		TaskStatusPending,
+		TaskStatusInitializing,
+		TaskStatusActive,
+		TaskStatusPaused,
+		TaskStatusUnknown,
+		TaskStatusError,
 	}
 }
 
@@ -3519,6 +4088,31 @@ type AIBridgeInterception struct {
 	Model       string                `db:"model" json:"model"`
 	StartedAt   time.Time             `db:"started_at" json:"started_at"`
 	Metadata    pqtype.NullRawMessage `db:"metadata" json:"metadata"`
+	EndedAt     sql.NullTime          `db:"ended_at" json:"ended_at"`
+	APIKeyID    sql.NullString        `db:"api_key_id" json:"api_key_id"`
+	Client      sql.NullString        `db:"client" json:"client"`
+	// The interception which directly caused this interception to occur, usually through an agentic loop or threaded conversation.
+	ThreadParentID uuid.NullUUID `db:"thread_parent_id" json:"thread_parent_id"`
+	// The root interception of the thread that this interception belongs to.
+	ThreadRootID uuid.NullUUID `db:"thread_root_id" json:"thread_root_id"`
+	// The session ID supplied by the client (optional and not universally supported).
+	ClientSessionID sql.NullString `db:"client_session_id" json:"client_session_id"`
+	// Groups related interceptions into a logical session. Determined by a priority chain: (1) client_session_id — an explicit session identifier supplied by the calling client (e.g. Claude Code); (2) thread_root_id — the root of an agentic thread detected by Bridge through tool-call correlation, used when the client does not supply its own session ID; (3) id — the interception's own ID, used as a last resort so every interception belongs to exactly one session even if it is standalone. This is a generated column stored on disk so it can be indexed and joined without recomputing the COALESCE on every query.
+	SessionID string `db:"session_id" json:"session_id"`
+	// The provider instance name which may differ from provider when multiple instances of the same provider type exist.
+	ProviderName string `db:"provider_name" json:"provider_name"`
+	// How the request was authenticated: centralized or byok.
+	CredentialKind CredentialKind `db:"credential_kind" json:"credential_kind"`
+	// Masked credential identifier for audit (e.g. sk-a***efgh).
+	CredentialHint string `db:"credential_hint" json:"credential_hint"`
+}
+
+// Audit log of model thinking in intercepted requests in AI Bridge
+type AIBridgeModelThought struct {
+	InterceptionID uuid.UUID             `db:"interception_id" json:"interception_id"`
+	Content        string                `db:"content" json:"content"`
+	Metadata       pqtype.NullRawMessage `db:"metadata" json:"metadata"`
+	CreatedAt      time.Time             `db:"created_at" json:"created_at"`
 }
 
 // Audit log of tokens used by intercepted requests in AI Bridge
@@ -3526,11 +4120,13 @@ type AIBridgeTokenUsage struct {
 	ID             uuid.UUID `db:"id" json:"id"`
 	InterceptionID uuid.UUID `db:"interception_id" json:"interception_id"`
 	// The ID for the response in which the tokens were used, produced by the provider.
-	ProviderResponseID string                `db:"provider_response_id" json:"provider_response_id"`
-	InputTokens        int64                 `db:"input_tokens" json:"input_tokens"`
-	OutputTokens       int64                 `db:"output_tokens" json:"output_tokens"`
-	Metadata           pqtype.NullRawMessage `db:"metadata" json:"metadata"`
-	CreatedAt          time.Time             `db:"created_at" json:"created_at"`
+	ProviderResponseID    string                `db:"provider_response_id" json:"provider_response_id"`
+	InputTokens           int64                 `db:"input_tokens" json:"input_tokens"`
+	OutputTokens          int64                 `db:"output_tokens" json:"output_tokens"`
+	Metadata              pqtype.NullRawMessage `db:"metadata" json:"metadata"`
+	CreatedAt             time.Time             `db:"created_at" json:"created_at"`
+	CacheReadInputTokens  int64                 `db:"cache_read_input_tokens" json:"cache_read_input_tokens"`
+	CacheWriteInputTokens int64                 `db:"cache_write_input_tokens" json:"cache_write_input_tokens"`
 }
 
 // Audit log of tool calls in intercepted requests in AI Bridge
@@ -3546,9 +4142,10 @@ type AIBridgeToolUsage struct {
 	// Whether this tool was injected; i.e. Bridge injected these tools into the request from an MCP server. If false it means a tool was defined by the client and already existed in the request (MCP or built-in).
 	Injected bool `db:"injected" json:"injected"`
 	// Only injected tools are invoked.
-	InvocationError sql.NullString        `db:"invocation_error" json:"invocation_error"`
-	Metadata        pqtype.NullRawMessage `db:"metadata" json:"metadata"`
-	CreatedAt       time.Time             `db:"created_at" json:"created_at"`
+	InvocationError    sql.NullString        `db:"invocation_error" json:"invocation_error"`
+	Metadata           pqtype.NullRawMessage `db:"metadata" json:"metadata"`
+	CreatedAt          time.Time             `db:"created_at" json:"created_at"`
+	ProviderToolCallID sql.NullString        `db:"provider_tool_call_id" json:"provider_tool_call_id"`
 }
 
 // Audit log of prompts used by intercepted requests in AI Bridge
@@ -3579,6 +4176,15 @@ type APIKey struct {
 	AllowList       AllowList    `db:"allow_list" json:"allow_list"`
 }
 
+type AiSeatState struct {
+	UserID               uuid.UUID         `db:"user_id" json:"user_id"`
+	FirstUsedAt          time.Time         `db:"first_used_at" json:"first_used_at"`
+	LastUsedAt           time.Time         `db:"last_used_at" json:"last_used_at"`
+	LastEventType        AiSeatUsageReason `db:"last_event_type" json:"last_event_type"`
+	LastEventDescription string            `db:"last_event_description" json:"last_event_description"`
+	UpdatedAt            time.Time         `db:"updated_at" json:"updated_at"`
+}
+
 type AuditLog struct {
 	ID               uuid.UUID       `db:"id" json:"id"`
 	Time             time.Time       `db:"time" json:"time"`
@@ -3595,6 +4201,207 @@ type AuditLog struct {
 	AdditionalFields json.RawMessage `db:"additional_fields" json:"additional_fields"`
 	RequestID        uuid.UUID       `db:"request_id" json:"request_id"`
 	ResourceIcon     string          `db:"resource_icon" json:"resource_icon"`
+}
+
+// Per-replica boundary usage statistics for telemetry aggregation.
+type BoundaryUsageStat struct {
+	// The unique identifier of the replica reporting stats.
+	ReplicaID uuid.UUID `db:"replica_id" json:"replica_id"`
+	// Count of unique workspaces that used boundary on this replica.
+	UniqueWorkspacesCount int64 `db:"unique_workspaces_count" json:"unique_workspaces_count"`
+	// Count of unique users that used boundary on this replica.
+	UniqueUsersCount int64 `db:"unique_users_count" json:"unique_users_count"`
+	// Total allowed requests through boundary on this replica.
+	AllowedRequests int64 `db:"allowed_requests" json:"allowed_requests"`
+	// Total denied requests through boundary on this replica.
+	DeniedRequests int64 `db:"denied_requests" json:"denied_requests"`
+	// Start of the time window for these stats, set on first flush after reset.
+	WindowStart time.Time `db:"window_start" json:"window_start"`
+	// Timestamp of the last update to this row.
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+type Chat struct {
+	ID                  uuid.UUID             `db:"id" json:"id"`
+	OwnerID             uuid.UUID             `db:"owner_id" json:"owner_id"`
+	WorkspaceID         uuid.NullUUID         `db:"workspace_id" json:"workspace_id"`
+	Title               string                `db:"title" json:"title"`
+	Status              ChatStatus            `db:"status" json:"status"`
+	WorkerID            uuid.NullUUID         `db:"worker_id" json:"worker_id"`
+	StartedAt           sql.NullTime          `db:"started_at" json:"started_at"`
+	HeartbeatAt         sql.NullTime          `db:"heartbeat_at" json:"heartbeat_at"`
+	CreatedAt           time.Time             `db:"created_at" json:"created_at"`
+	UpdatedAt           time.Time             `db:"updated_at" json:"updated_at"`
+	ParentChatID        uuid.NullUUID         `db:"parent_chat_id" json:"parent_chat_id"`
+	RootChatID          uuid.NullUUID         `db:"root_chat_id" json:"root_chat_id"`
+	LastModelConfigID   uuid.UUID             `db:"last_model_config_id" json:"last_model_config_id"`
+	Archived            bool                  `db:"archived" json:"archived"`
+	LastError           sql.NullString        `db:"last_error" json:"last_error"`
+	Mode                NullChatMode          `db:"mode" json:"mode"`
+	MCPServerIDs        []uuid.UUID           `db:"mcp_server_ids" json:"mcp_server_ids"`
+	Labels              StringMap             `db:"labels" json:"labels"`
+	BuildID             uuid.NullUUID         `db:"build_id" json:"build_id"`
+	AgentID             uuid.NullUUID         `db:"agent_id" json:"agent_id"`
+	PinOrder            int32                 `db:"pin_order" json:"pin_order"`
+	LastReadMessageID   sql.NullInt64         `db:"last_read_message_id" json:"last_read_message_id"`
+	LastInjectedContext pqtype.NullRawMessage `db:"last_injected_context" json:"last_injected_context"`
+	DynamicTools        pqtype.NullRawMessage `db:"dynamic_tools" json:"dynamic_tools"`
+	OrganizationID      uuid.UUID             `db:"organization_id" json:"organization_id"`
+}
+
+type ChatDebugRun struct {
+	ID                  uuid.UUID       `db:"id" json:"id"`
+	ChatID              uuid.UUID       `db:"chat_id" json:"chat_id"`
+	RootChatID          uuid.NullUUID   `db:"root_chat_id" json:"root_chat_id"`
+	ParentChatID        uuid.NullUUID   `db:"parent_chat_id" json:"parent_chat_id"`
+	ModelConfigID       uuid.NullUUID   `db:"model_config_id" json:"model_config_id"`
+	TriggerMessageID    sql.NullInt64   `db:"trigger_message_id" json:"trigger_message_id"`
+	HistoryTipMessageID sql.NullInt64   `db:"history_tip_message_id" json:"history_tip_message_id"`
+	Kind                string          `db:"kind" json:"kind"`
+	Status              string          `db:"status" json:"status"`
+	Provider            sql.NullString  `db:"provider" json:"provider"`
+	Model               sql.NullString  `db:"model" json:"model"`
+	Summary             json.RawMessage `db:"summary" json:"summary"`
+	StartedAt           time.Time       `db:"started_at" json:"started_at"`
+	UpdatedAt           time.Time       `db:"updated_at" json:"updated_at"`
+	FinishedAt          sql.NullTime    `db:"finished_at" json:"finished_at"`
+}
+
+type ChatDebugStep struct {
+	ID                  uuid.UUID             `db:"id" json:"id"`
+	RunID               uuid.UUID             `db:"run_id" json:"run_id"`
+	ChatID              uuid.UUID             `db:"chat_id" json:"chat_id"`
+	StepNumber          int32                 `db:"step_number" json:"step_number"`
+	Operation           string                `db:"operation" json:"operation"`
+	Status              string                `db:"status" json:"status"`
+	HistoryTipMessageID sql.NullInt64         `db:"history_tip_message_id" json:"history_tip_message_id"`
+	AssistantMessageID  sql.NullInt64         `db:"assistant_message_id" json:"assistant_message_id"`
+	NormalizedRequest   json.RawMessage       `db:"normalized_request" json:"normalized_request"`
+	NormalizedResponse  pqtype.NullRawMessage `db:"normalized_response" json:"normalized_response"`
+	Usage               pqtype.NullRawMessage `db:"usage" json:"usage"`
+	Attempts            json.RawMessage       `db:"attempts" json:"attempts"`
+	Error               pqtype.NullRawMessage `db:"error" json:"error"`
+	Metadata            json.RawMessage       `db:"metadata" json:"metadata"`
+	StartedAt           time.Time             `db:"started_at" json:"started_at"`
+	UpdatedAt           time.Time             `db:"updated_at" json:"updated_at"`
+	FinishedAt          sql.NullTime          `db:"finished_at" json:"finished_at"`
+}
+
+type ChatDiffStatus struct {
+	ChatID           uuid.UUID      `db:"chat_id" json:"chat_id"`
+	Url              sql.NullString `db:"url" json:"url"`
+	PullRequestState sql.NullString `db:"pull_request_state" json:"pull_request_state"`
+	ChangesRequested bool           `db:"changes_requested" json:"changes_requested"`
+	Additions        int32          `db:"additions" json:"additions"`
+	Deletions        int32          `db:"deletions" json:"deletions"`
+	ChangedFiles     int32          `db:"changed_files" json:"changed_files"`
+	RefreshedAt      sql.NullTime   `db:"refreshed_at" json:"refreshed_at"`
+	StaleAt          time.Time      `db:"stale_at" json:"stale_at"`
+	CreatedAt        time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time      `db:"updated_at" json:"updated_at"`
+	GitBranch        string         `db:"git_branch" json:"git_branch"`
+	GitRemoteOrigin  string         `db:"git_remote_origin" json:"git_remote_origin"`
+	PullRequestTitle string         `db:"pull_request_title" json:"pull_request_title"`
+	PullRequestDraft bool           `db:"pull_request_draft" json:"pull_request_draft"`
+	AuthorLogin      sql.NullString `db:"author_login" json:"author_login"`
+	AuthorAvatarUrl  sql.NullString `db:"author_avatar_url" json:"author_avatar_url"`
+	BaseBranch       sql.NullString `db:"base_branch" json:"base_branch"`
+	PrNumber         sql.NullInt32  `db:"pr_number" json:"pr_number"`
+	Commits          sql.NullInt32  `db:"commits" json:"commits"`
+	Approved         sql.NullBool   `db:"approved" json:"approved"`
+	ReviewerCount    sql.NullInt32  `db:"reviewer_count" json:"reviewer_count"`
+	HeadBranch       sql.NullString `db:"head_branch" json:"head_branch"`
+}
+
+type ChatFile struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	OwnerID        uuid.UUID `db:"owner_id" json:"owner_id"`
+	OrganizationID uuid.UUID `db:"organization_id" json:"organization_id"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at"`
+	Name           string    `db:"name" json:"name"`
+	Mimetype       string    `db:"mimetype" json:"mimetype"`
+	Data           []byte    `db:"data" json:"data"`
+}
+
+type ChatFileLink struct {
+	ChatID uuid.UUID `db:"chat_id" json:"chat_id"`
+	FileID uuid.UUID `db:"file_id" json:"file_id"`
+}
+
+type ChatMessage struct {
+	ID                  int64                 `db:"id" json:"id"`
+	ChatID              uuid.UUID             `db:"chat_id" json:"chat_id"`
+	ModelConfigID       uuid.NullUUID         `db:"model_config_id" json:"model_config_id"`
+	CreatedAt           time.Time             `db:"created_at" json:"created_at"`
+	Role                ChatMessageRole       `db:"role" json:"role"`
+	Content             pqtype.NullRawMessage `db:"content" json:"content"`
+	Visibility          ChatMessageVisibility `db:"visibility" json:"visibility"`
+	InputTokens         sql.NullInt64         `db:"input_tokens" json:"input_tokens"`
+	OutputTokens        sql.NullInt64         `db:"output_tokens" json:"output_tokens"`
+	TotalTokens         sql.NullInt64         `db:"total_tokens" json:"total_tokens"`
+	ReasoningTokens     sql.NullInt64         `db:"reasoning_tokens" json:"reasoning_tokens"`
+	CacheCreationTokens sql.NullInt64         `db:"cache_creation_tokens" json:"cache_creation_tokens"`
+	CacheReadTokens     sql.NullInt64         `db:"cache_read_tokens" json:"cache_read_tokens"`
+	ContextLimit        sql.NullInt64         `db:"context_limit" json:"context_limit"`
+	Compressed          bool                  `db:"compressed" json:"compressed"`
+	CreatedBy           uuid.NullUUID         `db:"created_by" json:"created_by"`
+	ContentVersion      int16                 `db:"content_version" json:"content_version"`
+	TotalCostMicros     sql.NullInt64         `db:"total_cost_micros" json:"total_cost_micros"`
+	RuntimeMs           sql.NullInt64         `db:"runtime_ms" json:"runtime_ms"`
+	Deleted             bool                  `db:"deleted" json:"deleted"`
+	ProviderResponseID  sql.NullString        `db:"provider_response_id" json:"provider_response_id"`
+}
+
+type ChatModelConfig struct {
+	ID                   uuid.UUID       `db:"id" json:"id"`
+	Provider             string          `db:"provider" json:"provider"`
+	Model                string          `db:"model" json:"model"`
+	DisplayName          string          `db:"display_name" json:"display_name"`
+	CreatedBy            uuid.NullUUID   `db:"created_by" json:"created_by"`
+	UpdatedBy            uuid.NullUUID   `db:"updated_by" json:"updated_by"`
+	Enabled              bool            `db:"enabled" json:"enabled"`
+	IsDefault            bool            `db:"is_default" json:"is_default"`
+	Deleted              bool            `db:"deleted" json:"deleted"`
+	DeletedAt            sql.NullTime    `db:"deleted_at" json:"deleted_at"`
+	CreatedAt            time.Time       `db:"created_at" json:"created_at"`
+	UpdatedAt            time.Time       `db:"updated_at" json:"updated_at"`
+	ContextLimit         int64           `db:"context_limit" json:"context_limit"`
+	CompressionThreshold int32           `db:"compression_threshold" json:"compression_threshold"`
+	Options              json.RawMessage `db:"options" json:"options"`
+}
+
+type ChatProvider struct {
+	ID          uuid.UUID `db:"id" json:"id"`
+	Provider    string    `db:"provider" json:"provider"`
+	DisplayName string    `db:"display_name" json:"display_name"`
+	APIKey      string    `db:"api_key" json:"api_key"`
+	// The ID of the key used to encrypt the provider API key. If this is NULL, the API key is not encrypted
+	ApiKeyKeyID                sql.NullString `db:"api_key_key_id" json:"api_key_key_id"`
+	CreatedBy                  uuid.NullUUID  `db:"created_by" json:"created_by"`
+	Enabled                    bool           `db:"enabled" json:"enabled"`
+	CreatedAt                  time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt                  time.Time      `db:"updated_at" json:"updated_at"`
+	BaseUrl                    string         `db:"base_url" json:"base_url"`
+	CentralApiKeyEnabled       bool           `db:"central_api_key_enabled" json:"central_api_key_enabled"`
+	AllowUserApiKey            bool           `db:"allow_user_api_key" json:"allow_user_api_key"`
+	AllowCentralApiKeyFallback bool           `db:"allow_central_api_key_fallback" json:"allow_central_api_key_fallback"`
+}
+
+type ChatQueuedMessage struct {
+	ID        int64           `db:"id" json:"id"`
+	ChatID    uuid.UUID       `db:"chat_id" json:"chat_id"`
+	Content   json.RawMessage `db:"content" json:"content"`
+	CreatedAt time.Time       `db:"created_at" json:"created_at"`
+}
+
+type ChatUsageLimitConfig struct {
+	ID                 int64     `db:"id" json:"id"`
+	Singleton          bool      `db:"singleton" json:"singleton"`
+	Enabled            bool      `db:"enabled" json:"enabled"`
+	DefaultLimitMicros int64     `db:"default_limit_micros" json:"default_limit_micros"`
+	Period             string    `db:"period" json:"period"`
+	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt          time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type ConnectionLog struct {
@@ -3645,6 +4452,9 @@ type CustomRole struct {
 	OrganizationID uuid.NullUUID `db:"organization_id" json:"organization_id"`
 	// Custom roles ID is used purely for auditing purposes. Name is a better unique identifier.
 	ID uuid.UUID `db:"id" json:"id"`
+	// System roles are managed by Coder and cannot be modified or deleted by users.
+	IsSystem          bool                  `db:"is_system" json:"is_system"`
+	MemberPermissions CustomRolePermissions `db:"member_permissions" json:"member_permissions"`
 }
 
 // A table used to store the keys used to encrypt the database.
@@ -3706,10 +4516,10 @@ type Group struct {
 	// Display name is a custom, human-friendly group name that user can set. This is not required to be unique and can be the empty string.
 	DisplayName string `db:"display_name" json:"display_name"`
 	// Source indicates how the group was created. It can be created by a user manually, or through some system process like OIDC group sync.
-	Source GroupSource `db:"source" json:"source"`
+	Source               GroupSource   `db:"source" json:"source"`
+	ChatSpendLimitMicros sql.NullInt64 `db:"chat_spend_limit_micros" json:"chat_spend_limit_micros"`
 }
 
-// Joins group members with user information, organization ID, group name. Includes both regular group members and organization members (as part of the "Everyone" group).
 type GroupMember struct {
 	UserID                 uuid.UUID     `db:"user_id" json:"user_id"`
 	UserEmail              string        `db:"user_email" json:"user_email"`
@@ -3727,6 +4537,7 @@ type GroupMember struct {
 	UserName               string        `db:"user_name" json:"user_name"`
 	UserGithubComUserID    sql.NullInt64 `db:"user_github_com_user_id" json:"user_github_com_user_id"`
 	UserIsSystem           bool          `db:"user_is_system" json:"user_is_system"`
+	UserIsServiceAccount   bool          `db:"user_is_service_account" json:"user_is_service_account"`
 	OrganizationID         uuid.UUID     `db:"organization_id" json:"organization_id"`
 	GroupName              string        `db:"group_name" json:"group_name"`
 	GroupID                uuid.UUID     `db:"group_id" json:"group_id"`
@@ -3766,6 +4577,51 @@ type License struct {
 	// exp tracks the claim of the same name in the JWT, and we include it here so that we can easily query for licenses that have not yet expired.
 	Exp  time.Time `db:"exp" json:"exp"`
 	UUID uuid.UUID `db:"uuid" json:"uuid"`
+}
+
+type MCPServerConfig struct {
+	ID                      uuid.UUID      `db:"id" json:"id"`
+	DisplayName             string         `db:"display_name" json:"display_name"`
+	Slug                    string         `db:"slug" json:"slug"`
+	Description             string         `db:"description" json:"description"`
+	IconURL                 string         `db:"icon_url" json:"icon_url"`
+	Transport               string         `db:"transport" json:"transport"`
+	Url                     string         `db:"url" json:"url"`
+	AuthType                string         `db:"auth_type" json:"auth_type"`
+	OAuth2ClientID          string         `db:"oauth2_client_id" json:"oauth2_client_id"`
+	OAuth2ClientSecret      string         `db:"oauth2_client_secret" json:"oauth2_client_secret"`
+	OAuth2ClientSecretKeyID sql.NullString `db:"oauth2_client_secret_key_id" json:"oauth2_client_secret_key_id"`
+	OAuth2AuthURL           string         `db:"oauth2_auth_url" json:"oauth2_auth_url"`
+	OAuth2TokenURL          string         `db:"oauth2_token_url" json:"oauth2_token_url"`
+	OAuth2Scopes            string         `db:"oauth2_scopes" json:"oauth2_scopes"`
+	APIKeyHeader            string         `db:"api_key_header" json:"api_key_header"`
+	APIKeyValue             string         `db:"api_key_value" json:"api_key_value"`
+	APIKeyValueKeyID        sql.NullString `db:"api_key_value_key_id" json:"api_key_value_key_id"`
+	CustomHeaders           string         `db:"custom_headers" json:"custom_headers"`
+	CustomHeadersKeyID      sql.NullString `db:"custom_headers_key_id" json:"custom_headers_key_id"`
+	ToolAllowList           []string       `db:"tool_allow_list" json:"tool_allow_list"`
+	ToolDenyList            []string       `db:"tool_deny_list" json:"tool_deny_list"`
+	Availability            string         `db:"availability" json:"availability"`
+	Enabled                 bool           `db:"enabled" json:"enabled"`
+	CreatedBy               uuid.NullUUID  `db:"created_by" json:"created_by"`
+	UpdatedBy               uuid.NullUUID  `db:"updated_by" json:"updated_by"`
+	CreatedAt               time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt               time.Time      `db:"updated_at" json:"updated_at"`
+	ModelIntent             bool           `db:"model_intent" json:"model_intent"`
+}
+
+type MCPServerUserToken struct {
+	ID                uuid.UUID      `db:"id" json:"id"`
+	MCPServerConfigID uuid.UUID      `db:"mcp_server_config_id" json:"mcp_server_config_id"`
+	UserID            uuid.UUID      `db:"user_id" json:"user_id"`
+	AccessToken       string         `db:"access_token" json:"access_token"`
+	AccessTokenKeyID  sql.NullString `db:"access_token_key_id" json:"access_token_key_id"`
+	RefreshToken      string         `db:"refresh_token" json:"refresh_token"`
+	RefreshTokenKeyID sql.NullString `db:"refresh_token_key_id" json:"refresh_token_key_id"`
+	TokenType         string         `db:"token_type" json:"token_type"`
+	Expiry            sql.NullTime   `db:"expiry" json:"expiry"`
+	CreatedAt         time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 type NotificationMessage struct {
@@ -3861,7 +4717,7 @@ type OAuth2ProviderApp struct {
 	// RFC 7591: Version of the client software
 	SoftwareVersion sql.NullString `db:"software_version" json:"software_version"`
 	// RFC 7592: Hashed registration access token for client management
-	RegistrationAccessToken sql.NullString `db:"registration_access_token" json:"registration_access_token"`
+	RegistrationAccessToken []byte `db:"registration_access_token" json:"registration_access_token"`
 	// RFC 7592: URI for client configuration endpoint
 	RegistrationClientUri sql.NullString `db:"registration_client_uri" json:"registration_client_uri"`
 }
@@ -3881,6 +4737,10 @@ type OAuth2ProviderAppCode struct {
 	CodeChallenge sql.NullString `db:"code_challenge" json:"code_challenge"`
 	// PKCE challenge method (S256)
 	CodeChallengeMethod sql.NullString `db:"code_challenge_method" json:"code_challenge_method"`
+	// SHA-256 hash of the OAuth2 state parameter, stored to prevent state reflection attacks.
+	StateHash sql.NullString `db:"state_hash" json:"state_hash"`
+	// The redirect_uri provided during authorization, to be verified during token exchange (RFC 6749 §4.1.3).
+	RedirectUri sql.NullString `db:"redirect_uri" json:"redirect_uri"`
 }
 
 type OAuth2ProviderAppSecret struct {
@@ -3919,6 +4779,8 @@ type Organization struct {
 	DisplayName string    `db:"display_name" json:"display_name"`
 	Icon        string    `db:"icon" json:"icon"`
 	Deleted     bool      `db:"deleted" json:"deleted"`
+	// Controls whose workspaces can be shared: none, everyone, or service_accounts.
+	ShareableWorkspaceOwners ShareableWorkspaceOwners `db:"shareable_workspace_owners" json:"shareable_workspace_owners"`
 }
 
 type OrganizationMember struct {
@@ -4069,27 +4931,6 @@ type SiteConfig struct {
 	Value string `db:"value" json:"value"`
 }
 
-type TailnetAgent struct {
-	ID            uuid.UUID       `db:"id" json:"id"`
-	CoordinatorID uuid.UUID       `db:"coordinator_id" json:"coordinator_id"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	Node          json.RawMessage `db:"node" json:"node"`
-}
-
-type TailnetClient struct {
-	ID            uuid.UUID       `db:"id" json:"id"`
-	CoordinatorID uuid.UUID       `db:"coordinator_id" json:"coordinator_id"`
-	UpdatedAt     time.Time       `db:"updated_at" json:"updated_at"`
-	Node          json.RawMessage `db:"node" json:"node"`
-}
-
-type TailnetClientSubscription struct {
-	ClientID      uuid.UUID `db:"client_id" json:"client_id"`
-	CoordinatorID uuid.UUID `db:"coordinator_id" json:"coordinator_id"`
-	AgentID       uuid.UUID `db:"agent_id" json:"agent_id"`
-	UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
-}
-
 // We keep this separate from replicas in case we need to break the coordinator out into its own service
 type TailnetCoordinator struct {
 	ID          uuid.UUID `db:"id" json:"id"`
@@ -4112,6 +4953,42 @@ type TailnetTunnel struct {
 }
 
 type Task struct {
+	ID                           uuid.UUID                        `db:"id" json:"id"`
+	OrganizationID               uuid.UUID                        `db:"organization_id" json:"organization_id"`
+	OwnerID                      uuid.UUID                        `db:"owner_id" json:"owner_id"`
+	Name                         string                           `db:"name" json:"name"`
+	WorkspaceID                  uuid.NullUUID                    `db:"workspace_id" json:"workspace_id"`
+	TemplateVersionID            uuid.UUID                        `db:"template_version_id" json:"template_version_id"`
+	TemplateParameters           json.RawMessage                  `db:"template_parameters" json:"template_parameters"`
+	Prompt                       string                           `db:"prompt" json:"prompt"`
+	CreatedAt                    time.Time                        `db:"created_at" json:"created_at"`
+	DeletedAt                    sql.NullTime                     `db:"deleted_at" json:"deleted_at"`
+	DisplayName                  string                           `db:"display_name" json:"display_name"`
+	WorkspaceGroupACL            WorkspaceACL                     `db:"workspace_group_acl" json:"workspace_group_acl"`
+	WorkspaceUserACL             WorkspaceACL                     `db:"workspace_user_acl" json:"workspace_user_acl"`
+	Status                       TaskStatus                       `db:"status" json:"status"`
+	StatusDebug                  json.RawMessage                  `db:"status_debug" json:"status_debug"`
+	WorkspaceBuildNumber         sql.NullInt32                    `db:"workspace_build_number" json:"workspace_build_number"`
+	WorkspaceAgentID             uuid.NullUUID                    `db:"workspace_agent_id" json:"workspace_agent_id"`
+	WorkspaceAppID               uuid.NullUUID                    `db:"workspace_app_id" json:"workspace_app_id"`
+	WorkspaceAgentLifecycleState NullWorkspaceAgentLifecycleState `db:"workspace_agent_lifecycle_state" json:"workspace_agent_lifecycle_state"`
+	WorkspaceAppHealth           NullWorkspaceAppHealth           `db:"workspace_app_health" json:"workspace_app_health"`
+	OwnerUsername                string                           `db:"owner_username" json:"owner_username"`
+	OwnerName                    string                           `db:"owner_name" json:"owner_name"`
+	OwnerAvatarUrl               string                           `db:"owner_avatar_url" json:"owner_avatar_url"`
+}
+
+// Stores snapshots of task state when paused, currently limited to conversation history.
+type TaskSnapshot struct {
+	// The task this snapshot belongs to.
+	TaskID uuid.UUID `db:"task_id" json:"task_id"`
+	// Task conversation history in JSON format, allowing users to view logs when the workspace is stopped.
+	LogSnapshot json.RawMessage `db:"log_snapshot" json:"log_snapshot"`
+	// When this log snapshot was captured.
+	LogSnapshotCreatedAt time.Time `db:"log_snapshot_created_at" json:"log_snapshot_created_at"`
+}
+
+type TaskTable struct {
 	ID                 uuid.UUID       `db:"id" json:"id"`
 	OrganizationID     uuid.UUID       `db:"organization_id" json:"organization_id"`
 	OwnerID            uuid.UUID       `db:"owner_id" json:"owner_id"`
@@ -4122,13 +4999,15 @@ type Task struct {
 	Prompt             string          `db:"prompt" json:"prompt"`
 	CreatedAt          time.Time       `db:"created_at" json:"created_at"`
 	DeletedAt          sql.NullTime    `db:"deleted_at" json:"deleted_at"`
+	// Display name is a custom, human-friendly task name.
+	DisplayName string `db:"display_name" json:"display_name"`
 }
 
 type TaskWorkspaceApp struct {
-	TaskID           uuid.UUID `db:"task_id" json:"task_id"`
-	WorkspaceBuildID uuid.UUID `db:"workspace_build_id" json:"workspace_build_id"`
-	WorkspaceAgentID uuid.UUID `db:"workspace_agent_id" json:"workspace_agent_id"`
-	WorkspaceAppID   uuid.UUID `db:"workspace_app_id" json:"workspace_app_id"`
+	TaskID               uuid.UUID     `db:"task_id" json:"task_id"`
+	WorkspaceAgentID     uuid.NullUUID `db:"workspace_agent_id" json:"workspace_agent_id"`
+	WorkspaceAppID       uuid.NullUUID `db:"workspace_app_id" json:"workspace_app_id"`
+	WorkspaceBuildNumber int32         `db:"workspace_build_number" json:"workspace_build_number"`
 }
 
 type TelemetryItem struct {
@@ -4136,6 +5015,14 @@ type TelemetryItem struct {
 	Value     string    `db:"value" json:"value"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// Telemetry lock tracking table for deduplication of heartbeat events across replicas.
+type TelemetryLock struct {
+	// The type of event that was sent.
+	EventType string `db:"event_type" json:"event_type"`
+	// The heartbeat period end timestamp.
+	PeriodEndingAt time.Time `db:"period_ending_at" json:"period_ending_at"`
 }
 
 // Joins in the display name information such as username, avatar, and organization name.
@@ -4170,6 +5057,7 @@ type Template struct {
 	MaxPortSharingLevel           AppSharingLevel `db:"max_port_sharing_level" json:"max_port_sharing_level"`
 	UseClassicParameterFlow       bool            `db:"use_classic_parameter_flow" json:"use_classic_parameter_flow"`
 	CorsBehavior                  CorsBehavior    `db:"cors_behavior" json:"cors_behavior"`
+	DisableModuleCache            bool            `db:"disable_module_cache" json:"disable_module_cache"`
 	CreatedByAvatarURL            string          `db:"created_by_avatar_url" json:"created_by_avatar_url"`
 	CreatedByUsername             string          `db:"created_by_username" json:"created_by_username"`
 	CreatedByName                 string          `db:"created_by_name" json:"created_by_name"`
@@ -4219,6 +5107,7 @@ type TemplateTable struct {
 	// Determines whether to default to the dynamic parameter creation flow for this template or continue using the legacy classic parameter creation flow.This is a template wide setting, the template admin can revert to the classic flow if there are any issues. An escape hatch is required, as workspace creation is a core workflow and cannot break. This column will be removed when the dynamic parameter creation flow is stable.
 	UseClassicParameterFlow bool         `db:"use_classic_parameter_flow" json:"use_classic_parameter_flow"`
 	CorsBehavior            CorsBehavior `db:"cors_behavior" json:"cors_behavior"`
+	DisableModuleCache      bool         `db:"disable_module_cache" json:"disable_module_cache"`
 }
 
 // Records aggregated usage statistics for templates/users. All usage is rounded up to the nearest minute.
@@ -4322,7 +5211,8 @@ type TemplateVersionPreset struct {
 	// Short text describing the preset (max 128 characters).
 	Description string `db:"description" json:"description"`
 	// URL or path to an icon representing the preset (max 256 characters).
-	Icon string `db:"icon" json:"icon"`
+	Icon              string       `db:"icon" json:"icon"`
+	LastInvalidatedAt sql.NullTime `db:"last_invalidated_at" json:"last_invalidated_at"`
 }
 
 type TemplateVersionPresetParameter struct {
@@ -4442,6 +5332,19 @@ type User struct {
 	OneTimePasscodeExpiresAt sql.NullTime `db:"one_time_passcode_expires_at" json:"one_time_passcode_expires_at"`
 	// Determines if a user is a system user, and therefore cannot login or perform normal actions
 	IsSystem bool `db:"is_system" json:"is_system"`
+	// Determines if a user is an admin-managed account that cannot login
+	IsServiceAccount     bool          `db:"is_service_account" json:"is_service_account"`
+	ChatSpendLimitMicros sql.NullInt64 `db:"chat_spend_limit_micros" json:"chat_spend_limit_micros"`
+}
+
+type UserChatProviderKey struct {
+	ID             uuid.UUID      `db:"id" json:"id"`
+	UserID         uuid.UUID      `db:"user_id" json:"user_id"`
+	ChatProviderID uuid.UUID      `db:"chat_provider_id" json:"chat_provider_id"`
+	APIKey         string         `db:"api_key" json:"api_key"`
+	ApiKeyKeyID    sql.NullString `db:"api_key_key_id" json:"api_key_key_id"`
+	CreatedAt      time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt      time.Time      `db:"updated_at" json:"updated_at"`
 }
 
 type UserConfig struct {
@@ -4473,15 +5376,16 @@ type UserLink struct {
 }
 
 type UserSecret struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	UserID      uuid.UUID `db:"user_id" json:"user_id"`
-	Name        string    `db:"name" json:"name"`
-	Description string    `db:"description" json:"description"`
-	Value       string    `db:"value" json:"value"`
-	EnvName     string    `db:"env_name" json:"env_name"`
-	FilePath    string    `db:"file_path" json:"file_path"`
-	CreatedAt   time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt   time.Time `db:"updated_at" json:"updated_at"`
+	ID          uuid.UUID      `db:"id" json:"id"`
+	UserID      uuid.UUID      `db:"user_id" json:"user_id"`
+	Name        string         `db:"name" json:"name"`
+	Description string         `db:"description" json:"description"`
+	Value       string         `db:"value" json:"value"`
+	EnvName     string         `db:"env_name" json:"env_name"`
+	FilePath    string         `db:"file_path" json:"file_path"`
+	CreatedAt   time.Time      `db:"created_at" json:"created_at"`
+	UpdatedAt   time.Time      `db:"updated_at" json:"updated_at"`
+	ValueKeyID  sql.NullString `db:"value_key_id" json:"value_key_id"`
 }
 
 // Tracks the history of user status changes
@@ -4511,35 +5415,38 @@ type WebpushSubscription struct {
 
 // Joins in the display name information such as username, avatar, and organization name.
 type Workspace struct {
-	ID                      uuid.UUID        `db:"id" json:"id"`
-	CreatedAt               time.Time        `db:"created_at" json:"created_at"`
-	UpdatedAt               time.Time        `db:"updated_at" json:"updated_at"`
-	OwnerID                 uuid.UUID        `db:"owner_id" json:"owner_id"`
-	OrganizationID          uuid.UUID        `db:"organization_id" json:"organization_id"`
-	TemplateID              uuid.UUID        `db:"template_id" json:"template_id"`
-	Deleted                 bool             `db:"deleted" json:"deleted"`
-	Name                    string           `db:"name" json:"name"`
-	AutostartSchedule       sql.NullString   `db:"autostart_schedule" json:"autostart_schedule"`
-	Ttl                     sql.NullInt64    `db:"ttl" json:"ttl"`
-	LastUsedAt              time.Time        `db:"last_used_at" json:"last_used_at"`
-	DormantAt               sql.NullTime     `db:"dormant_at" json:"dormant_at"`
-	DeletingAt              sql.NullTime     `db:"deleting_at" json:"deleting_at"`
-	AutomaticUpdates        AutomaticUpdates `db:"automatic_updates" json:"automatic_updates"`
-	Favorite                bool             `db:"favorite" json:"favorite"`
-	NextStartAt             sql.NullTime     `db:"next_start_at" json:"next_start_at"`
-	GroupACL                WorkspaceACL     `db:"group_acl" json:"group_acl"`
-	UserACL                 WorkspaceACL     `db:"user_acl" json:"user_acl"`
-	OwnerAvatarUrl          string           `db:"owner_avatar_url" json:"owner_avatar_url"`
-	OwnerUsername           string           `db:"owner_username" json:"owner_username"`
-	OwnerName               string           `db:"owner_name" json:"owner_name"`
-	OrganizationName        string           `db:"organization_name" json:"organization_name"`
-	OrganizationDisplayName string           `db:"organization_display_name" json:"organization_display_name"`
-	OrganizationIcon        string           `db:"organization_icon" json:"organization_icon"`
-	OrganizationDescription string           `db:"organization_description" json:"organization_description"`
-	TemplateName            string           `db:"template_name" json:"template_name"`
-	TemplateDisplayName     string           `db:"template_display_name" json:"template_display_name"`
-	TemplateIcon            string           `db:"template_icon" json:"template_icon"`
-	TemplateDescription     string           `db:"template_description" json:"template_description"`
+	ID                      uuid.UUID               `db:"id" json:"id"`
+	CreatedAt               time.Time               `db:"created_at" json:"created_at"`
+	UpdatedAt               time.Time               `db:"updated_at" json:"updated_at"`
+	OwnerID                 uuid.UUID               `db:"owner_id" json:"owner_id"`
+	OrganizationID          uuid.UUID               `db:"organization_id" json:"organization_id"`
+	TemplateID              uuid.UUID               `db:"template_id" json:"template_id"`
+	Deleted                 bool                    `db:"deleted" json:"deleted"`
+	Name                    string                  `db:"name" json:"name"`
+	AutostartSchedule       sql.NullString          `db:"autostart_schedule" json:"autostart_schedule"`
+	Ttl                     sql.NullInt64           `db:"ttl" json:"ttl"`
+	LastUsedAt              time.Time               `db:"last_used_at" json:"last_used_at"`
+	DormantAt               sql.NullTime            `db:"dormant_at" json:"dormant_at"`
+	DeletingAt              sql.NullTime            `db:"deleting_at" json:"deleting_at"`
+	AutomaticUpdates        AutomaticUpdates        `db:"automatic_updates" json:"automatic_updates"`
+	Favorite                bool                    `db:"favorite" json:"favorite"`
+	NextStartAt             sql.NullTime            `db:"next_start_at" json:"next_start_at"`
+	GroupACL                WorkspaceACL            `db:"group_acl" json:"group_acl"`
+	UserACL                 WorkspaceACL            `db:"user_acl" json:"user_acl"`
+	OwnerAvatarUrl          string                  `db:"owner_avatar_url" json:"owner_avatar_url"`
+	OwnerUsername           string                  `db:"owner_username" json:"owner_username"`
+	OwnerName               string                  `db:"owner_name" json:"owner_name"`
+	OrganizationName        string                  `db:"organization_name" json:"organization_name"`
+	OrganizationDisplayName string                  `db:"organization_display_name" json:"organization_display_name"`
+	OrganizationIcon        string                  `db:"organization_icon" json:"organization_icon"`
+	OrganizationDescription string                  `db:"organization_description" json:"organization_description"`
+	TemplateName            string                  `db:"template_name" json:"template_name"`
+	TemplateDisplayName     string                  `db:"template_display_name" json:"template_display_name"`
+	TemplateIcon            string                  `db:"template_icon" json:"template_icon"`
+	TemplateDescription     string                  `db:"template_description" json:"template_description"`
+	TaskID                  uuid.NullUUID           `db:"task_id" json:"task_id"`
+	GroupACLDisplayInfo     WorkspaceACLDisplayInfo `db:"group_acl_display_info" json:"group_acl_display_info"`
+	UserACLDisplayInfo      WorkspaceACLDisplayInfo `db:"user_acl_display_info" json:"user_acl_display_info"`
 }
 
 type WorkspaceAgent struct {
@@ -4605,7 +5512,8 @@ type WorkspaceAgentDevcontainer struct {
 	// Path to devcontainer.json.
 	ConfigPath string `db:"config_path" json:"config_path"`
 	// The name of the Dev Container.
-	Name string `db:"name" json:"name"`
+	Name       string        `db:"name" json:"name"`
+	SubagentID uuid.NullUUID `db:"subagent_id" json:"subagent_id"`
 }
 
 type WorkspaceAgentLog struct {
@@ -4807,7 +5715,6 @@ type WorkspaceBuild struct {
 	BuildNumber             int32               `db:"build_number" json:"build_number"`
 	Transition              WorkspaceTransition `db:"transition" json:"transition"`
 	InitiatorID             uuid.UUID           `db:"initiator_id" json:"initiator_id"`
-	ProvisionerState        []byte              `db:"provisioner_state" json:"provisioner_state"`
 	JobID                   uuid.UUID           `db:"job_id" json:"job_id"`
 	Deadline                time.Time           `db:"deadline" json:"deadline"`
 	Reason                  BuildReason         `db:"reason" json:"reason"`
@@ -4815,7 +5722,6 @@ type WorkspaceBuild struct {
 	MaxDeadline             time.Time           `db:"max_deadline" json:"max_deadline"`
 	TemplateVersionPresetID uuid.NullUUID       `db:"template_version_preset_id" json:"template_version_preset_id"`
 	HasAITask               sql.NullBool        `db:"has_ai_task" json:"has_ai_task"`
-	AITaskSidebarAppID      uuid.NullUUID       `db:"ai_task_sidebar_app_id" json:"ai_task_sidebar_app_id"`
 	HasExternalAgent        sql.NullBool        `db:"has_external_agent" json:"has_external_agent"`
 	InitiatorByAvatarUrl    string              `db:"initiator_by_avatar_url" json:"initiator_by_avatar_url"`
 	InitiatorByUsername     string              `db:"initiator_by_username" json:"initiator_by_username"`
@@ -4847,7 +5753,6 @@ type WorkspaceBuildTable struct {
 	MaxDeadline             time.Time           `db:"max_deadline" json:"max_deadline"`
 	TemplateVersionPresetID uuid.NullUUID       `db:"template_version_preset_id" json:"template_version_preset_id"`
 	HasAITask               sql.NullBool        `db:"has_ai_task" json:"has_ai_task"`
-	AITaskSidebarAppID      uuid.NullUUID       `db:"ai_task_sidebar_app_id" json:"ai_task_sidebar_app_id"`
 	HasExternalAgent        sql.NullBool        `db:"has_external_agent" json:"has_external_agent"`
 }
 

@@ -1,24 +1,24 @@
-import { MockTasks, MockWorkspace } from "testHelpers/entities";
-import { withGlobalSnackbar } from "testHelpers/storybook";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { API } from "api/api";
 import { expect, spyOn, userEvent, waitFor, within } from "storybook/test";
+import { API } from "#/api/api";
+import { MockTask } from "#/testHelpers/entities";
+import { withToaster } from "#/testHelpers/storybook";
 import { TaskDeleteDialog } from "./TaskDeleteDialog";
 
 const meta: Meta<typeof TaskDeleteDialog> = {
 	title: "modules/tasks/TaskDeleteDialog",
 	component: TaskDeleteDialog,
-	decorators: [withGlobalSnackbar],
+	decorators: [withToaster],
 };
 
 export default meta;
 type Story = StoryObj<typeof TaskDeleteDialog>;
 
 export const DeleteTaskSuccess: Story = {
-	decorators: [withGlobalSnackbar],
+	decorators: [withToaster],
 	args: {
 		open: true,
-		task: { prompt: "My Task", workspace: MockWorkspace },
+		task: MockTask,
 		onClose: () => {},
 	},
 	parameters: {
@@ -27,7 +27,7 @@ export const DeleteTaskSuccess: Story = {
 		},
 	},
 	beforeEach: () => {
-		spyOn(API.experimental, "deleteTask").mockResolvedValue();
+		spyOn(API, "deleteTask").mockResolvedValue();
 	},
 	play: async ({ canvasElement, step }) => {
 		const body = within(canvasElement.ownerDocument.body);
@@ -39,9 +39,9 @@ export const DeleteTaskSuccess: Story = {
 			await userEvent.click(confirmButton);
 			await step("Confirm delete", async () => {
 				await waitFor(() => {
-					expect(API.experimental.deleteTask).toHaveBeenCalledWith(
-						MockTasks[0].workspace.owner_name,
-						MockTasks[0].workspace.id,
+					expect(API.deleteTask).toHaveBeenCalledWith(
+						MockTask.owner_name,
+						MockTask.id,
 					);
 				});
 			});

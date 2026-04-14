@@ -27,12 +27,12 @@ jobs:
     runs-on: ${{ github.repository_owner == 'coder' && 'depot-ubuntu-22.04-8' || 'ubuntu-latest' }}
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
+        uses: step-security/harden-runner@fe104658747b27e96e4f7e80cd0a94068e53901d # v2.16.1
         with:
           egress-policy: audit
 
       - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
@@ -40,7 +40,7 @@ jobs:
         uses: ./.github/actions/setup-go
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@192325c86100d080feab897ff886c34abd4c83a3 # v3.29.5
+        uses: github/codeql-action/init@c10b8064de6f491fea524254123dbe5e09572f13 # v3.29.5
         with:
           languages: go, javascript
 
@@ -50,7 +50,7 @@ jobs:
           rm Makefile
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@192325c86100d080feab897ff886c34abd4c83a3 # v3.29.5
+        uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v3.29.5
 
       - name: Send Slack notification on failure
         if: ${{ failure() }}
@@ -63,116 +63,3 @@ jobs:
             --data "{\"content\": \"$msg\"}" \
             "${{ secrets.SLACK_SECURITY_FAILURE_WEBHOOK_URL }}"
 
-  trivy:
-    permissions:
-      security-events: write
-    runs-on: ${{ github.repository_owner == 'coder' && 'depot-ubuntu-22.04-8' || 'ubuntu-latest' }}
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@f4a75cfd619ee5ce8d5b864b0d183aff3c69b55a # v2.13.1
-        with:
-          egress-policy: audit
-
-      - name: Checkout
-        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Setup Go
-        uses: ./.github/actions/setup-go
-
-      - name: Setup Node
-        uses: ./.github/actions/setup-node
-
-      - name: Setup sqlc
-        uses: ./.github/actions/setup-sqlc
-
-      - name: Install cosign
-        uses: ./.github/actions/install-cosign
-
-      - name: Install syft
-        uses: ./.github/actions/install-syft
-
-      - name: Install yq
-        run: go run github.com/mikefarah/yq/v4@v4.44.3
-      - name: Install mockgen
-        run: go install go.uber.org/mock/mockgen@v0.5.0
-      - name: Install protoc-gen-go
-        run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.30
-      - name: Install protoc-gen-go-drpc
-        run: go install storj.io/drpc/cmd/protoc-gen-go-drpc@v0.0.34
-      - name: Install Protoc
-        run: |
-          # protoc must be in lockstep with our dogfood Dockerfile or the
-          # version in the comments will differ. This is also defined in
-          # ci.yaml.
-          set -euxo pipefail
-          cd dogfood/coder
-          mkdir -p /usr/local/bin
-          mkdir -p /usr/local/include
-
-          DOCKER_BUILDKIT=1 docker build . --target proto -t protoc
-          protoc_path=/usr/local/bin/protoc
-          docker run --rm --entrypoint cat protoc /tmp/bin/protoc > $protoc_path
-          chmod +x $protoc_path
-          protoc --version
-          # Copy the generated files to the include directory.
-          docker run --rm -v /usr/local/include:/target protoc cp -r /tmp/include/google /target/
-          ls -la /usr/local/include/google/protobuf/
-          stat /usr/local/include/google/protobuf/timestamp.proto
-
-      - name: Build Coder linux amd64 Docker image
-        id: build
-        run: |
-          set -euo pipefail
-
-          version="$(./scripts/version.sh)"
-          image_job="build/coder_${version}_linux_amd64.tag"
-
-          # This environment variable force make to not build packages and
-          # archives (which the Docker image depends on due to technical reasons
-          # related to concurrent FS writes).
-          export DOCKER_IMAGE_NO_PREREQUISITES=true
-          # This environment variables forces scripts/build_docker.sh to build
-          # the base image tag locally instead of using the cached version from
-          # the registry.
-          CODER_IMAGE_BUILD_BASE_TAG="$(CODER_IMAGE_BASE=coder-base ./scripts/image_tag.sh --version "$version")"
-          export CODER_IMAGE_BUILD_BASE_TAG
-
-          # We would like to use make -j here, but it doesn't work with the some recent additions
-          # to our code generation.
-          make "$image_job"
-          echo "image=$(cat "$image_job")" >> "$GITHUB_OUTPUT"
-
-      - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
-        with:
-          image-ref: ${{ steps.build.outputs.image }}
-          format: sarif
-          output: trivy-results.sarif
-          severity: "CRITICAL,HIGH"
-
-      - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@192325c86100d080feab897ff886c34abd4c83a3 # v3.29.5
-        with:
-          sarif_file: trivy-results.sarif
-          category: "Trivy"
-
-      - name: Upload Trivy scan results as an artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: trivy
-          path: trivy-results.sarif
-          retention-days: 7
-
-      - name: Send Slack notification on failure
-        if: ${{ failure() }}
-        run: |
-          msg="❌ Trivy Failed\n\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl \
-            -qfsSL \
-            -X POST \
-            -H "Content-Type: application/json" \
-            --data "{\"content\": \"$msg\"}" \
-            "${{ secrets.SLACK_SECURITY_FAILURE_WEBHOOK_URL }}"

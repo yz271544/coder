@@ -1,12 +1,11 @@
-import { Pill } from "components/Pill/Pill";
+import type { FC } from "react";
+import { Pill } from "#/components/Pill/Pill";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import type { FC } from "react";
-import { httpStatusColor } from "utils/http";
+} from "#/components/Tooltip/Tooltip";
+import { httpStatusColor } from "#/utils/http";
 
 interface StatusPillProps {
 	code: number;
@@ -33,11 +32,9 @@ export const StatusPill: FC<StatusPillProps> = ({
 		return pill;
 	}
 	return (
-		<TooltipProvider>
-			<Tooltip delayDuration={150}>
-				<TooltipTrigger asChild>{pill}</TooltipTrigger>
-				<TooltipContent>{label}</TooltipContent>
-			</Tooltip>
-		</TooltipProvider>
+		<Tooltip>
+			<TooltipTrigger asChild>{pill}</TooltipTrigger>
+			<TooltipContent>{label}</TooltipContent>
+		</Tooltip>
 	);
 };

@@ -1,5 +1,5 @@
-import { css } from "@emotion/react";
-import type { SerpentOption } from "api/typesGenerated";
+import type { FC } from "react";
+import type { SerpentOption } from "#/api/typesGenerated";
 import {
 	Table,
 	TableBody,
@@ -7,8 +7,7 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
-} from "components/Table/Table";
-import type { FC } from "react";
+} from "#/components/Table/Table";
 import {
 	OptionConfig,
 	OptionConfigFlag,
@@ -29,20 +28,7 @@ const OptionsTable: FC<OptionsTableProps> = ({ options, additionalValues }) => {
 	}
 
 	return (
-		<Table
-			className="options-table"
-			css={css`
-          & td {
-            padding-top: 24px;
-            padding-bottom: 24px;
-          }
-
-          & td:last-child,
-          & th:last-child {
-            padding-left: 32px;
-          }
-        `}
-		>
+		<Table className="options-table">
 			<TableHeader>
 				<TableRow>
 					<TableHead className="w-1/2">Option</TableHead>
@@ -56,14 +42,7 @@ const OptionsTable: FC<OptionsTableProps> = ({ options, additionalValues }) => {
 							<TableCell>
 								<OptionName>{option.name}</OptionName>
 								<OptionDescription>{option.description}</OptionDescription>
-								<div
-									css={{
-										marginTop: 24,
-										display: "flex",
-										flexWrap: "wrap",
-										gap: 8,
-									}}
-								>
+								<div className="pt-2 flex flex-wrap gap-2">
 									{option.flag && (
 										<OptionConfig isSource={option.value_source === "flag"}>
 											<OptionConfigFlag>CLI</OptionConfigFlag>

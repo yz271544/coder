@@ -1,10 +1,10 @@
 import type { Interpolation, Theme } from "@emotion/react";
-import type { TemplateExample } from "api/typesGenerated";
-import { Stack } from "components/Stack/Stack";
-import { TemplateExampleCard } from "modules/templates/TemplateExampleCard/TemplateExampleCard";
 import type { FC } from "react";
 import { Link, useSearchParams } from "react-router";
-import type { StarterTemplatesByTag } from "utils/starterTemplates";
+import type { TemplateExample } from "#/api/typesGenerated";
+import { Stack } from "#/components/Stack/Stack";
+import { TemplateExampleCard } from "#/modules/templates/TemplateExampleCard/TemplateExampleCard";
+import type { StarterTemplatesByTag } from "#/utils/starterTemplates";
 
 const getTagLabel = (tag: string) => {
 	const labelByTag: Record<string, string> = {
@@ -23,18 +23,28 @@ const selectTags = (starterTemplatesByTag: StarterTemplatesByTag) => {
 };
 
 const sortVisibleTemplates = (templates: TemplateExample[]) => {
-	// The docker template should be the first template in the list,
-	// as it's the easiest way to get started with Coder.
-	const dockerTemplateId = "docker";
-	return [...templates].sort((a, b) => {
-		if (a.id === dockerTemplateId) {
-			return -1;
+	// The tasks-docker template should be first, as it's the easiest way to
+	// get started with Coder. The docker template should be second.
+	const featuredTemplateIds = ["tasks-docker", "docker"];
+
+	const featuredTemplates: TemplateExample[] = [];
+	for (const id of featuredTemplateIds) {
+		for (const template of templates) {
+			if (id === template.id) {
+				featuredTemplates.push(template);
+			}
 		}
-		if (b.id === dockerTemplateId) {
-			return 1;
-		}
-		return a.name.localeCompare(b.name);
-	});
+	}
+
+	const nonFeaturedTemplates = templates
+		.filter((template) => {
+			return !featuredTemplateIds.includes(template.id);
+		})
+		.sort((a, b) => {
+			return a.name.localeCompare(b.name);
+		});
+
+	return [...featuredTemplates, ...nonFeaturedTemplates];
 };
 
 interface StarterTemplatesProps {
@@ -56,7 +66,7 @@ export const StarterTemplates: FC<StarterTemplatesProps> = ({
 	return (
 		<Stack direction="row" spacing={4} alignItems="flex-start">
 			{starterTemplatesByTag && tags && (
-				<Stack css={{ width: 202, flexShrink: 0, position: "sticky" }}>
+				<Stack className="w-[202px] shrink-0 sticky">
 					<h2 css={styles.sectionTitle}>Choose a starter template</h2>
 					<span css={styles.filterCaption}>Filter</span>
 					{tags.map((tag) => (
@@ -71,14 +81,7 @@ export const StarterTemplates: FC<StarterTemplatesProps> = ({
 				</Stack>
 			)}
 
-			<div
-				css={{
-					display: "flex",
-					flexWrap: "wrap",
-					gap: 32,
-					height: "max-content",
-				}}
-			>
+			<div className="flex flex-wrap gap-8 h-max">
 				{visibleTemplates?.map((example) => (
 					<TemplateExampleCard
 						css={(theme) => ({

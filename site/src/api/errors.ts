@@ -1,11 +1,5 @@
 import { type AxiosError, type AxiosResponse, isAxiosError } from "axios";
 
-const Language = {
-	errorsByCode: {
-		defaultErrorCode: "Invalid value",
-	},
-};
-
 export interface FieldError {
 	field: string;
 	detail: string;
@@ -31,7 +25,8 @@ export const isApiError = (err: unknown): err is ApiError => {
 	);
 };
 
-const isApiErrorResponse = (err: unknown): err is ApiErrorResponse => {
+/** @public Exported for use by external consumers (e.g., VS Code extension). */
+export const isApiErrorResponse = (err: unknown): err is ApiErrorResponse => {
 	return (
 		typeof err === "object" &&
 		err !== null &&
@@ -63,8 +58,7 @@ export const mapApiErrorToFieldErrors = (
 
 	if (apiErrorResponse.validations) {
 		for (const error of apiErrorResponse.validations) {
-			result[error.field] =
-				error.detail || Language.errorsByCode.defaultErrorCode;
+			result[error.field] = error.detail || "Invalid value";
 		}
 	}
 
@@ -124,6 +118,15 @@ export const getErrorDetail = (error: unknown): string | undefined => {
 
 	if (isApiErrorResponse(error) && error.detail) {
 		return error.detail;
+	}
+
+	if (
+		isApiValidationError(error) &&
+		// Ensure that the validations array is not `[]` (empty array).
+		Array.isArray(error.response.data.validations) &&
+		error.response.data.validations.length > 0
+	) {
+		return getValidationErrorMessage(error);
 	}
 
 	if (error instanceof Error) {

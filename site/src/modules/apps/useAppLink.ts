@@ -1,13 +1,13 @@
-import { apiKey } from "api/queries/users";
+import type React from "react";
+import { useQuery } from "react-query";
+import { toast } from "sonner";
+import { apiKey } from "#/api/queries/users";
 import type {
 	Workspace,
 	WorkspaceAgent,
 	WorkspaceApp,
-} from "api/typesGenerated";
-import { displayError } from "components/GlobalSnackbar/utils";
-import { useProxy } from "contexts/ProxyContext";
-import type React from "react";
-import { useQuery } from "react-query";
+} from "#/api/typesGenerated";
+import { useProxy } from "#/contexts/ProxyContext";
 import {
 	getAppHref,
 	isExternalApp,
@@ -51,39 +51,50 @@ export const useAppLink = (
 			return;
 		}
 
-		if (app.external) {
+		// External apps with custom protocols (non-HTTP) need special handling
+		// for error detection when the app isn't installed.
+		const isExternalProtocolApp =
+			app.external && app.url && !app.url.startsWith("http");
+
+		if (isExternalProtocolApp) {
 			// When browser recognizes the protocol and is able to navigate to the app,
 			// it will blur away, and will stop the timer. Otherwise,
 			// an error message will be displayed.
-			const openAppExternallyFailedTimeout = 500;
+			const openAppExternallyFailedTimeout = 1500;
 			const openAppExternallyFailed = setTimeout(() => {
 				// Check if this is a JetBrains IDE app
-				const isJetBrainsApp =
-					app.url &&
-					(app.url.startsWith("jetbrains-gateway:") ||
-						app.url.startsWith("jetbrains:"));
+				// starts with "jetbrains-gateway://connect#type=coder" (from https://registry.coder.com/modules/coder/jetbrains-gateway)
+				const isJetBrainsGateway = app.url?.startsWith("jetbrains-gateway:");
+				// starts with "jetbrains://gateway/coder" (from https://registry.coder.com/modules/coder/jetbrains)
+				const isJetBrainsToolbox = app.url?.startsWith("jetbrains:");
 
 				// Check if this is a coder:// URL
 				const isCoderApp = app.url?.startsWith("coder:");
 
-				if (isJetBrainsApp) {
-					displayError(
-						`To use ${label}, you need to have JetBrains Toolbox installed.`,
-					);
+				if (isJetBrainsGateway) {
+					toast.error(`Failed to open "${label}".`, {
+						description: "JetBrains Gateway must be installed.",
+					});
+				} else if (isJetBrainsToolbox) {
+					toast.error(`Failed to open "${label}".`, {
+						description: "JetBrains Toolbox must be installed.",
+					});
 				} else if (isCoderApp) {
-					displayError(
-						`To use ${label} you need to have Coder Desktop installed`,
-					);
+					toast.error(`Failed to open "${label}".`, {
+						description: "Coder Desktop must be installed.",
+					});
 				} else {
-					displayError(`${label} must be installed first.`);
+					toast.error(`Failed to open "${label}".`, {
+						description: "The app must be installed first.",
+					});
 				}
 			}, openAppExternallyFailedTimeout);
 			window.addEventListener("blur", () => {
 				clearTimeout(openAppExternallyFailed);
 			});
 
-			// External apps don't support open_in since they only should open
-			// external apps.
+			// Custom protocol external apps don't support open_in since they
+			// rely on the browser's protocol handling.
 			return;
 		}
 
@@ -100,6 +111,6 @@ export const useAppLink = (
 		href,
 		onClick,
 		label,
-		hasToken: !!apiKeyResponse?.key,
+		hasToken: Boolean(apiKeyResponse?.key),
 	};
 };

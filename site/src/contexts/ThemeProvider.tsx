@@ -1,16 +1,16 @@
 import createCache from "@emotion/cache";
+/** @deprecated Emotion is deprecated. Migrate to Tailwind CSS. */
 import {
 	CacheProvider,
 	ThemeProvider as EmotionThemeProvider,
 } from "@emotion/react";
+/** @deprecated MUI CssBaseline is deprecated. Migrate to shadcn/ui components and Tailwind CSS. */
 import CssBaseline from "@mui/material/CssBaseline";
+/** @deprecated MUI components are deprecated. Migrate to shadcn/ui components and Tailwind CSS. */
 import {
 	ThemeProvider as MuiThemeProvider,
 	StyledEngineProvider,
-	// biome-ignore lint/style/noRestrictedImports: we extend the MUI theme
 } from "@mui/material/styles";
-import { appearanceSettings } from "api/queries/users";
-import { useEmbeddedMetadata } from "hooks/useEmbeddedMetadata";
 import {
 	type FC,
 	type PropsWithChildren,
@@ -20,7 +20,9 @@ import {
 	useState,
 } from "react";
 import { useQuery } from "react-query";
-import themes, { DEFAULT_THEME, type Theme } from "theme";
+import { appearanceSettings } from "#/api/queries/users";
+import { useEmbeddedMetadata } from "#/hooks/useEmbeddedMetadata";
+import themes, { DEFAULT_THEME, type Theme } from "#/theme";
 
 /**
  *
@@ -47,8 +49,7 @@ export const ThemeProvider: FC<PropsWithChildren> = ({ children }) => {
 			setPreferredColorScheme(event.matches ? "light" : "dark");
 		};
 
-		// `addEventListener` here is a recent API that only _very_ up-to-date
-		// browsers support, and that isn't mocked in Jest.
+		// `addEventListener` here is a recent API that isn't mocked in tests.
 		themeQuery.addEventListener?.("change", listener);
 		return () => {
 			themeQuery.removeEventListener?.("change", listener);
@@ -56,14 +57,21 @@ export const ThemeProvider: FC<PropsWithChildren> = ({ children }) => {
 	}, [themeQuery]);
 
 	// We might not be logged in yet, or the `theme_preference` could be an empty string.
+	// Prefer JS-fetched value, fall back to server-rendered meta tag, then default.
 	const themePreference =
-		appearanceSettingsQuery.data?.theme_preference || DEFAULT_THEME;
-	// The janky casting here is find because of the much more type safe fallback
+		appearanceSettingsQuery.data?.theme_preference ||
+		metadata.userAppearance?.value?.theme_preference ||
+		DEFAULT_THEME;
+	// The janky casting here is fine because of the much more type safe fallback
 	// We need to support `themePreference` being wrong anyway because the database
 	// value could be anything, like an empty string.
 
 	useEffect(() => {
 		const root = document.documentElement;
+		// Embedded pages manage theme independently.
+		if (root.dataset.embedTheme) {
+			return;
+		}
 		if (themePreference === "auto") {
 			root.classList.add(preferredColorScheme);
 		} else {
@@ -71,7 +79,9 @@ export const ThemeProvider: FC<PropsWithChildren> = ({ children }) => {
 		}
 
 		return () => {
-			root.classList.remove("light", "dark");
+			if (!root.dataset.embedTheme) {
+				root.classList.remove("light", "dark");
+			}
 		};
 	}, [themePreference, preferredColorScheme]);
 

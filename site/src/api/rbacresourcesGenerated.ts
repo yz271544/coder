@@ -36,6 +36,17 @@ export const RBACResourceActions: Partial<
 		create: "create new audit log entries",
 		read: "read audit logs",
 	},
+	boundary_usage: {
+		delete: "delete boundary usage statistics",
+		read: "read boundary usage statistics",
+		update: "upsert boundary usage statistics",
+	},
+	chat: {
+		create: "create a new chat",
+		delete: "delete a chat",
+		read: "read chat messages and metadata",
+		update: "update chat title or settings",
+	},
 	connection_log: {
 		read: "read connection logs",
 		update: "upsert connection log entries",
@@ -156,6 +167,12 @@ export const RBACResourceActions: Partial<
 		read: "view info about a Tailnet coordinator",
 		update: "update a Tailnet coordinator",
 	},
+	task: {
+		create: "create a new task",
+		delete: "delete task",
+		read: "read task data or output to view on the UI or CLI",
+		update: "edit task settings or send input to an existing task",
+	},
 	template: {
 		create: "create a template",
 		delete: "delete a template",
@@ -195,10 +212,12 @@ export const RBACResourceActions: Partial<
 		delete: "delete workspace",
 		delete_agent: "delete an existing workspace agent",
 		read: "read workspace data to view on the UI",
+		share: "share a workspace with other users or groups",
 		ssh: "ssh into a given workspace",
 		start: "allows starting a workspace",
 		stop: "allows stopping a workspace",
 		update: "edit workspace settings (scheduling, permissions, parameters)",
+		update_agent: "update an existing workspace agent",
 	},
 	workspace_agent_devcontainers: {
 		create: "create workspace agent devcontainers",
@@ -215,10 +234,12 @@ export const RBACResourceActions: Partial<
 		delete: "delete workspace",
 		delete_agent: "delete an existing workspace agent",
 		read: "read workspace data to view on the UI",
+		share: "share a workspace with other users or groups",
 		ssh: "ssh into a given workspace",
 		start: "allows starting a workspace",
 		stop: "allows stopping a workspace",
 		update: "edit workspace settings (scheduling, permissions, parameters)",
+		update_agent: "update an existing workspace agent",
 	},
 	workspace_proxy: {
 		create: "create a workspace proxy",

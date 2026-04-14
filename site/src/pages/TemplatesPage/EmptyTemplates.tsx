@@ -1,17 +1,17 @@
-import type { Interpolation, Theme } from "@emotion/react";
 import Link from "@mui/material/Link";
-import type { TemplateExample } from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import { CodeExample } from "components/CodeExample/CodeExample";
-import { Stack } from "components/Stack/Stack";
-import { TableEmpty } from "components/TableEmpty/TableEmpty";
-import { TemplateExampleCard } from "modules/templates/TemplateExampleCard/TemplateExampleCard";
 import type { FC } from "react";
 import { Link as RouterLink } from "react-router";
-import { docs } from "utils/docs";
+import type { TemplateExample } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
+import { CodeExample } from "#/components/CodeExample/CodeExample";
+import { Stack } from "#/components/Stack/Stack";
+import { TableEmpty } from "#/components/TableEmpty/TableEmpty";
+import { TemplateExampleCard } from "#/modules/templates/TemplateExampleCard/TemplateExampleCard";
+import { docs } from "#/utils/docs";
 
 // Those are from https://github.com/coder/coder/tree/main/examples/templates
 const featuredExampleIds = [
+	"tasks-docker",
 	"docker",
 	"kubernetes",
 	"aws-linux",
@@ -78,7 +78,7 @@ export const EmptyTemplates: FC<EmptyTemplatesProps> = ({
 							))}
 						</div>
 
-						<Button size="sm" asChild css={{ borderRadius: 9999 }}>
+						<Button size="sm" asChild className="rounded-full">
 							<RouterLink to="/starter-templates">
 								View all starter templates
 							</RouterLink>
@@ -91,28 +91,9 @@ export const EmptyTemplates: FC<EmptyTemplatesProps> = ({
 
 	return (
 		<TableEmpty
-			className="pb-0"
 			message="Create a Template"
 			description="Contact your Coder administrator to create a template. You can share the code below."
 			cta={<CodeExample secret={false} code="coder templates init" />}
-			image={
-				<div css={styles.emptyImage}>
-					<img src="/featured/templates.webp" alt="" />
-				</div>
-			}
 		/>
 	);
 };
-
-const styles = {
-	emptyImage: {
-		maxWidth: "50%",
-		height: 320,
-		overflow: "hidden",
-		opacity: 0.85,
-
-		"& img": {
-			maxWidth: "100%",
-		},
-	},
-} satisfies Record<string, Interpolation<Theme>>;

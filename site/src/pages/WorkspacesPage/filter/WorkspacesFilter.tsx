@@ -1,20 +1,20 @@
+import type { FC } from "react";
 import {
 	Filter,
 	MenuSkeleton,
 	type UseFilterResult,
-} from "components/Filter/Filter";
+} from "#/components/Filter/Filter";
 import {
 	DEFAULT_USER_FILTER_WIDTH,
 	type UserFilterMenu,
 	UserMenu,
-} from "components/Filter/UserFilter";
-import { useDashboard } from "modules/dashboard/useDashboard";
+} from "#/components/Filter/UserFilter";
+import { useDashboard } from "#/modules/dashboard/useDashboard";
 import {
 	type OrganizationsFilterMenu,
 	OrganizationsMenu,
-} from "modules/tableFiltering/options";
-import type { FC } from "react";
-import { docs } from "utils/docs";
+} from "#/modules/tableFiltering/options";
+import { docs } from "#/utils/docs";
 import {
 	type StatusFilterMenu,
 	StatusMenu,
@@ -29,6 +29,7 @@ const workspaceFilterQuery = {
 	failed: "status:failed",
 	dormant: "dormant:true",
 	outdated: "outdated:true",
+	shared: "shared:true",
 };
 
 type FilterPreset = {
@@ -58,6 +59,10 @@ const PRESET_FILTERS: FilterPreset[] = [
 	{
 		query: workspaceFilterQuery.outdated,
 		name: "Outdated workspaces",
+	},
+	{
+		query: workspaceFilterQuery.shared,
+		name: "Shared workspaces",
 	},
 ];
 

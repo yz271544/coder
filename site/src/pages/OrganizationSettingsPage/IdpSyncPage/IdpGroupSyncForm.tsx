@@ -1,40 +1,47 @@
+import { useFormik } from "formik";
+import { Plus, Trash, TriangleAlert } from "lucide-react";
+import { type FC, type KeyboardEventHandler, useId, useState } from "react";
+import * as Yup from "yup";
 import type {
 	Group,
 	GroupSyncSettings,
 	Organization,
-} from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import { Combobox } from "components/Combobox/Combobox";
+} from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
 import {
-	HelpTooltip,
-	HelpTooltipContent,
-	HelpTooltipIconTrigger,
-	HelpTooltipText,
-	HelpTooltipTitle,
-} from "components/HelpTooltip/HelpTooltip";
-import { Input } from "components/Input/Input";
-import { Label } from "components/Label/Label";
-import { Link } from "components/Link/Link";
+	Combobox,
+	ComboboxButton,
+	ComboboxContent,
+	ComboboxInput,
+	ComboboxItem,
+	ComboboxList,
+	ComboboxTrigger,
+} from "#/components/Combobox/Combobox";
+import {
+	HelpPopover,
+	HelpPopoverContent,
+	HelpPopoverIconTrigger,
+	HelpPopoverText,
+	HelpPopoverTitle,
+} from "#/components/HelpPopover/HelpPopover";
+import { Input } from "#/components/Input/Input";
+import { Label } from "#/components/Label/Label";
+import { Link } from "#/components/Link/Link";
 import {
 	MultiSelectCombobox,
 	type Option,
-} from "components/MultiSelectCombobox/MultiSelectCombobox";
-import { Spinner } from "components/Spinner/Spinner";
-import { Switch } from "components/Switch/Switch";
-import { TableCell, TableRow } from "components/Table/Table";
+} from "#/components/MultiSelectCombobox/MultiSelectCombobox";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { Switch } from "#/components/Switch/Switch";
+import { TableCell, TableRow } from "#/components/Table/Table";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import { useFormik } from "formik";
-import { Plus, Trash, TriangleAlert } from "lucide-react";
-import { type FC, type KeyboardEventHandler, useId, useState } from "react";
-import { docs } from "utils/docs";
-import { isEveryoneGroup } from "utils/groups";
-import { isUUID } from "utils/uuid";
-import * as Yup from "yup";
+} from "#/components/Tooltip/Tooltip";
+import { isEveryoneGroup } from "#/modules/groups";
+import { docs } from "#/utils/docs";
+import { isUUID } from "#/utils/uuid";
 import { ExportPolicyButton } from "./ExportPolicyButton";
 import { IdpMappingTable } from "./IdpMappingTable";
 import { IdpPillList } from "./IdpPillList";
@@ -195,7 +202,7 @@ export const IdpGroupSyncForm: FC<IdpGroupSyncFormProps> = ({
 					</div>
 					{form.errors.field ||
 						(form.errors.regex_filter && (
-							<p className="text-content-danger text-sm m-0">
+							<p className="text-content-destructive text-sm m-0">
 								{form.errors.field || form.errors.regex_filter}
 							</p>
 						))}
@@ -215,7 +222,7 @@ export const IdpGroupSyncForm: FC<IdpGroupSyncFormProps> = ({
 						<Label htmlFor={`${id}-auto-create-missing-groups`}>
 							Auto create missing groups
 						</Label>
-						<AutoCreateMissingGroupsHelpTooltip />
+						<AutoCreateMissingGroupsHelpPopover />
 					</span>
 				</div>
 				<div className="flex flex-row gap-2 justify-between items-start">
@@ -225,19 +232,48 @@ export const IdpGroupSyncForm: FC<IdpGroupSyncFormProps> = ({
 						</Label>
 						{claimFieldValues ? (
 							<Combobox
-								value={idpGroupName}
-								options={claimFieldValues}
-								placeholder="Select IdP group"
 								open={open}
 								onOpenChange={setOpen}
-								inputValue={comboInputValue}
-								onInputChange={setComboInputValue}
-								onKeyDown={handleKeyDown}
-								onSelect={(value) => {
-									setIdpGroupName(value);
-									setOpen(false);
-								}}
-							/>
+								value={idpGroupName}
+								onValueChange={(value) => setIdpGroupName(value ?? "")}
+							>
+								<ComboboxTrigger asChild>
+									<ComboboxButton
+										className="w-72"
+										selectedOption={
+											idpGroupName
+												? { label: idpGroupName, value: idpGroupName }
+												: undefined
+										}
+										placeholder="Select IdP group"
+									/>
+								</ComboboxTrigger>
+								<ComboboxContent className="w-72">
+									<ComboboxInput
+										value={comboInputValue}
+										onValueChange={setComboInputValue}
+										placeholder="Search..."
+										onKeyDown={handleKeyDown}
+									/>
+									<ComboboxList>
+										{claimFieldValues
+											.filter((value) =>
+												value
+													.toLowerCase()
+													.includes(comboInputValue.toLowerCase()),
+											)
+											.map((value) => (
+												<ComboboxItem
+													key={value}
+													value={value}
+													onSelect={() => setComboInputValue("")}
+												>
+													{value}
+												</ComboboxItem>
+											))}
+									</ComboboxList>
+								</ComboboxContent>
+							</Combobox>
 						) : (
 							<Input
 								id={`${id}-idp-group-name`}
@@ -296,14 +332,14 @@ export const IdpGroupSyncForm: FC<IdpGroupSyncFormProps> = ({
 							}}
 						>
 							<Spinner loading={form.isSubmitting}>
-								<Plus size={14} />
+								<Plus />
 							</Spinner>
 							Add IdP group
 						</Button>
 					</div>
 				</div>
 				{form.errors.mapping && (
-					<p className="text-content-danger text-sm m-0">
+					<p className="text-content-destructive text-sm m-0">
 						{Object.values(form.errors.mapping || {})}
 					</p>
 				)}
@@ -370,23 +406,21 @@ const GroupRow: FC<GroupRowProps> = ({
 				<div className="flex flex-row items-center gap-2 text-content-primary">
 					{idpGroup}
 					{!exists && (
-						<TooltipProvider>
-							<Tooltip>
-								<TooltipTrigger asChild>
-									<TriangleAlert className="size-icon-xs cursor-pointer text-content-warning" />
-								</TooltipTrigger>
-								<TooltipContent
-									align="start"
-									alignOffset={-8}
-									sideOffset={8}
-									className="p-2 text-xs text-content-secondary max-w-sm"
-								>
-									This value has not be seen in the specified claim field
-									before. You might want to check your IdP configuration and
-									ensure that this value is not misspelled.
-								</TooltipContent>
-							</Tooltip>
-						</TooltipProvider>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<TriangleAlert className="size-icon-xs cursor-pointer text-content-warning" />
+							</TooltipTrigger>
+							<TooltipContent
+								align="start"
+								alignOffset={-8}
+								sideOffset={8}
+								className="p-2 text-xs text-content-secondary max-w-sm"
+							>
+								This value has not be seen in the specified claim field before.
+								You might want to check your IdP configuration and ensure that
+								this value is not misspelled.
+							</TooltipContent>
+						</Tooltip>
 					)}
 				</div>
 			</TableCell>
@@ -411,17 +445,17 @@ const GroupRow: FC<GroupRowProps> = ({
 	);
 };
 
-const AutoCreateMissingGroupsHelpTooltip: FC = () => {
+const AutoCreateMissingGroupsHelpPopover: FC = () => {
 	return (
-		<HelpTooltip>
-			<HelpTooltipIconTrigger />
-			<HelpTooltipContent>
-				<HelpTooltipText>
+		<HelpPopover>
+			<HelpPopoverIconTrigger />
+			<HelpPopoverContent>
+				<HelpPopoverText>
 					Enabling auto create missing groups will automatically create groups
 					returned by the OIDC provider if they do not exist in Coder.
-				</HelpTooltipText>
-			</HelpTooltipContent>
-		</HelpTooltip>
+				</HelpPopoverText>
+			</HelpPopoverContent>
+		</HelpPopover>
 	);
 };
 
@@ -430,11 +464,11 @@ const LegacyGroupSyncHeader: FC = () => {
 		<h4 className="text-xl font-medium">
 			<div className="flex items-end gap-2">
 				<span>Legacy group sync settings</span>
-				<HelpTooltip>
-					<HelpTooltipIconTrigger />
-					<HelpTooltipContent>
-						<HelpTooltipTitle>Legacy group sync settings</HelpTooltipTitle>
-						<HelpTooltipText>
+				<HelpPopover>
+					<HelpPopoverIconTrigger />
+					<HelpPopoverContent>
+						<HelpPopoverTitle>Legacy group sync settings</HelpPopoverTitle>
+						<HelpPopoverText>
 							These settings were configured using environment variables, and
 							only apply to the default organization. It is now recommended to
 							configure IdP sync via the CLI or the UI, which enables sync to be
@@ -443,9 +477,9 @@ const LegacyGroupSyncHeader: FC = () => {
 							<Link href={docs("/admin/users/idp-sync")}>
 								Learn more&hellip;
 							</Link>
-						</HelpTooltipText>
-					</HelpTooltipContent>
-				</HelpTooltip>
+						</HelpPopoverText>
+					</HelpPopoverContent>
+				</HelpPopover>
 			</div>
 		</h4>
 	);

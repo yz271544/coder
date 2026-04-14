@@ -1,5 +1,7 @@
-import type { TemplateVersionParameter } from "api/typesGenerated";
-import { Button } from "components/Button/Button";
+import type { FC } from "react";
+import { useNavigate } from "react-router";
+import type { TemplateVersionParameter } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
 import {
 	Dialog,
 	DialogContent,
@@ -7,9 +9,7 @@ import {
 	DialogFooter,
 	DialogHeader,
 	DialogTitle,
-} from "components/Dialog/Dialog";
-import type { FC } from "react";
-import { useNavigate } from "react-router";
+} from "#/components/Dialog/Dialog";
 
 interface EphemeralParametersDialogProps {
 	open: boolean;
@@ -76,7 +76,10 @@ export const EphemeralParametersDialog: FC<EphemeralParametersDialogProps> = ({
 					<Button onClick={onContinue} variant="outline">
 						Continue
 					</Button>
-					<Button onClick={handleGoToParameters}>
+					<Button
+						data-testid="workspace-parameters"
+						onClick={handleGoToParameters}
+					>
 						Go to workspace parameters
 					</Button>
 				</DialogFooter>

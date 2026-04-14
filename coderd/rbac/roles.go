@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/open-policy-agent/opa/ast"
-
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/v2/coderd/rbac/policy"
@@ -22,6 +21,7 @@ const (
 	templateAdmin string = "template-admin"
 	userAdmin     string = "user-admin"
 	auditor       string = "auditor"
+	agentsAccess  string = "agents-access"
 	// customSiteRole is a placeholder for all custom site roles.
 	// This is used for what roles can assign other roles.
 	// TODO: Make this more dynamic to allow other roles to grant.
@@ -30,6 +30,7 @@ const (
 
 	orgAdmin                string = "organization-admin"
 	orgMember               string = "organization-member"
+	orgServiceAccount       string = "organization-service-account"
 	orgAuditor              string = "organization-auditor"
 	orgUserAdmin            string = "organization-user-admin"
 	orgTemplateAdmin        string = "organization-template-admin"
@@ -142,6 +143,7 @@ func RoleTemplateAdmin() RoleIdentifier { return RoleIdentifier{Name: templateAd
 func RoleUserAdmin() RoleIdentifier     { return RoleIdentifier{Name: userAdmin} }
 func RoleMember() RoleIdentifier        { return RoleIdentifier{Name: member} }
 func RoleAuditor() RoleIdentifier       { return RoleIdentifier{Name: auditor} }
+func RoleAgentsAccess() RoleIdentifier  { return RoleIdentifier{Name: agentsAccess} }
 
 func RoleOrgAdmin() string {
 	return orgAdmin
@@ -149,6 +151,10 @@ func RoleOrgAdmin() string {
 
 func RoleOrgMember() string {
 	return orgMember
+}
+
+func RoleOrgServiceAccount() string {
+	return orgServiceAccount
 }
 
 func RoleOrgAuditor() string {
@@ -232,6 +238,7 @@ var builtInRoles map[string]func(orgID uuid.UUID) Role
 
 type RoleOptions struct {
 	NoOwnerWorkspaceExec bool
+	NoWorkspaceSharing   bool
 }
 
 // ReservedRoleName exists because the database should only allow unique role
@@ -253,12 +260,23 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 		opts = &RoleOptions{}
 	}
 
+	denyPermissions := []Permission{}
+	if opts.NoWorkspaceSharing {
+		denyPermissions = append(denyPermissions, Permission{
+			Negate:       true,
+			ResourceType: ResourceWorkspace.Type,
+			Action:       policy.ActionShare,
+		})
+	}
+
 	ownerWorkspaceActions := ResourceWorkspace.AvailableActions()
 	if opts.NoOwnerWorkspaceExec {
 		// Remove ssh and application connect from the owner role. This
 		// prevents owners from have exec access to all workspaces.
-		ownerWorkspaceActions = slice.Omit(ownerWorkspaceActions,
-			policy.ActionApplicationConnect, policy.ActionSSH)
+		ownerWorkspaceActions = slice.Omit(
+			ownerWorkspaceActions,
+			policy.ActionApplicationConnect, policy.ActionSSH,
+		)
 	}
 
 	// Static roles that never change should be allocated in a closure.
@@ -272,43 +290,47 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 			// Workspace dormancy and workspace are omitted.
 			// Workspace is specifically handled based on the opts.NoOwnerWorkspaceExec.
 			// Owners cannot access other users' secrets.
-			allPermsExcept(ResourceWorkspaceDormant, ResourcePrebuiltWorkspace, ResourceWorkspace, ResourceUserSecret, ResourceUsageEvent),
+			allPermsExcept(ResourceWorkspaceDormant, ResourcePrebuiltWorkspace, ResourceWorkspace, ResourceUserSecret, ResourceUsageEvent, ResourceBoundaryUsage),
 			// This adds back in the Workspace permissions.
 			Permissions(map[string][]policy.Action{
 				ResourceWorkspace.Type:        ownerWorkspaceActions,
-				ResourceWorkspaceDormant.Type: {policy.ActionRead, policy.ActionDelete, policy.ActionCreate, policy.ActionUpdate, policy.ActionWorkspaceStop, policy.ActionCreateAgent, policy.ActionDeleteAgent},
+				ResourceWorkspaceDormant.Type: {policy.ActionRead, policy.ActionDelete, policy.ActionCreate, policy.ActionUpdate, policy.ActionWorkspaceStop, policy.ActionCreateAgent, policy.ActionDeleteAgent, policy.ActionUpdateAgent},
 				// PrebuiltWorkspaces are a subset of Workspaces.
 				// Explicitly setting PrebuiltWorkspace permissions for clarity.
 				// Note: even without PrebuiltWorkspace permissions, access is still granted via Workspace permissions.
 				ResourcePrebuiltWorkspace.Type: {policy.ActionUpdate, policy.ActionDelete},
-			})...),
-		Org:  map[string][]Permission{},
-		User: []Permission{},
+			})...,
+		),
+		User:    []Permission{},
+		ByOrgID: map[string]OrgPermissions{},
 	}.withCachedRegoValue()
 
 	memberRole := Role{
 		Identifier:  RoleMember(),
 		DisplayName: "Member",
-		Site: Permissions(map[string][]policy.Action{
-			ResourceAssignRole.Type: {policy.ActionRead},
-			// All users can see OAuth2 provider applications.
-			ResourceOauth2App.Type:      {policy.ActionRead},
-			ResourceWorkspaceProxy.Type: {policy.ActionRead},
-		}),
-		Org: map[string][]Permission{},
-		User: append(allPermsExcept(ResourceWorkspaceDormant, ResourcePrebuiltWorkspace, ResourceUser, ResourceOrganizationMember),
+		Site: append(
 			Permissions(map[string][]policy.Action{
-				// Reduced permission set on dormant workspaces. No build, ssh, or exec
-				ResourceWorkspaceDormant.Type: {policy.ActionRead, policy.ActionDelete, policy.ActionCreate, policy.ActionUpdate, policy.ActionWorkspaceStop, policy.ActionCreateAgent, policy.ActionDeleteAgent},
+				ResourceAssignRole.Type: {policy.ActionRead},
+				// All users can see OAuth2 provider applications.
+				ResourceOauth2App.Type:      {policy.ActionRead},
+				ResourceWorkspaceProxy.Type: {policy.ActionRead},
+			}),
+			denyPermissions...,
+		),
+		User: append(
+			allPermsExcept(ResourceWorkspaceDormant, ResourcePrebuiltWorkspace, ResourceWorkspace, ResourceUser, ResourceOrganizationMember, ResourceBoundaryUsage, ResourceAibridgeInterception, ResourceChat),
+			Permissions(map[string][]policy.Action{
 				// Users cannot do create/update/delete on themselves, but they
 				// can read their own details.
 				ResourceUser.Type: {policy.ActionRead, policy.ActionReadPersonal, policy.ActionUpdatePersonal},
-				// Can read their own organization member record
-				ResourceOrganizationMember.Type: {policy.ActionRead},
 				// Users can create provisioner daemons scoped to themselves.
 				ResourceProvisionerDaemon.Type: {policy.ActionRead, policy.ActionCreate, policy.ActionRead, policy.ActionUpdate},
+				// Members can create and update AI Bridge interceptions but
+				// cannot read them back.
+				ResourceAibridgeInterception.Type: {policy.ActionCreate, policy.ActionUpdate},
 			})...,
 		),
+		ByOrgID: map[string]OrgPermissions{},
 	}.withCachedRegoValue()
 
 	auditorRole := Role{
@@ -328,11 +350,11 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 			// Allow auditors to query deployment stats and insights.
 			ResourceDeploymentStats.Type:  {policy.ActionRead},
 			ResourceDeploymentConfig.Type: {policy.ActionRead},
-			// Allow auditors to query aibridge interceptions.
+			// Allow auditors to query AI Bridge interceptions.
 			ResourceAibridgeInterception.Type: {policy.ActionRead},
 		}),
-		Org:  map[string][]Permission{},
-		User: []Permission{},
+		User:    []Permission{},
+		ByOrgID: map[string]OrgPermissions{},
 	}.withCachedRegoValue()
 
 	templateAdminRole := Role{
@@ -354,8 +376,8 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 			ResourceOrganization.Type:       {policy.ActionRead},
 			ResourceOrganizationMember.Type: {policy.ActionRead},
 		}),
-		Org:  map[string][]Permission{},
-		User: []Permission{},
+		User:    []Permission{},
+		ByOrgID: map[string]OrgPermissions{},
 	}.withCachedRegoValue()
 
 	userAdminRole := Role{
@@ -378,8 +400,23 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 			// Manage org membership based on OIDC claims
 			ResourceIdpsyncSettings.Type: {policy.ActionRead, policy.ActionUpdate},
 		}),
-		Org:  map[string][]Permission{},
-		User: []Permission{},
+		User:    []Permission{},
+		ByOrgID: map[string]OrgPermissions{},
+	}.withCachedRegoValue()
+
+	agentsAccessRole := Role{
+		Identifier:  RoleAgentsAccess(),
+		DisplayName: "Coder Agents User",
+		Site:        []Permission{},
+		User: Permissions(map[string][]policy.Action{
+			ResourceChat.Type: {
+				policy.ActionCreate,
+				policy.ActionRead,
+				policy.ActionUpdate,
+				policy.ActionDelete,
+			},
+		}),
+		ByOrgID: map[string]OrgPermissions{},
 	}.withCachedRegoValue()
 
 	builtInRoles = map[string]func(orgID uuid.UUID) Role{
@@ -400,12 +437,24 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 			return auditorRole
 		},
 
+		// templateAdmin grants all actions on templates, files,
+		// provisioner daemons, and prebuilt workspaces.
 		templateAdmin: func(_ uuid.UUID) Role {
 			return templateAdminRole
 		},
 
+		// userAdmin grants all actions on users, groups, roles,
+		// and organization membership.
 		userAdmin: func(_ uuid.UUID) Role {
 			return userAdminRole
+		},
+
+		// agentsAccess grants all actions on chat resources owned
+		// by the user. Without this role, members can still read,
+		// update, and delete their own chats via org membership,
+		// but cannot create chats or trigger AI inference.
+		agentsAccess: func(_ uuid.UUID) Role {
+			return agentsAccessRole
 		},
 
 		// orgAdmin returns a role with all actions allows in a given
@@ -419,39 +468,24 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 					// users at the site wide to know they exist.
 					ResourceUser.Type: {policy.ActionRead},
 				}),
-				Org: map[string][]Permission{
+				User: []Permission{},
+				ByOrgID: map[string]OrgPermissions{
 					// Org admins should not have workspace exec perms.
-					organizationID.String(): append(allPermsExcept(ResourceWorkspace, ResourceWorkspaceDormant, ResourcePrebuiltWorkspace, ResourceAssignRole, ResourceUserSecret), Permissions(map[string][]policy.Action{
-						ResourceWorkspaceDormant.Type: {policy.ActionRead, policy.ActionDelete, policy.ActionCreate, policy.ActionUpdate, policy.ActionWorkspaceStop, policy.ActionCreateAgent, policy.ActionDeleteAgent},
-						ResourceWorkspace.Type:        slice.Omit(ResourceWorkspace.AvailableActions(), policy.ActionApplicationConnect, policy.ActionSSH),
-						// PrebuiltWorkspaces are a subset of Workspaces.
-						// Explicitly setting PrebuiltWorkspace permissions for clarity.
-						// Note: even without PrebuiltWorkspace permissions, access is still granted via Workspace permissions.
-						ResourcePrebuiltWorkspace.Type: {policy.ActionUpdate, policy.ActionDelete},
-					})...),
+					organizationID.String(): {
+						Org: append(
+							allPermsExcept(ResourceWorkspace, ResourceWorkspaceDormant, ResourcePrebuiltWorkspace, ResourceAssignRole, ResourceUserSecret, ResourceBoundaryUsage),
+							Permissions(map[string][]policy.Action{
+								ResourceWorkspace.Type:        slice.Omit(ResourceWorkspace.AvailableActions(), policy.ActionApplicationConnect, policy.ActionSSH),
+								ResourceWorkspaceDormant.Type: {policy.ActionRead, policy.ActionDelete, policy.ActionCreate, policy.ActionUpdate, policy.ActionWorkspaceStop, policy.ActionCreateAgent, policy.ActionDeleteAgent, policy.ActionUpdateAgent},
+								// PrebuiltWorkspaces are a subset of Workspaces.
+								// Explicitly setting PrebuiltWorkspace permissions for clarity.
+								// Note: even without PrebuiltWorkspace permissions, access is still granted via Workspace permissions.
+								ResourcePrebuiltWorkspace.Type: {policy.ActionUpdate, policy.ActionDelete},
+							})...,
+						),
+						Member: []Permission{},
+					},
 				},
-				User: []Permission{},
-			}
-		},
-
-		// orgMember is an implied role to any member in an organization.
-		orgMember: func(organizationID uuid.UUID) Role {
-			return Role{
-				Identifier:  RoleIdentifier{Name: orgMember, OrganizationID: organizationID},
-				DisplayName: "",
-				Site:        []Permission{},
-				Org: map[string][]Permission{
-					organizationID.String(): Permissions(map[string][]policy.Action{
-						// All users can see the provisioner daemons for workspace
-						// creation.
-						ResourceProvisionerDaemon.Type: {policy.ActionRead},
-						// All org members can read the organization
-						ResourceOrganization.Type: {policy.ActionRead},
-						// Can read available roles.
-						ResourceAssignOrgRole.Type: {policy.ActionRead},
-					}),
-				},
-				User: []Permission{},
 			}
 		},
 		orgAuditor: func(organizationID uuid.UUID) Role {
@@ -459,19 +493,22 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 				Identifier:  RoleIdentifier{Name: orgAuditor, OrganizationID: organizationID},
 				DisplayName: "Organization Auditor",
 				Site:        []Permission{},
-				Org: map[string][]Permission{
-					organizationID.String(): Permissions(map[string][]policy.Action{
-						ResourceAuditLog.Type:      {policy.ActionRead},
-						ResourceConnectionLog.Type: {policy.ActionRead},
-						// Allow auditors to see the resources that audit logs reflect.
-						ResourceTemplate.Type:           {policy.ActionRead, policy.ActionViewInsights},
-						ResourceGroup.Type:              {policy.ActionRead},
-						ResourceGroupMember.Type:        {policy.ActionRead},
-						ResourceOrganization.Type:       {policy.ActionRead},
-						ResourceOrganizationMember.Type: {policy.ActionRead},
-					}),
+				User:        []Permission{},
+				ByOrgID: map[string]OrgPermissions{
+					organizationID.String(): {
+						Org: Permissions(map[string][]policy.Action{
+							ResourceAuditLog.Type:      {policy.ActionRead},
+							ResourceConnectionLog.Type: {policy.ActionRead},
+							// Allow auditors to see the resources that audit logs reflect.
+							ResourceTemplate.Type:           {policy.ActionRead, policy.ActionViewInsights},
+							ResourceGroup.Type:              {policy.ActionRead},
+							ResourceGroupMember.Type:        {policy.ActionRead},
+							ResourceOrganization.Type:       {policy.ActionRead},
+							ResourceOrganizationMember.Type: {policy.ActionRead},
+						}),
+						Member: []Permission{},
+					},
 				},
-				User: []Permission{},
 			}
 		},
 		orgUserAdmin: func(organizationID uuid.UUID) Role {
@@ -484,18 +521,21 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 					// users at the site wide to know they exist.
 					ResourceUser.Type: {policy.ActionRead},
 				}),
-				Org: map[string][]Permission{
-					organizationID.String(): Permissions(map[string][]policy.Action{
-						// Assign, remove, and read roles in the organization.
-						ResourceAssignOrgRole.Type:      {policy.ActionAssign, policy.ActionUnassign, policy.ActionRead},
-						ResourceOrganization.Type:       {policy.ActionRead},
-						ResourceOrganizationMember.Type: {policy.ActionCreate, policy.ActionRead, policy.ActionUpdate, policy.ActionDelete},
-						ResourceGroup.Type:              ResourceGroup.AvailableActions(),
-						ResourceGroupMember.Type:        ResourceGroupMember.AvailableActions(),
-						ResourceIdpsyncSettings.Type:    {policy.ActionRead, policy.ActionUpdate},
-					}),
-				},
 				User: []Permission{},
+				ByOrgID: map[string]OrgPermissions{
+					organizationID.String(): {
+						Org: Permissions(map[string][]policy.Action{
+							// Assign, remove, and read roles in the organization.
+							ResourceAssignOrgRole.Type:      {policy.ActionAssign, policy.ActionUnassign, policy.ActionRead},
+							ResourceOrganization.Type:       {policy.ActionRead},
+							ResourceOrganizationMember.Type: {policy.ActionCreate, policy.ActionRead, policy.ActionUpdate, policy.ActionDelete},
+							ResourceGroup.Type:              ResourceGroup.AvailableActions(),
+							ResourceGroupMember.Type:        ResourceGroupMember.AvailableActions(),
+							ResourceIdpsyncSettings.Type:    {policy.ActionRead, policy.ActionUpdate},
+						}),
+						Member: []Permission{},
+					},
+				},
 			}
 		},
 		orgTemplateAdmin: func(organizationID uuid.UUID) Role {
@@ -504,25 +544,28 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 				Identifier:  RoleIdentifier{Name: orgTemplateAdmin, OrganizationID: organizationID},
 				DisplayName: "Organization Template Admin",
 				Site:        []Permission{},
-				Org: map[string][]Permission{
-					organizationID.String(): Permissions(map[string][]policy.Action{
-						ResourceTemplate.Type:          ResourceTemplate.AvailableActions(),
-						ResourceFile.Type:              {policy.ActionCreate, policy.ActionRead},
-						ResourceWorkspace.Type:         {policy.ActionRead},
-						ResourcePrebuiltWorkspace.Type: {policy.ActionUpdate, policy.ActionDelete},
-						// Assigning template perms requires this permission.
-						ResourceOrganization.Type:       {policy.ActionRead},
-						ResourceOrganizationMember.Type: {policy.ActionRead},
-						ResourceGroup.Type:              {policy.ActionRead},
-						ResourceGroupMember.Type:        {policy.ActionRead},
-						// Since templates have to correlate with provisioners,
-						// the ability to create templates and provisioners has
-						// a lot of overlap.
-						ResourceProvisionerDaemon.Type: {policy.ActionCreate, policy.ActionRead, policy.ActionUpdate, policy.ActionDelete},
-						ResourceProvisionerJobs.Type:   {policy.ActionRead, policy.ActionUpdate, policy.ActionCreate},
-					}),
+				User:        []Permission{},
+				ByOrgID: map[string]OrgPermissions{
+					organizationID.String(): {
+						Org: Permissions(map[string][]policy.Action{
+							ResourceTemplate.Type:          ResourceTemplate.AvailableActions(),
+							ResourceFile.Type:              {policy.ActionCreate, policy.ActionRead},
+							ResourceWorkspace.Type:         {policy.ActionRead},
+							ResourcePrebuiltWorkspace.Type: {policy.ActionUpdate, policy.ActionDelete},
+							// Assigning template perms requires this permission.
+							ResourceOrganization.Type:       {policy.ActionRead},
+							ResourceOrganizationMember.Type: {policy.ActionRead},
+							ResourceGroup.Type:              {policy.ActionRead},
+							ResourceGroupMember.Type:        {policy.ActionRead},
+							// Since templates have to correlate with provisioners,
+							// the ability to create templates and provisioners has
+							// a lot of overlap.
+							ResourceProvisionerDaemon.Type: {policy.ActionCreate, policy.ActionRead, policy.ActionUpdate, policy.ActionDelete},
+							ResourceProvisionerJobs.Type:   {policy.ActionRead, policy.ActionUpdate, policy.ActionCreate},
+						}),
+						Member: []Permission{},
+					},
 				},
-				User: []Permission{},
 			}
 		},
 		// orgWorkspaceCreationBan prevents creating & deleting workspaces. This
@@ -533,31 +576,34 @@ func ReloadBuiltinRoles(opts *RoleOptions) {
 				Identifier:  RoleIdentifier{Name: orgWorkspaceCreationBan, OrganizationID: organizationID},
 				DisplayName: "Organization Workspace Creation Ban",
 				Site:        []Permission{},
-				Org: map[string][]Permission{
+				User:        []Permission{},
+				ByOrgID: map[string]OrgPermissions{
 					organizationID.String(): {
-						{
-							Negate:       true,
-							ResourceType: ResourceWorkspace.Type,
-							Action:       policy.ActionCreate,
+						Org: []Permission{
+							{
+								Negate:       true,
+								ResourceType: ResourceWorkspace.Type,
+								Action:       policy.ActionCreate,
+							},
+							{
+								Negate:       true,
+								ResourceType: ResourceWorkspace.Type,
+								Action:       policy.ActionDelete,
+							},
+							{
+								Negate:       true,
+								ResourceType: ResourceWorkspace.Type,
+								Action:       policy.ActionCreateAgent,
+							},
+							{
+								Negate:       true,
+								ResourceType: ResourceWorkspace.Type,
+								Action:       policy.ActionDeleteAgent,
+							},
 						},
-						{
-							Negate:       true,
-							ResourceType: ResourceWorkspace.Type,
-							Action:       policy.ActionDelete,
-						},
-						{
-							Negate:       true,
-							ResourceType: ResourceWorkspace.Type,
-							Action:       policy.ActionCreateAgent,
-						},
-						{
-							Negate:       true,
-							ResourceType: ResourceWorkspace.Type,
-							Action:       policy.ActionDeleteAgent,
-						},
+						Member: []Permission{},
 					},
 				},
-				User: []Permission{},
 			}
 		},
 	}
@@ -583,6 +629,7 @@ var assignRoles = map[string]map[string]bool{
 		userAdmin:               true,
 		customSiteRole:          true,
 		customOrganizationRole:  true,
+		agentsAccess:            true,
 	},
 	owner: {
 		owner:                   true,
@@ -598,10 +645,12 @@ var assignRoles = map[string]map[string]bool{
 		userAdmin:               true,
 		customSiteRole:          true,
 		customOrganizationRole:  true,
+		agentsAccess:            true,
 	},
 	userAdmin: {
-		member:    true,
-		orgMember: true,
+		member:       true,
+		orgMember:    true,
+		agentsAccess: true,
 	},
 	orgAdmin: {
 		orgAdmin:                true,
@@ -668,9 +717,10 @@ func (perm Permission) Valid() error {
 }
 
 // Role is a set of permissions at multiple levels:
-// - Site level permissions apply EVERYWHERE
-// - Org level permissions apply to EVERYTHING in a given ORG
-// - User level permissions are the lowest
+// - Site permissions apply EVERYWHERE
+// - Org permissions apply to EVERYTHING in a given ORG
+// - User permissions apply to all resources the user owns
+// - OrgMember permissions apply to resources in the given org that the user owns
 // This is the type passed into the rego as a json payload.
 // Users of this package should instead **only** use the role names, and
 // this package will expand the role names into their json payloads.
@@ -680,15 +730,19 @@ type Role struct {
 	// that means the UI should never display it.
 	DisplayName string       `json:"display_name"`
 	Site        []Permission `json:"site"`
-	// Org is a map of orgid to permissions. We represent orgid as a string.
-	// We scope the organizations in the role so we can easily combine all the
-	// roles.
-	Org  map[string][]Permission `json:"org"`
-	User []Permission            `json:"user"`
+	User        []Permission `json:"user"`
+	// ByOrgID is a map of organization IDs to permissions. Grouping by
+	// organization makes roles easy to combine.
+	ByOrgID map[string]OrgPermissions `json:"by_org_id"`
 
 	// cachedRegoValue can be used to cache the rego value for this role.
 	// This is helpful for static roles that never change.
 	cachedRegoValue ast.Value
+}
+
+type OrgPermissions struct {
+	Org    []Permission `json:"org"`
+	Member []Permission `json:"member"`
 }
 
 // Valid will check all it's permissions and ensure they are all correct
@@ -702,10 +756,15 @@ func (role Role) Valid() error {
 		}
 	}
 
-	for orgID, permissions := range role.Org {
-		for _, perm := range permissions {
+	for orgID, orgPermissions := range role.ByOrgID {
+		for _, perm := range orgPermissions.Org {
 			if err := perm.Valid(); err != nil {
-				errs = append(errs, xerrors.Errorf("org=%q: %w", orgID, err))
+				errs = append(errs, xerrors.Errorf("org=%q: org %w", orgID, err))
+			}
+		}
+		for _, perm := range orgPermissions.Member {
+			if err := perm.Valid(); err != nil {
+				errs = append(errs, xerrors.Errorf("org=%q: member: %w", orgID, err))
 			}
 		}
 	}
@@ -774,7 +833,7 @@ func RoleByName(name RoleIdentifier) (Role, error) {
 	// Ensure all org roles are properly scoped a non-empty organization id.
 	// This is just some defensive programming.
 	role := roleFunc(name.OrganizationID)
-	if len(role.Org) > 0 && name.OrganizationID == uuid.Nil {
+	if len(role.ByOrgID) > 0 && name.OrganizationID == uuid.Nil {
 		return Role{}, xerrors.Errorf("expect a org id for role %q", name.String())
 	}
 
@@ -827,11 +886,18 @@ func SiteBuiltInRoles() []Role {
 	for _, roleF := range builtInRoles {
 		// Must provide some non-nil uuid to filter out org roles.
 		role := roleF(uuid.New())
-		if !role.Identifier.IsOrgRole() {
+		if !role.Identifier.IsOrgRole() && role.Identifier != RoleAgentsAccess() {
 			roles = append(roles, role)
 		}
 	}
 	return roles
+}
+
+// AgentsAccessRole returns the agents-access role for use by callers
+// that need to include it conditionally (e.g. when the agents
+// experiment is enabled).
+func AgentsAccessRole() Role {
+	return builtInRoles[agentsAccess](uuid.Nil)
 }
 
 // ChangeRoleSet is a helper function that finds the difference of 2 sets of
@@ -882,4 +948,207 @@ func DeduplicatePermissions(perms []Permission) []Permission {
 		deduped = append(deduped, perm)
 	}
 	return deduped
+}
+
+// PermissionsEqual compares two permission slices as sets.  Order and
+// duplicate entries do not matter; it only checks that both slices
+// contain the same unique permissions.
+func PermissionsEqual(a, b []Permission) bool {
+	setA := make(map[Permission]struct{}, len(a))
+	for _, p := range a {
+		setA[p] = struct{}{}
+	}
+
+	setB := make(map[Permission]struct{}, len(b))
+	for _, p := range b {
+		if _, ok := setA[p]; !ok {
+			return false
+		}
+		setB[p] = struct{}{}
+	}
+
+	return len(setA) == len(setB)
+}
+
+// OrgSettings carries organization-level settings that affect system
+// role permissions. It lives in the rbac package to avoid a cyclic
+// dependency with the database package. Callers in rolestore map
+// database.Organization fields onto this struct.
+type OrgSettings struct {
+	ShareableWorkspaceOwners ShareableWorkspaceOwners
+}
+type ShareableWorkspaceOwners string
+
+const (
+	ShareableWorkspaceOwnersNone            ShareableWorkspaceOwners = "none"
+	ShareableWorkspaceOwnersEveryone        ShareableWorkspaceOwners = "everyone"
+	ShareableWorkspaceOwnersServiceAccounts ShareableWorkspaceOwners = "service_accounts"
+)
+
+// OrgRolePermissions holds the two permission sets that make up a
+// system role: org-wide permissions and member-scoped permissions.
+type OrgRolePermissions struct {
+	Org    []Permission
+	Member []Permission
+}
+
+// OrgMemberPermissions returns the permissions for the organization-member
+// system role, which can vary based on the organization's workspace sharing
+// settings.
+func OrgMemberPermissions(org OrgSettings) OrgRolePermissions {
+	// Organization-level permissions that all org members get.
+	orgPermMap := map[string][]policy.Action{
+		// All users can see provisioner daemons for workspace creation.
+		ResourceProvisionerDaemon.Type: {policy.ActionRead},
+		// All org members can read the organization.
+		ResourceOrganization.Type: {policy.ActionRead},
+		// Can read available roles.
+		ResourceAssignOrgRole.Type: {policy.ActionRead},
+	}
+
+	// In all modes of workspace sharing but `none`, members need to
+	// see other org members (including service accounts) to either
+	// share with them or get access to their shared workspaces,
+	// resolved through GET /users/{user}/workspace/{workspace}
+	if org.ShareableWorkspaceOwners != ShareableWorkspaceOwnersNone {
+		orgPermMap[ResourceOrganizationMember.Type] = []policy.Action{policy.ActionRead}
+	}
+
+	// When workspace sharing is open to members, they also need to
+	// see org groups to share with them.
+	if org.ShareableWorkspaceOwners == ShareableWorkspaceOwnersEveryone {
+		orgPermMap[ResourceGroup.Type] = []policy.Action{policy.ActionRead}
+	}
+
+	orgPerms := Permissions(orgPermMap)
+
+	if org.ShareableWorkspaceOwners == ShareableWorkspaceOwnersNone {
+		// Org-level negation blocks sharing on ANY workspace in the
+		// org. This overrides any positive permission from other
+		// roles, including org-admin.
+		orgPerms = append(orgPerms, Permission{
+			Negate:       true,
+			ResourceType: ResourceWorkspace.Type,
+			Action:       policy.ActionShare,
+		})
+	}
+
+	// Uses allPermsExcept to automatically include permissions for new resources.
+	memberPerms := append(
+		allPermsExcept(
+			ResourceWorkspaceDormant,
+			ResourcePrebuiltWorkspace,
+			ResourceUser,
+			ResourceOrganizationMember,
+			ResourceAibridgeInterception,
+		),
+		Permissions(map[string][]policy.Action{
+			// Reduced permission set on dormant workspaces. No build,
+			// ssh, or exec.
+			ResourceWorkspaceDormant.Type: {
+				policy.ActionRead,
+				policy.ActionDelete,
+				policy.ActionCreate,
+				policy.ActionUpdate,
+				policy.ActionWorkspaceStop,
+				policy.ActionCreateAgent,
+				policy.ActionDeleteAgent,
+				policy.ActionUpdateAgent,
+			},
+			// Can read their own organization member record.
+			ResourceOrganizationMember.Type: {
+				policy.ActionRead,
+			},
+			// Members can create and update AI Bridge interceptions but
+			// cannot read them back.
+			ResourceAibridgeInterception.Type: {
+				policy.ActionCreate,
+				policy.ActionUpdate,
+			},
+		})...,
+	)
+
+	if org.ShareableWorkspaceOwners != ShareableWorkspaceOwnersEveryone {
+		memberPerms = append(memberPerms, Permission{
+			Negate:       true,
+			ResourceType: ResourceWorkspace.Type,
+			Action:       policy.ActionShare,
+		})
+	}
+
+	return OrgRolePermissions{Org: orgPerms, Member: memberPerms}
+}
+
+// OrgServiceAccountPermissions returns the permissions for the
+// organization-service-account system role, which can vary based on
+// the organization's workspace sharing settings.
+func OrgServiceAccountPermissions(org OrgSettings) OrgRolePermissions {
+	// Organization-level permissions that all org service accounts get.
+	orgPermMap := map[string][]policy.Action{
+		// All users can see provisioner daemons for workspace creation.
+		ResourceProvisionerDaemon.Type: {policy.ActionRead},
+		// All org members can read the organization.
+		ResourceOrganization.Type: {policy.ActionRead},
+		// Can read available roles.
+		ResourceAssignOrgRole.Type: {policy.ActionRead},
+	}
+
+	// When workspace sharing is enabled, service accounts need to see
+	// other org members and groups to share workspaces with them.
+	if org.ShareableWorkspaceOwners != ShareableWorkspaceOwnersNone {
+		orgPermMap[ResourceOrganizationMember.Type] = []policy.Action{policy.ActionRead}
+		orgPermMap[ResourceGroup.Type] = []policy.Action{policy.ActionRead}
+	}
+
+	orgPerms := Permissions(orgPermMap)
+
+	if org.ShareableWorkspaceOwners == ShareableWorkspaceOwnersNone {
+		// Org-level negation blocks sharing on ANY workspace in the
+		// org. If a service account has any other roles assigned,
+		// this negation will override any positive perms in them, too.
+		orgPerms = append(orgPerms, Permission{
+			Negate:       true,
+			ResourceType: ResourceWorkspace.Type,
+			Action:       policy.ActionShare,
+		})
+	}
+
+	// service account-scoped permissions (resources owned by the
+	// service account).  Uses allPermsExcept to automatically include
+	// permissions for new resources.
+	memberPerms := append(
+		allPermsExcept(
+			ResourceWorkspaceDormant,
+			ResourcePrebuiltWorkspace,
+			ResourceUser,
+			ResourceOrganizationMember,
+			ResourceAibridgeInterception,
+		),
+		Permissions(map[string][]policy.Action{
+			// Reduced permission set on dormant workspaces. No build,
+			// ssh, or exec.
+			ResourceWorkspaceDormant.Type: {
+				policy.ActionRead,
+				policy.ActionDelete,
+				policy.ActionCreate,
+				policy.ActionUpdate,
+				policy.ActionWorkspaceStop,
+				policy.ActionCreateAgent,
+				policy.ActionDeleteAgent,
+				policy.ActionUpdateAgent,
+			},
+			// Can read their own organization member record.
+			ResourceOrganizationMember.Type: {
+				policy.ActionRead,
+			},
+			// Service accounts can create and update AI Bridge
+			// interceptions but cannot read them back.
+			ResourceAibridgeInterception.Type: {
+				policy.ActionCreate,
+				policy.ActionUpdate,
+			},
+		})...,
+	)
+
+	return OrgRolePermissions{Org: orgPerms, Member: memberPerms}
 }

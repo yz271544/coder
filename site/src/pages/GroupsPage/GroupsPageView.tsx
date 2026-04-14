@@ -1,14 +1,16 @@
-import type { Interpolation, Theme } from "@emotion/react";
-import Skeleton from "@mui/material/Skeleton";
-import type { Group } from "api/typesGenerated";
-import { Avatar } from "components/Avatar/Avatar";
-import { AvatarData } from "components/Avatar/AvatarData";
-import { AvatarDataSkeleton } from "components/Avatar/AvatarDataSkeleton";
-import { Badge } from "components/Badge/Badge";
-import { Button } from "components/Button/Button";
-import { ChooseOne, Cond } from "components/Conditionals/ChooseOne";
-import { EmptyState } from "components/EmptyState/EmptyState";
-import { Paywall } from "components/Paywall/Paywall";
+import { ChevronRightIcon, PlusIcon } from "lucide-react";
+import type { FC } from "react";
+import { Link as RouterLink, useNavigate } from "react-router";
+import type { Group } from "#/api/typesGenerated";
+import { Avatar } from "#/components/Avatar/Avatar";
+import { AvatarData } from "#/components/Avatar/AvatarData";
+import { AvatarDataSkeleton } from "#/components/Avatar/AvatarDataSkeleton";
+import { Badge } from "#/components/Badge/Badge";
+import { Button } from "#/components/Button/Button";
+import { ChooseOne, Cond } from "#/components/Conditionals/ChooseOne";
+import { EmptyState } from "#/components/EmptyState/EmptyState";
+import { PaywallPremium } from "#/components/Paywall/PaywallPremium";
+import { Skeleton } from "#/components/Skeleton/Skeleton";
 import {
 	Table,
 	TableBody,
@@ -16,16 +18,13 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
-} from "components/Table/Table";
+} from "#/components/Table/Table";
 import {
 	TableLoaderSkeleton,
 	TableRowSkeleton,
-} from "components/TableLoader/TableLoader";
-import { useClickableTableRow } from "hooks";
-import { ChevronRightIcon, PlusIcon } from "lucide-react";
-import type { FC } from "react";
-import { Link as RouterLink, useNavigate } from "react-router";
-import { docs } from "utils/docs";
+} from "#/components/TableLoader/TableLoader";
+import { useClickableTableRow } from "#/hooks/useClickableTableRow";
+import { docs } from "#/utils/docs";
 
 type GroupsPageViewProps = {
 	groups: Group[] | undefined;
@@ -44,7 +43,7 @@ export const GroupsPageView: FC<GroupsPageViewProps> = ({
 	return (
 		<ChooseOne>
 			<Cond condition={!groupsEnabled}>
-				<Paywall
+				<PaywallPremium
 					message="Groups"
 					description="Organize users into groups with restricted access to templates. You need a Premium license to use this feature."
 					documentationLink={docs("/admin/users/groups-roles")}
@@ -154,7 +153,7 @@ const GroupRow: FC<GroupRowProps> = ({ group }) => {
 			</TableCell>
 
 			<TableCell>
-				<div css={styles.arrowCell}>
+				<div className="flex">
 					<ChevronRightIcon className="size-icon-sm" />
 				</div>
 			</TableCell>
@@ -167,7 +166,7 @@ const TableLoader: FC = () => {
 		<TableLoaderSkeleton>
 			<TableRowSkeleton>
 				<TableCell>
-					<div css={{ display: "flex", alignItems: "center", gap: 8 }}>
+					<div className="flex items-center gap-2">
 						<AvatarDataSkeleton />
 					</div>
 				</TableCell>
@@ -181,14 +180,3 @@ const TableLoader: FC = () => {
 		</TableLoaderSkeleton>
 	);
 };
-
-const styles = {
-	arrowRight: (theme) => ({
-		color: theme.palette.text.secondary,
-		width: 20,
-		height: 20,
-	}),
-	arrowCell: {
-		display: "flex",
-	},
-} satisfies Record<string, Interpolation<Theme>>;

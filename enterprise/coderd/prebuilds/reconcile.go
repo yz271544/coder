@@ -7,16 +7,22 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hashicorp/go-multierror"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/xerrors"
 
-	"github.com/coder/quartz"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
@@ -27,15 +33,11 @@ import (
 	"github.com/coder/coder/v2/coderd/prebuilds"
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
+	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/coderd/wsbuilder"
 	"github.com/coder/coder/v2/codersdk"
 	sdkproto "github.com/coder/coder/v2/provisionersdk/proto"
-
-	"cdr.dev/slog"
-
-	"github.com/google/uuid"
-	"golang.org/x/sync/errgroup"
-	"golang.org/x/xerrors"
+	"github.com/coder/quartz"
 )
 
 type StoreReconciler struct {
@@ -46,18 +48,47 @@ type StoreReconciler struct {
 	logger            slog.Logger
 	clock             quartz.Clock
 	registerer        prometheus.Registerer
-	metrics           *MetricsCollector
 	notifEnq          notifications.Enqueuer
 	buildUsageChecker *atomic.Pointer[wsbuilder.UsageChecker]
+	tracer            trace.Tracer
 
-	cancelFn          context.CancelCauseFunc
-	running           atomic.Bool
-	stopped           atomic.Bool
+	// mu protects the reconciler's lifecycle state.
+	mu       sync.Mutex
+	running  bool
+	stopped  bool
+	cancelFn context.CancelCauseFunc
+
 	done              chan struct{}
 	provisionNotifyCh chan database.ProvisionerJob
+
+	reconciliationConcurrency int
+
+	// Prebuild state metrics
+	metrics *MetricsCollector
+	// Operational metrics
+	reconciliationDuration  prometheus.Histogram
+	workspaceBuilderMetrics *wsbuilder.Metrics
 }
 
 var _ prebuilds.ReconciliationOrchestrator = &StoreReconciler{}
+
+type DeprovisionMode int
+
+const (
+	DeprovisionModeNormal DeprovisionMode = iota
+	DeprovisionModeOrphan
+)
+
+func (d DeprovisionMode) String() string {
+	switch d {
+	case DeprovisionModeOrphan:
+		return "orphan"
+	case DeprovisionModeNormal:
+		return "normal"
+	default:
+		return "unknown"
+	}
+}
 
 func NewStoreReconciler(store database.Store,
 	ps pubsub.Pubsub,
@@ -68,19 +99,31 @@ func NewStoreReconciler(store database.Store,
 	registerer prometheus.Registerer,
 	notifEnq notifications.Enqueuer,
 	buildUsageChecker *atomic.Pointer[wsbuilder.UsageChecker],
+	tracerProvider trace.TracerProvider,
+	maxDBConnections int,
+	workspaceBuilderMetrics *wsbuilder.Metrics,
 ) *StoreReconciler {
+	reconciliationConcurrency := calculateReconciliationConcurrency(maxDBConnections)
+
+	logger.Debug(context.Background(), "reconciler initialized",
+		slog.F("reconciliation_concurrency", reconciliationConcurrency),
+		slog.F("max_db_connections", maxDBConnections))
+
 	reconciler := &StoreReconciler{
-		store:             store,
-		pubsub:            ps,
-		fileCache:         fileCache,
-		logger:            logger,
-		cfg:               cfg,
-		clock:             clock,
-		registerer:        registerer,
-		notifEnq:          notifEnq,
-		buildUsageChecker: buildUsageChecker,
-		done:              make(chan struct{}, 1),
-		provisionNotifyCh: make(chan database.ProvisionerJob, 10),
+		store:                     store,
+		pubsub:                    ps,
+		fileCache:                 fileCache,
+		logger:                    logger,
+		cfg:                       cfg,
+		clock:                     clock,
+		registerer:                registerer,
+		notifEnq:                  notifEnq,
+		buildUsageChecker:         buildUsageChecker,
+		tracer:                    tracerProvider.Tracer(tracing.TracerName),
+		done:                      make(chan struct{}, 1),
+		provisionNotifyCh:         make(chan database.ProvisionerJob, 10),
+		reconciliationConcurrency: reconciliationConcurrency,
+		workspaceBuilderMetrics:   workspaceBuilderMetrics,
 	}
 
 	if registerer != nil {
@@ -89,9 +132,41 @@ func NewStoreReconciler(store database.Store,
 			// If the registerer fails to register the metrics collector, it's not fatal.
 			logger.Error(context.Background(), "failed to register prometheus metrics", slog.Error(err))
 		}
+
+		factory := promauto.With(registerer)
+		reconciler.reconciliationDuration = factory.NewHistogram(prometheus.HistogramOpts{
+			Namespace: "coderd",
+			Subsystem: "prebuilds",
+			Name:      "reconciliation_duration_seconds",
+			Help:      "Duration of each prebuilds reconciliation cycle.",
+			Buckets:   prometheus.DefBuckets,
+		})
 	}
 
 	return reconciler
+}
+
+// calculateReconciliationConcurrency determines the number of concurrent
+// goroutines for preset reconciliation. Each preset may perform multiple
+// database operations (creates/deletes), so we limit concurrency to avoid
+// exhausting the connection pool while maintaining reasonable parallelism.
+//
+// Uses half the pool size, with a minimum of 1 and a maximum of 5.
+// TODO(ssncferreira): If this becomes a bottleneck, consider adding a configuration option.
+func calculateReconciliationConcurrency(maxDBConnections int) int {
+	if maxDBConnections <= 0 {
+		return 1
+	}
+
+	concurrency := maxDBConnections / 2
+	if concurrency < 1 {
+		return 1
+	}
+	if concurrency > 5 {
+		return 5
+	}
+
+	return concurrency
 }
 
 func (c *StoreReconciler) Run(ctx context.Context) {
@@ -103,19 +178,35 @@ func (c *StoreReconciler) Run(ctx context.Context) {
 	c.logger.Info(ctx, "starting reconciler",
 		slog.F("interval", reconciliationInterval),
 		slog.F("backoff_interval", c.cfg.ReconciliationBackoffInterval.String()),
-		slog.F("backoff_lookback", c.cfg.ReconciliationBackoffLookback.String()))
+		slog.F("backoff_lookback", c.cfg.ReconciliationBackoffLookback.String()),
+		slog.F("preset_concurrency", c.reconciliationConcurrency))
 
-	var wg sync.WaitGroup
+	// Create a child context that will be canceled when:
+	// 1. The parent context is canceled, OR
+	// 2. c.cancelFn() is called to trigger shutdown
+	// nolint:gocritic // Reconciliation Loop needs Prebuilds Orchestrator permissions.
+	ctx, cancel := context.WithCancelCause(dbauthz.AsPrebuildsOrchestrator(ctx))
+
+	// If the reconciler was already stopped, exit early and release the context.
+	// Otherwise, mark it as running and store the cancel function for shutdown.
+	c.mu.Lock()
+	if c.stopped || c.running {
+		c.mu.Unlock()
+		cancel(nil)
+		return
+	}
+	c.running = true
+	c.cancelFn = cancel
+	c.mu.Unlock()
+
 	ticker := c.clock.NewTicker(reconciliationInterval)
 	defer ticker.Stop()
+	// Wait for all background goroutines to exit before signaling completion.
+	var wg sync.WaitGroup
 	defer func() {
 		wg.Wait()
 		c.done <- struct{}{}
 	}()
-
-	// nolint:gocritic // Reconciliation Loop needs Prebuilds Orchestrator permissions.
-	ctx, cancel := context.WithCancelCause(dbauthz.AsPrebuildsOrchestrator(ctx))
-	c.cancelFn = cancel
 
 	// Start updating metrics in the background.
 	if c.metrics != nil {
@@ -126,11 +217,6 @@ func (c *StoreReconciler) Run(ctx context.Context) {
 		}()
 	}
 
-	// Everything is in place, reconciler can now be considered as running.
-	//
-	// NOTE: without this atomic bool, Stop might race with Run for the c.cancelFn above.
-	c.running.Store(true)
-
 	// Publish provisioning jobs outside of database transactions.
 	// A connection is held while a database transaction is active; PGPubsub also tries to acquire a new connection on
 	// Publish, so we can exhaust available connections.
@@ -138,11 +224,11 @@ func (c *StoreReconciler) Run(ctx context.Context) {
 	// A single worker dequeues from the channel, which should be sufficient.
 	// If any messages are missed due to congestion or errors, provisionerdserver has a backup polling mechanism which
 	// will periodically pick up any queued jobs (see poll(time.Duration) in coderd/provisionerdserver/acquirer.go).
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		for {
 			select {
-			case <-c.done:
-				return
 			case <-ctx.Done():
 				return
 			case job := <-c.provisionNotifyCh:
@@ -160,10 +246,19 @@ func (c *StoreReconciler) Run(ctx context.Context) {
 		//		 instead of waiting for the next reconciliation interval
 		case <-ticker.C:
 			// Trigger a new iteration on each tick.
-			err := c.ReconcileAll(ctx)
+			stats, err := c.ReconcileAll(ctx)
 			if err != nil {
 				c.logger.Error(context.Background(), "reconciliation failed", slog.Error(err))
 			}
+
+			if c.reconciliationDuration != nil {
+				c.reconciliationDuration.Observe(stats.Elapsed.Seconds())
+			}
+			c.logger.Info(ctx, "reconciliation stats",
+				slog.F("elapsed", stats.Elapsed),
+				slog.F("presets_total", stats.PresetsTotal),
+				slog.F("presets_reconciled", stats.PresetsReconciled),
+			)
 		case <-ctx.Done():
 			// nolint:gocritic // it's okay to use slog.F() for an error in this case
 			// because we want to differentiate two different types of errors: ctx.Err() and context.Cause()
@@ -178,23 +273,31 @@ func (c *StoreReconciler) Run(ctx context.Context) {
 	}
 }
 
+// Stop triggers reconciler shutdown and waits for it to complete.
+// The ctx parameter provides a timeout, if cleanup doesn't finish within
+// this timeout, Stop() logs an error and returns.
 func (c *StoreReconciler) Stop(ctx context.Context, cause error) {
-	defer c.running.Store(false)
-
 	if cause != nil {
-		c.logger.Error(context.Background(), "stopping reconciler due to an error", slog.Error(cause))
+		c.logger.Info(context.Background(), "stopping reconciler", slog.F("cause", cause.Error()))
 	} else {
-		c.logger.Info(context.Background(), "gracefully stopping reconciler")
+		c.logger.Info(context.Background(), "stopping reconciler")
 	}
 
-	// If previously stopped (Swap returns previous value), then short-circuit.
+	// Mark the reconciler as stopped. If it was already stopped, return early.
+	// If the reconciler is running, we'll proceed to shut it down.
 	//
-	// NOTE: we need to *prospectively* mark this as stopped to prevent Stop being called multiple times and causing problems.
-	if c.stopped.Swap(true) {
+	// NOTE: we need to *prospectively* mark this as stopped to prevent the
+	// reconciler from being stopped multiple times and causing problems.
+	c.mu.Lock()
+	if c.stopped {
+		c.mu.Unlock()
 		return
 	}
+	c.stopped = true
+	running := c.running
+	c.mu.Unlock()
 
-	// Unregister the metrics collector.
+	// Unregister prebuilds state and operational metrics.
 	if c.metrics != nil && c.registerer != nil {
 		if !c.registerer.Unregister(c.metrics) {
 			// The API doesn't allow us to know why the de-registration failed, but it's not very consequential.
@@ -203,19 +306,26 @@ func (c *StoreReconciler) Stop(ctx context.Context, cause error) {
 			// feature again. If the metrics cannot be registered, it'll log an error from NewStoreReconciler.
 			c.logger.Warn(context.Background(), "failed to unregister metrics collector")
 		}
+		if c.reconciliationDuration != nil {
+			if !c.registerer.Unregister(c.reconciliationDuration) {
+				c.logger.Warn(context.Background(), "failed to unregister reconciliation duration histogram")
+			}
+		}
 	}
 
 	// If the reconciler is not running, there's nothing else to do.
-	if !c.running.Load() {
+	if !running {
 		return
 	}
 
+	// Trigger reconciler shutdown by canceling its internal context.
 	if c.cancelFn != nil {
 		c.cancelFn(cause)
 	}
 
+	// Wait for the reconciler to signal that it has fully exited and cleaned up.
 	select {
-	// Give up waiting for control loop to exit.
+	// Timeout: reconciler didn't finish cleanup within the timeout period.
 	case <-ctx.Done():
 		// nolint:gocritic // it's okay to use slog.F() for an error in this case
 		// because we want to differentiate two different types of errors: ctx.Err() and context.Cause()
@@ -225,43 +335,50 @@ func (c *StoreReconciler) Stop(ctx context.Context, cause error) {
 			slog.Error(ctx.Err()),
 			slog.F("cause", context.Cause(ctx)),
 		)
-	// Wait for the control loop to exit.
+	// Happy path: reconciler has successfully exited.
 	case <-c.done:
 		c.logger.Info(context.Background(), "reconciler stopped")
 	}
 }
 
-// ReconcileAll will attempt to resolve the desired vs actual state of all templates which have presets with prebuilds configured.
+// ReconcileAll attempts to reconcile the desired vs actual state of all prebuilds for each
+// (organization, template, template version, preset) tuple.
 //
-// NOTE:
+// The result is a set of provisioning actions for each preset. These actions are fire-and-forget:
+// the reconciliation loop does not wait for prebuilt workspaces to complete provisioning.
 //
-// This function will kick of n provisioner jobs, based on the calculated state modifications.
+// An outer read-only transaction holds an advisory lock ensuring only one replica reconciles at a time.
+// This transaction remains open throughout the entire reconciliation cycle. Goroutines responsible for
+// preset reconciliation use separate, independent write transactions (via c.store). In the rare case
+// of the lock transaction failing mid-reconciliation, goroutines may continue while another replica
+// acquires the lock, potentially causing temporary under/over-provisioning. Since the reconciliation
+// loop is eventually consistent, subsequent cycles will converge to the desired state.
 //
-// These provisioning jobs are fire-and-forget. We DO NOT wait for the prebuilt workspaces to complete their
-// provisioning. As a consequence, it's possible that another reconciliation run will occur, which will mean that
-// multiple preset versions could be reconciling at once. This may mean some temporary over-provisioning, but the
-// reconciliation loop will bring these resources back into their desired numbers in an EVENTUALLY-consistent way.
-//
-// For example: we could decide to provision 1 new instance in this reconciliation.
-// While that workspace is being provisioned, another template version is created which means this same preset will
-// be reconciled again, leading to another workspace being provisioned. Two workspace builds will be occurring
-// simultaneously for the same preset, but once both jobs have completed the reconciliation loop will notice the
-// extraneous instance and delete it.
-func (c *StoreReconciler) ReconcileAll(ctx context.Context) error {
+// NOTE: Read operations must use db (the lock transaction) while write operations must use c.store.
+func (c *StoreReconciler) ReconcileAll(ctx context.Context) (stats prebuilds.ReconcileStats, err error) {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.ReconcileAll")
+	defer span.End()
+
+	start := c.clock.Now()
+	defer func() {
+		stats.Elapsed = c.clock.Since(start)
+	}()
+
 	logger := c.logger.With(slog.F("reconcile_context", "all"))
 
 	select {
 	case <-ctx.Done():
 		logger.Warn(context.Background(), "reconcile exiting prematurely; context done", slog.Error(ctx.Err()))
-		return nil
+		return stats, nil
 	default:
 	}
 
 	logger.Debug(ctx, "starting reconciliation")
 
-	err := c.WithReconciliationLock(ctx, logger, func(ctx context.Context, _ database.Store) error {
+	err = c.WithReconciliationLock(ctx, logger, func(ctx context.Context, db database.Store) error {
 		// Check if prebuilds reconciliation is paused
-		settingsJSON, err := c.store.GetPrebuildsSettings(ctx)
+		// Use db (lock tx) for read-only operations
+		settingsJSON, err := db.GetPrebuildsSettings(ctx)
 		if err != nil {
 			return xerrors.Errorf("get prebuilds settings: %w", err)
 		}
@@ -282,25 +399,34 @@ func (c *StoreReconciler) ReconcileAll(ctx context.Context) error {
 			return nil
 		}
 
-		snapshot, err := c.SnapshotState(ctx, c.store)
+		// MembershipReconciler performs write operations, therefore it needs to use c.store
+		// directly, since the lock transaction db is read-only.
+		membershipReconciler := NewStoreMembershipReconciler(c.store, c.clock, logger)
+		err = membershipReconciler.ReconcileAll(ctx, database.PrebuildsSystemUserID, PrebuiltWorkspacesGroupName)
+		if err != nil {
+			return xerrors.Errorf("reconcile prebuild membership: %w", err)
+		}
+
+		// Use db (lock tx) for read-only operations
+		snapshot, err := c.SnapshotState(ctx, db)
 		if err != nil {
 			return xerrors.Errorf("determine current snapshot: %w", err)
 		}
 
 		c.reportHardLimitedPresets(snapshot)
+		c.reportValidationFailedPresets(snapshot)
 
 		if len(snapshot.Presets) == 0 {
 			logger.Debug(ctx, "no templates found with prebuilds configured")
 			return nil
 		}
 
-		membershipReconciler := NewStoreMembershipReconciler(c.store, c.clock)
-		err = membershipReconciler.ReconcileAll(ctx, database.PrebuildsSystemUserID, snapshot.Presets)
-		if err != nil {
-			return xerrors.Errorf("reconcile prebuild membership: %w", err)
-		}
-
 		var eg errgroup.Group
+		// Limit concurrency to avoid exhausting the coderd database connection pool.
+		eg.SetLimit(c.reconciliationConcurrency)
+
+		presetsReconciled := 0
+
 		// Reconcile presets in parallel. Each preset in its own goroutine.
 		for _, preset := range snapshot.Presets {
 			ps, err := snapshot.FilterByPreset(preset.ID)
@@ -308,6 +434,15 @@ func (c *StoreReconciler) ReconcileAll(ctx context.Context) error {
 				logger.Warn(ctx, "failed to find preset snapshot", slog.Error(err), slog.F("preset_id", preset.ID.String()))
 				continue
 			}
+
+			// Performance optimization: Skip presets that won't need any database operations.
+			// This avoids holding a slot in the errgroup limiter, reserving capacity for
+			// presets that actually need database connections.
+			if ps.CanSkipReconciliation() {
+				continue
+			}
+
+			presetsReconciled++
 
 			eg.Go(func() error {
 				// Pass outer context.
@@ -325,6 +460,9 @@ func (c *StoreReconciler) ReconcileAll(ctx context.Context) error {
 			})
 		}
 
+		stats.PresetsTotal = len(snapshot.Presets)
+		stats.PresetsReconciled = presetsReconciled
+
 		// Release lock only when all preset reconciliation goroutines are finished.
 		return eg.Wait()
 	})
@@ -332,7 +470,7 @@ func (c *StoreReconciler) ReconcileAll(ctx context.Context) error {
 		logger.Error(ctx, "failed to reconcile", slog.Error(err))
 	}
 
-	return err
+	return stats, err
 }
 
 func (c *StoreReconciler) reportHardLimitedPresets(snapshot *prebuilds.GlobalSnapshot) {
@@ -378,14 +516,55 @@ func (c *StoreReconciler) reportHardLimitedPresets(snapshot *prebuilds.GlobalSna
 	c.metrics.registerHardLimitedPresets(isPresetHardLimited)
 }
 
+func (c *StoreReconciler) reportValidationFailedPresets(snapshot *prebuilds.GlobalSnapshot) {
+	// presetsMap is a map from key (orgName:templateName:presetName) to list of corresponding presets.
+	// Multiple versions of a preset can exist with the same orgName, templateName, and presetName,
+	// because templates can have multiple versions - or deleted templates can share the same name.
+	presetsMap := make(map[hardLimitedPresetKey][]database.GetTemplatePresetsWithPrebuildsRow)
+	for _, preset := range snapshot.Presets {
+		key := hardLimitedPresetKey{
+			orgName:      preset.OrganizationName,
+			templateName: preset.TemplateName,
+			presetName:   preset.Name,
+		}
+
+		presetsMap[key] = append(presetsMap[key], preset)
+	}
+
+	// Report a preset as validation-failed only if all the following conditions are met:
+	// - The preset has PrebuildStatus == PrebuildStatusValidationFailed
+	// - The preset is using the active version of its template, and the template has not been deleted
+	//
+	// The second condition is important because a validation-failed preset that has become outdated is no longer relevant.
+	// Its associated prebuilt workspaces were likely deleted, and it's not meaningful to continue reporting it
+	// as validation-failed to the admin.
+	isPresetValidationFailed := make(map[hardLimitedPresetKey]bool)
+	for key, presets := range presetsMap {
+		for _, preset := range presets {
+			if preset.UsingActiveVersion && !preset.Deleted &&
+				preset.PrebuildStatus == database.PrebuildStatusValidationFailed {
+				isPresetValidationFailed[key] = true
+				break
+			}
+		}
+	}
+
+	c.metrics.registerValidationFailedPresets(isPresetValidationFailed)
+}
+
 // SnapshotState captures the current state of all prebuilds across templates.
 func (c *StoreReconciler) SnapshotState(ctx context.Context, store database.Store) (*prebuilds.GlobalSnapshot, error) {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.SnapshotState")
+	defer span.End()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	var state prebuilds.GlobalSnapshot
 
+	// If called with a store that is already in a transaction,
+	// InTx will reuse that transaction rather than creating a new one.
 	err := store.InTx(func(db database.Store) error {
 		// TODO: implement template-specific reconciliations later
 		presetsWithPrebuilds, err := db.GetTemplatePresetsWithPrebuilds(ctx, uuid.NullUUID{})
@@ -412,6 +591,11 @@ func (c *StoreReconciler) SnapshotState(ctx context.Context, store database.Stor
 			return xerrors.Errorf("failed to get prebuilds in progress: %w", err)
 		}
 
+		allPendingPrebuilds, err := db.CountPendingNonActivePrebuilds(ctx)
+		if err != nil {
+			return xerrors.Errorf("failed to get pending prebuilds: %w", err)
+		}
+
 		presetsBackoff, err := db.GetPresetsBackoff(ctx, c.clock.Now().Add(-c.cfg.ReconciliationBackoffLookback.Value()))
 		if err != nil {
 			return xerrors.Errorf("failed to get backoffs for presets: %w", err)
@@ -427,6 +611,7 @@ func (c *StoreReconciler) SnapshotState(ctx context.Context, store database.Stor
 			presetPrebuildSchedules,
 			allRunningPrebuilds,
 			allPrebuildsInProgress,
+			allPendingPrebuilds,
 			presetsBackoff,
 			hardLimitedPresets,
 			c.clock,
@@ -436,13 +621,21 @@ func (c *StoreReconciler) SnapshotState(ctx context.Context, store database.Stor
 	}, &database.TxOptions{
 		Isolation:    sql.LevelRepeatableRead, // This mirrors the MVCC snapshotting Postgres does when using CTEs
 		ReadOnly:     true,
-		TxIdentifier: "prebuilds_state_determination",
+		TxIdentifier: "prebuilds.SnapshotState",
 	})
 
 	return &state, err
 }
 
 func (c *StoreReconciler) ReconcilePreset(ctx context.Context, ps prebuilds.PresetSnapshot) error {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.ReconcilePreset", trace.WithAttributes(
+		attribute.String("preset_id", ps.Preset.ID.String()),
+		attribute.String("preset_name", ps.Preset.Name),
+		attribute.String("template_id", ps.Preset.TemplateID.String()),
+		attribute.String("template_name", ps.Preset.TemplateName),
+	))
+	defer span.End()
+
 	logger := c.logger.With(
 		slog.F("template_id", ps.Preset.TemplateID.String()),
 		slog.F("template_name", ps.Preset.TemplateName),
@@ -474,7 +667,7 @@ func (c *StoreReconciler) ReconcilePreset(ctx context.Context, ps prebuilds.Pres
 		return err
 	}
 
-	fields := []any{
+	fields := []slog.Field{
 		slog.F("desired", state.Desired), slog.F("actual", state.Actual),
 		slog.F("extraneous", state.Extraneous), slog.F("starting", state.Starting),
 		slog.F("stopping", state.Stopping), slog.F("deleting", state.Deleting),
@@ -488,7 +681,7 @@ func (c *StoreReconciler) ReconcilePreset(ctx context.Context, ps prebuilds.Pres
 	for _, action := range actions {
 		err = c.executeReconciliationAction(ctx, logger, ps, action)
 		if err != nil {
-			logger.Error(ctx, "failed to execute action", "type", action.ActionType, slog.Error(err))
+			logger.Error(ctx, "failed to execute action", slog.F("type", action.ActionType), slog.Error(err))
 			multiErr.Errors = append(multiErr.Errors, err)
 		}
 	}
@@ -508,6 +701,9 @@ func (c *StoreReconciler) WithReconciliationLock(
 	logger slog.Logger,
 	fn func(ctx context.Context, db database.Store) error,
 ) error {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.WithReconciliationLock")
+	defer span.End()
+
 	// This tx holds a global lock, which prevents any other coderd replica from starting a reconciliation and
 	// possibly getting an inconsistent view of the state.
 	//
@@ -528,8 +724,10 @@ func (c *StoreReconciler) WithReconciliationLock(
 		}
 		if !acquired {
 			// Normal case: another replica has the lock
+			span.SetAttributes(attribute.Bool("lock_acquired", false))
 			return nil
 		}
+		span.SetAttributes(attribute.Bool("lock_acquired", true))
 
 		logger.Debug(ctx,
 			"acquired top-level reconciliation lock",
@@ -540,7 +738,7 @@ func (c *StoreReconciler) WithReconciliationLock(
 	}, &database.TxOptions{
 		Isolation:    sql.LevelRepeatableRead,
 		ReadOnly:     true,
-		TxIdentifier: "prebuilds",
+		TxIdentifier: "prebuilds.WithReconciliationLock",
 	})
 }
 
@@ -553,6 +751,13 @@ func (c *StoreReconciler) WithReconciliationLock(
 // This method handles logging at appropriate levels and performs the necessary operations
 // according to the action type. It returns an error if any part of the action fails.
 func (c *StoreReconciler) executeReconciliationAction(ctx context.Context, logger slog.Logger, ps prebuilds.PresetSnapshot, action *prebuilds.ReconciliationActions) error {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.executeReconciliationAction", trace.WithAttributes(
+		attribute.Int("action_type", int(action.ActionType)),
+		attribute.Int("create_count", int(action.Create)),
+		attribute.Int("delete_count", len(action.DeleteIDs)),
+	))
+	defer span.End()
+
 	levelFn := logger.Debug
 
 	// Nothing has to be done.
@@ -567,7 +772,7 @@ func (c *StoreReconciler) executeReconciliationAction(ctx context.Context, logge
 	// nolint:gocritic // ReconcilePreset needs Prebuilds Orchestrator permissions.
 	prebuildsCtx := dbauthz.AsPrebuildsOrchestrator(ctx)
 
-	fields := []any{
+	fields := []slog.Field{
 		slog.F("action_type", action.ActionType), slog.F("create_count", action.Create),
 		slog.F("delete_count", len(action.DeleteIDs)), slog.F("to_delete", action.DeleteIDs),
 	}
@@ -580,6 +785,8 @@ func (c *StoreReconciler) executeReconciliationAction(ctx context.Context, logge
 	case action.ActionType == prebuilds.ActionTypeCreate && action.Create > 0:
 		levelFn = logger.Info
 	case action.ActionType == prebuilds.ActionTypeDelete && len(action.DeleteIDs) > 0:
+		levelFn = logger.Info
+	case action.ActionType == prebuilds.ActionTypeCancelPending:
 		levelFn = logger.Info
 	}
 
@@ -614,11 +821,37 @@ func (c *StoreReconciler) executeReconciliationAction(ctx context.Context, logge
 			return nil
 		}
 
+		// If preset previously failed validation (e.g. missing required parameter,
+		// invalid workspace tags), skip creation until the template version is updated.
+		// The status resets naturally when a new template version is promoted, since
+		// new presets are created with the default 'healthy' status.
+		if ps.Preset.PrebuildStatus == database.PrebuildStatusValidationFailed && action.Create > 0 {
+			logger.Warn(ctx, "skipping preset with validation failure for create operation")
+			return nil
+		}
+
 		var multiErr multierror.Error
 		for range action.Create {
 			if err := c.createPrebuiltWorkspace(prebuildsCtx, uuid.New(), ps.Preset.TemplateID, ps.Preset.ID); err != nil {
 				logger.Error(ctx, "failed to create prebuild", slog.Error(err))
 				multiErr.Errors = append(multiErr.Errors, err)
+
+				// A 400 BuildError means the build failed due to a validation error
+				// (e.g. missing parameter, invalid workspace tags). These errors are
+				// deterministic and will persist until the template is updated, so we
+				// mark the preset to prevent endless retries on every reconciliation loop.
+				var buildErr wsbuilder.BuildError
+				if xerrors.As(err, &buildErr) && buildErr.Status == http.StatusBadRequest {
+					logger.Warn(ctx, "marking preset as failed validation")
+					if dbErr := c.store.UpdatePresetPrebuildStatus(ctx, database.UpdatePresetPrebuildStatusParams{
+						Status:   database.PrebuildStatusValidationFailed,
+						PresetID: ps.Preset.ID,
+					}); dbErr != nil {
+						logger.Error(ctx, "failed to update preset prebuild status", slog.Error(dbErr))
+					}
+					// All prebuilds for this preset will fail the same way, so stop trying.
+					break
+				}
 			}
 		}
 
@@ -635,18 +868,29 @@ func (c *StoreReconciler) executeReconciliationAction(ctx context.Context, logge
 
 		return multiErr.ErrorOrNil()
 
+	case prebuilds.ActionTypeCancelPending:
+		return c.cancelAndOrphanDeletePendingPrebuilds(ctx, ps.Preset.TemplateID, ps.Preset.TemplateVersionID, ps.Preset.ID)
+
 	default:
 		return xerrors.Errorf("unknown action type: %v", action.ActionType)
 	}
 }
 
 func (c *StoreReconciler) createPrebuiltWorkspace(ctx context.Context, prebuiltWorkspaceID uuid.UUID, templateID uuid.UUID, presetID uuid.UUID) error {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.createPrebuiltWorkspace", trace.WithAttributes(
+		attribute.String("prebuild_id", prebuiltWorkspaceID.String()),
+		attribute.String("template_id", templateID.String()),
+		attribute.String("preset_id", presetID.String()),
+	))
+	defer span.End()
+
 	name, err := prebuilds.GenerateName()
 	if err != nil {
 		return xerrors.Errorf("failed to generate unique prebuild ID: %w", err)
 	}
 
-	return c.store.InTx(func(db database.Store) error {
+	var provisionerJob *database.ProvisionerJob
+	err = c.store.InTx(func(db database.Store) error {
 		template, err := db.GetTemplateByID(ctx, templateID)
 		if err != nil {
 			return xerrors.Errorf("failed to get template: %w", err)
@@ -681,37 +925,157 @@ func (c *StoreReconciler) createPrebuiltWorkspace(ctx context.Context, prebuiltW
 		c.logger.Info(ctx, "attempting to create prebuild", slog.F("name", name),
 			slog.F("workspace_id", prebuiltWorkspaceID.String()), slog.F("preset_id", presetID.String()))
 
-		return c.provision(ctx, db, prebuiltWorkspaceID, template, presetID, database.WorkspaceTransitionStart, workspace)
+		provisionerJob, err = c.provision(ctx, db, prebuiltWorkspaceID, template, presetID, database.WorkspaceTransitionStart, workspace, DeprovisionModeNormal)
+		return err
 	}, &database.TxOptions{
-		Isolation: sql.LevelRepeatableRead,
-		ReadOnly:  false,
+		Isolation:    sql.LevelRepeatableRead,
+		ReadOnly:     false,
+		TxIdentifier: "prebuilds.createPrebuiltWorkspace",
 	})
+	if err != nil {
+		return err
+	}
+
+	// Publish provisioner job event to notify the acquirer that a new job was posted
+	c.publishProvisionerJob(ctx, provisionerJob, prebuiltWorkspaceID)
+
+	return nil
+}
+
+// provisionDelete provisions a delete transition for a prebuilt workspace.
+//
+// If mode is DeprovisionModeOrphan, the builder will not send Terraform state to the provisioner.
+// This allows the workspace to be deleted even when no provisioners are available, and is safe
+// when no Terraform resources were actually created (e.g., for pending prebuilds that were canceled
+// before provisioning started).
+//
+// IMPORTANT: This function must be called within a database transaction. It does not create its own transaction.
+// The caller is responsible for managing the transaction boundary via db.InTx().
+func (c *StoreReconciler) provisionDelete(ctx context.Context, db database.Store, workspaceID uuid.UUID, templateID uuid.UUID, presetID uuid.UUID, mode DeprovisionMode) (*database.ProvisionerJob, error) {
+	workspace, err := db.GetWorkspaceByID(ctx, workspaceID)
+	if err != nil {
+		return nil, xerrors.Errorf("get workspace by ID: %w", err)
+	}
+
+	template, err := db.GetTemplateByID(ctx, templateID)
+	if err != nil {
+		return nil, xerrors.Errorf("failed to get template: %w", err)
+	}
+
+	if workspace.OwnerID != database.PrebuildsSystemUserID {
+		return nil, xerrors.Errorf("prebuilt workspace is not owned by prebuild user anymore, probably it was claimed")
+	}
+
+	c.logger.Info(ctx, "attempting to delete prebuild", slog.F("orphan", mode.String()),
+		slog.F("name", workspace.Name), slog.F("workspace_id", workspaceID.String()), slog.F("preset_id", presetID.String()))
+
+	return c.provision(ctx, db, workspaceID, template, presetID, database.WorkspaceTransitionDelete, workspace, mode)
+}
+
+// cancelAndOrphanDeletePendingPrebuilds cancels pending prebuild jobs from inactive template versions
+// and orphan-deletes their associated workspaces.
+//
+// The cancel operation uses a criteria-based update to ensure only jobs that are still pending at
+// execution time are canceled, avoiding race conditions where jobs may have transitioned to running.
+//
+// Since these jobs were never processed by a provisioner, no Terraform resources were created,
+// making it safe to orphan-delete the workspaces (skipping Terraform destroy).
+func (c *StoreReconciler) cancelAndOrphanDeletePendingPrebuilds(ctx context.Context, templateID uuid.UUID, templateVersionID uuid.UUID, presetID uuid.UUID) error {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.cancelAndOrphanDeletePendingPrebuilds", trace.WithAttributes(
+		attribute.String("template_id", templateID.String()),
+		attribute.String("template_version_id", templateVersionID.String()),
+		attribute.String("preset_id", presetID.String()),
+	))
+	defer span.End()
+
+	var canceledProvisionerJob *database.ProvisionerJob
+	var canceledWorkspaceID uuid.UUID
+	err := c.store.InTx(func(db database.Store) error {
+		canceledJobs, err := db.UpdatePrebuildProvisionerJobWithCancel(
+			ctx,
+			database.UpdatePrebuildProvisionerJobWithCancelParams{
+				Now: c.clock.Now(),
+				PresetID: uuid.NullUUID{
+					UUID:  presetID,
+					Valid: true,
+				},
+			})
+		if err != nil {
+			c.logger.Error(ctx, "failed to cancel pending prebuild jobs",
+				slog.F("template_id", templateID.String()),
+				slog.F("template_version_id", templateVersionID.String()),
+				slog.F("preset_id", presetID.String()),
+				slog.Error(err))
+			return err
+		}
+
+		if len(canceledJobs) > 0 {
+			c.logger.Info(ctx, "canceled pending prebuild jobs for inactive version",
+				slog.F("template_id", templateID.String()),
+				slog.F("template_version_id", templateVersionID.String()),
+				slog.F("preset_id", presetID.String()),
+				slog.F("count", len(canceledJobs)))
+		}
+
+		var multiErr multierror.Error
+		for _, job := range canceledJobs {
+			provisionerJob, err := c.provisionDelete(ctx, db, job.WorkspaceID, job.TemplateID, presetID, DeprovisionModeOrphan)
+			if err != nil {
+				c.logger.Error(ctx, "failed to orphan delete canceled prebuild",
+					slog.F("workspace_id", job.WorkspaceID.String()), slog.Error(err))
+				multiErr.Errors = append(multiErr.Errors, err)
+			} else if canceledProvisionerJob == nil {
+				canceledProvisionerJob = provisionerJob
+				canceledWorkspaceID = job.WorkspaceID
+			}
+		}
+
+		return multiErr.ErrorOrNil()
+	}, &database.TxOptions{
+		Isolation:    sql.LevelRepeatableRead,
+		ReadOnly:     false,
+		TxIdentifier: "prebuilds.cancelAndOrphanDeletePendingPrebuilds",
+	})
+	if err != nil {
+		return err
+	}
+
+	// Job event notifications contain organization, provisioner type, and tags.
+	// Since all canceled jobs have the same values, we only send one notification
+	// for the first successfully canceled job, which is sufficient to trigger the
+	// provisioner chain that processes all remaining jobs.
+	if canceledProvisionerJob != nil {
+		c.publishProvisionerJob(ctx, canceledProvisionerJob, canceledWorkspaceID)
+	}
+
+	return nil
 }
 
 func (c *StoreReconciler) deletePrebuiltWorkspace(ctx context.Context, prebuiltWorkspaceID uuid.UUID, templateID uuid.UUID, presetID uuid.UUID) error {
-	return c.store.InTx(func(db database.Store) error {
-		workspace, err := db.GetWorkspaceByID(ctx, prebuiltWorkspaceID)
-		if err != nil {
-			return xerrors.Errorf("get workspace by ID: %w", err)
-		}
+	ctx, span := c.tracer.Start(ctx, "prebuilds.deletePrebuiltWorkspace", trace.WithAttributes(
+		attribute.String("prebuild_id", prebuiltWorkspaceID.String()),
+		attribute.String("template_id", templateID.String()),
+		attribute.String("preset_id", presetID.String()),
+	))
+	defer span.End()
 
-		template, err := db.GetTemplateByID(ctx, templateID)
-		if err != nil {
-			return xerrors.Errorf("failed to get template: %w", err)
-		}
-
-		if workspace.OwnerID != database.PrebuildsSystemUserID {
-			return xerrors.Errorf("prebuilt workspace is not owned by prebuild user anymore, probably it was claimed")
-		}
-
-		c.logger.Info(ctx, "attempting to delete prebuild",
-			slog.F("workspace_id", prebuiltWorkspaceID.String()), slog.F("preset_id", presetID.String()))
-
-		return c.provision(ctx, db, prebuiltWorkspaceID, template, presetID, database.WorkspaceTransitionDelete, workspace)
+	var provisionerJob *database.ProvisionerJob
+	err := c.store.InTx(func(db database.Store) (err error) {
+		provisionerJob, err = c.provisionDelete(ctx, db, prebuiltWorkspaceID, templateID, presetID, DeprovisionModeNormal)
+		return err
 	}, &database.TxOptions{
-		Isolation: sql.LevelRepeatableRead,
-		ReadOnly:  false,
+		Isolation:    sql.LevelRepeatableRead,
+		ReadOnly:     false,
+		TxIdentifier: "prebuilds.deletePrebuiltWorkspace",
 	})
+	if err != nil {
+		return err
+	}
+
+	// Publish provisioner job event to notify the acquirer that a new job was posted
+	c.publishProvisionerJob(ctx, provisionerJob, prebuiltWorkspaceID)
+
+	return nil
 }
 
 func (c *StoreReconciler) provision(
@@ -722,10 +1086,21 @@ func (c *StoreReconciler) provision(
 	presetID uuid.UUID,
 	transition database.WorkspaceTransition,
 	workspace database.Workspace,
-) error {
+	mode DeprovisionMode,
+) (*database.ProvisionerJob, error) {
+	ctx, span := c.tracer.Start(ctx, "prebuilds.provision", trace.WithAttributes(
+		attribute.String("prebuild_id", prebuildID.String()),
+		attribute.String("template_id", template.ID.String()),
+		attribute.String("preset_id", presetID.String()),
+		attribute.String("transition", string(transition)),
+		attribute.String("workspace_id", workspace.ID.String()),
+		attribute.String("mode", mode.String()),
+	))
+	defer span.End()
+
 	tvp, err := db.GetPresetParametersByTemplateVersionID(ctx, template.ActiveVersionID)
 	if err != nil {
-		return xerrors.Errorf("fetch preset details: %w", err)
+		return nil, xerrors.Errorf("fetch preset details: %w", err)
 	}
 
 	var params []codersdk.WorkspaceBuildParameter
@@ -744,7 +1119,8 @@ func (c *StoreReconciler) provision(
 	builder := wsbuilder.New(workspace, transition, *c.buildUsageChecker.Load()).
 		Reason(database.BuildReasonInitiator).
 		Initiator(database.PrebuildsSystemUserID).
-		MarkPrebuild()
+		MarkPrebuild().
+		BuildMetrics(c.workspaceBuilderMetrics)
 
 	if transition != database.WorkspaceTransitionDelete {
 		// We don't specify the version for a delete transition,
@@ -759,8 +1135,17 @@ func (c *StoreReconciler) provision(
 		builder = builder.RichParameterValues(params)
 	}
 
+	// Use orphan mode for deletes when no Terraform resources exist
+	if transition == database.WorkspaceTransitionDelete && mode == DeprovisionModeOrphan {
+		builder = builder.Orphan()
+	}
+
+	// Strip trace context - provisionerd is a separate service and should
+	// start its own trace rather than continuing the prebuilds trace.
+	buildCtx := trace.ContextWithSpan(ctx, tracing.NoopSpan)
+
 	_, provisionerJob, _, err := builder.Build(
-		ctx,
+		buildCtx,
 		db,
 		c.fileCache,
 		func(_ policy.Action, _ rbac.Objecter) bool {
@@ -769,26 +1154,34 @@ func (c *StoreReconciler) provision(
 		audit.WorkspaceBuildBaggage{},
 	)
 	if err != nil {
-		return xerrors.Errorf("provision workspace: %w", err)
+		return nil, xerrors.Errorf("provision workspace: %w", err)
 	}
-
 	if provisionerJob == nil {
-		return nil
-	}
-
-	// Publish provisioner job event outside of transaction.
-	select {
-	case c.provisionNotifyCh <- *provisionerJob:
-	default: // channel full, drop the message; provisioner will pick this job up later with its periodic check, though.
-		c.logger.Warn(ctx, "provisioner job notification queue full, dropping",
-			slog.F("job_id", provisionerJob.ID), slog.F("prebuild_id", prebuildID.String()))
+		// This should not happen, builder.Build() should either return a job or an error.
+		// Returning an error to fail fast if we hit this unexpected case.
+		return nil, xerrors.Errorf("provision succeeded but returned no job")
 	}
 
 	c.logger.Info(ctx, "prebuild job scheduled", slog.F("transition", transition),
 		slog.F("prebuild_id", prebuildID.String()), slog.F("preset_id", presetID.String()),
 		slog.F("job_id", provisionerJob.ID))
 
-	return nil
+	return provisionerJob, nil
+}
+
+// publishProvisionerJob publishes a provisioner job event to notify the acquirer that a new job has been created.
+// This must be called after the database transaction that creates the job has committed to ensure
+// the job is visible to provisioners when they query the database.
+func (c *StoreReconciler) publishProvisionerJob(ctx context.Context, provisionerJob *database.ProvisionerJob, workspaceID uuid.UUID) {
+	if provisionerJob == nil {
+		return
+	}
+	select {
+	case c.provisionNotifyCh <- *provisionerJob:
+	default: // channel full, drop the message; provisioner will pick this job up later with its periodic check
+		c.logger.Warn(ctx, "provisioner job notification queue full, dropping",
+			slog.F("job_id", provisionerJob.ID), slog.F("prebuild_id", workspaceID.String()))
+	}
 }
 
 // ForceMetricsUpdate forces the metrics collector, if defined, to update its state (we cache the metrics state to

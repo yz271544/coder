@@ -73,11 +73,16 @@ const (
 	SubjectTypePrebuildsOrchestrator        SubjectType = "prebuilds_orchestrator"
 	SubjectTypeSystemReadProvisionerDaemons SubjectType = "system_read_provisioner_daemons"
 	SubjectTypeSystemRestricted             SubjectType = "system_restricted"
+	SubjectTypeSystemOAuth                  SubjectType = "system_oauth"
 	SubjectTypeNotifier                     SubjectType = "notifier"
 	SubjectTypeSubAgentAPI                  SubjectType = "sub_agent_api"
 	SubjectTypeFileReader                   SubjectType = "file_reader"
 	SubjectTypeUsagePublisher               SubjectType = "usage_publisher"
 	SubjectAibridged                        SubjectType = "aibridged"
+	SubjectTypeDBPurge                      SubjectType = "dbpurge"
+	SubjectTypeBoundaryUsageTracker         SubjectType = "boundary_usage_tracker"
+	SubjectTypeWorkspaceBuilder             SubjectType = "workspace_builder"
+	SubjectTypeChatd                        SubjectType = "chatd"
 )
 
 const (
@@ -290,6 +295,15 @@ func NewStrictCachingAuthorizer(registry prometheus.Registerer) Authorizer {
 	auth := NewAuthorizer(registry)
 	auth.strict = true
 	return Cacher(auth)
+}
+
+// NewStrictAuthorizer is for testing only. It skips the caching layer,
+// which is useful when every authorize call is unique (0% cache hit
+// rate) and the cache overhead dominates.
+func NewStrictAuthorizer(registry prometheus.Registerer) Authorizer {
+	auth := NewAuthorizer(registry)
+	auth.strict = true
+	return auth
 }
 
 func NewAuthorizer(registry prometheus.Registerer) *RegoAuthorizer {
@@ -674,6 +688,15 @@ func ConfigWithoutACL() regosql.ConvertConfig {
 	}
 }
 
+// ConfigChats is the configuration for converting rego to SQL when
+// the target table is "chats", which has no ACL
+// columns.
+func ConfigChats() regosql.ConvertConfig {
+	return regosql.ConvertConfig{
+		VariableConverter: regosql.NoACLConverter(),
+	}
+}
+
 func ConfigWorkspaces() regosql.ConvertConfig {
 	return regosql.ConvertConfig{
 		VariableConverter: regosql.WorkspaceConverter(),
@@ -710,7 +733,7 @@ func (a *authorizedSQLFilter) SQLString() string {
 type authCache struct {
 	// cache is a cache of hashed Authorize inputs to the result of the Authorize
 	// call.
-	// determistic function.
+	// deterministic function.
 	cache *tlru.Cache[[32]byte, error]
 
 	authz Authorizer

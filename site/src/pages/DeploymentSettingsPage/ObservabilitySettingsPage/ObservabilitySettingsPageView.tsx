@@ -1,26 +1,25 @@
-import type { SerpentOption } from "api/typesGenerated";
+import type { FC } from "react";
+import type { SerpentOption } from "#/api/typesGenerated";
 import {
 	Badges,
 	EnterpriseBadge,
 	PremiumBadge,
-} from "components/Badges/Badges";
-import { PopoverPaywall } from "components/Paywall/PopoverPaywall";
+} from "#/components/Badges/Badges";
+import { PopoverPaywall } from "#/components/Paywall/PopoverPaywall";
 import {
 	SettingsHeader,
 	SettingsHeaderDescription,
 	SettingsHeaderDocsLink,
 	SettingsHeaderTitle,
-} from "components/SettingsHeader/SettingsHeader";
-import { Stack } from "components/Stack/Stack";
+} from "#/components/SettingsHeader/SettingsHeader";
+import { Stack } from "#/components/Stack/Stack";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import type { FC } from "react";
-import { deploymentGroupHasParent } from "utils/deployOptions";
-import { docs } from "utils/docs";
+} from "#/components/Tooltip/Tooltip";
+import { deploymentGroupHasParent } from "#/utils/deployOptions";
+import { docs } from "#/utils/docs";
 import OptionsTable from "../OptionsTable";
 
 type ObservabilitySettingsPageViewProps = {
@@ -53,31 +52,29 @@ export const ObservabilitySettingsPageView: FC<
 				</SettingsHeader>
 
 				<Badges>
-					<TooltipProvider>
-						<Tooltip delayDuration={0}>
-							{featureAuditLogEnabled && !isPremium ? (
-								<EnterpriseBadge />
-							) : (
-								<TooltipTrigger asChild>
-									<span>
-										<PremiumBadge />
-									</span>
-								</TooltipTrigger>
-							)}
+					<Tooltip>
+						{featureAuditLogEnabled && !isPremium ? (
+							<EnterpriseBadge />
+						) : (
+							<TooltipTrigger asChild>
+								<span>
+									<PremiumBadge />
+								</span>
+							</TooltipTrigger>
+						)}
 
-							<TooltipContent
-								sideOffset={-28}
-								collisionPadding={16}
-								className="p-0"
-							>
-								<PopoverPaywall
-									message="Observability"
-									description="With a Premium license, you can monitor your application with logs and metrics."
-									documentationLink="https://coder.com/docs/admin/appearance"
-								/>
-							</TooltipContent>
-						</Tooltip>
-					</TooltipProvider>
+						<TooltipContent
+							sideOffset={-28}
+							collisionPadding={16}
+							className="p-0"
+						>
+							<PopoverPaywall
+								message="Observability"
+								description="With a Premium license, you can monitor your application with logs and metrics."
+								documentationLink={docs("/admin/monitoring")}
+							/>
+						</TooltipContent>
+					</Tooltip>
 				</Badges>
 			</div>
 

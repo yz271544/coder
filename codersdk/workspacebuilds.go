@@ -19,6 +19,10 @@ const (
 	WorkspaceTransitionDelete WorkspaceTransition = "delete"
 )
 
+func WorkspaceTransitionEnums() []WorkspaceTransition {
+	return []WorkspaceTransition{WorkspaceTransitionStart, WorkspaceTransitionStop, WorkspaceTransitionDelete}
+}
+
 type WorkspaceStatus string
 
 const (
@@ -59,6 +63,15 @@ const (
 	BuildReasonVSCodeConnection BuildReason = "vscode_connection"
 	// BuildReasonJetbrainsConnection "jetbrains_connection" is used when a build to start a workspace is triggered by a JetBrains connection.
 	BuildReasonJetbrainsConnection BuildReason = "jetbrains_connection"
+	// BuildReasonTaskAutoPause "task_auto_pause" is used when a build to stop
+	// a task workspace is triggered by the lifecycle executor.
+	BuildReasonTaskAutoPause BuildReason = "task_auto_pause"
+	// BuildReasonTaskManualPause "task_manual_pause" is used when a build to
+	// stop a task workspace is triggered by a user.
+	BuildReasonTaskManualPause BuildReason = "task_manual_pause"
+	// BuildReasonTaskResume "task_resume" is used when a build to
+	// start a task workspace is triggered by a user.
+	BuildReasonTaskResume BuildReason = "task_resume"
 )
 
 // WorkspaceBuild is an at-point representation of a workspace state.
@@ -88,9 +101,9 @@ type WorkspaceBuild struct {
 	DailyCost               int32                `json:"daily_cost"`
 	MatchedProvisioners     *MatchedProvisioners `json:"matched_provisioners,omitempty"`
 	TemplateVersionPresetID *uuid.UUID           `json:"template_version_preset_id" format:"uuid"`
-	HasAITask               *bool                `json:"has_ai_task,omitempty"`
-	AITaskSidebarAppID      *uuid.UUID           `json:"ai_task_sidebar_app_id,omitempty" format:"uuid"`
-	HasExternalAgent        *bool                `json:"has_external_agent,omitempty"`
+	// Deprecated: This field has been deprecated in favor of Task WorkspaceID.
+	HasAITask        *bool `json:"has_ai_task,omitempty"`
+	HasExternalAgent *bool `json:"has_external_agent,omitempty"`
 }
 
 // WorkspaceResource describes resources used to create a workspace, for instance:
@@ -186,6 +199,28 @@ func (c *Client) WorkspaceBuildState(ctx context.Context, build uuid.UUID) ([]by
 		return nil, ReadBodyAsError(res)
 	}
 	return io.ReadAll(res.Body)
+}
+
+// UpdateWorkspaceBuildStateRequest is the request body for updating the
+// provisioner state of a workspace build.
+type UpdateWorkspaceBuildStateRequest struct {
+	State []byte `json:"state"`
+}
+
+// UpdateWorkspaceBuildState updates the provisioner state of the build without
+// triggering a new build. This is useful for state-only migrations.
+func (c *Client) UpdateWorkspaceBuildState(ctx context.Context, build uuid.UUID, state []byte) error {
+	res, err := c.Request(ctx, http.MethodPut, fmt.Sprintf("/api/v2/workspacebuilds/%s/state", build), UpdateWorkspaceBuildStateRequest{
+		State: state,
+	})
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusNoContent {
+		return ReadBodyAsError(res)
+	}
+	return nil
 }
 
 func (c *Client) WorkspaceBuildByUsernameAndWorkspaceNameAndBuildNumber(ctx context.Context, username string, workspaceName string, buildNumber string) (WorkspaceBuild, error) {

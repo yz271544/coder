@@ -15,9 +15,11 @@ SUBCOMMANDS:
 
 OPTIONS:
       --allow-workspace-renames bool, $CODER_ALLOW_WORKSPACE_RENAMES (default: false)
-          DEPRECATED: Allow users to rename their workspaces. Use only for
-          temporary compatibility reasons, this will be removed in a future
-          release.
+          Allow users to rename their workspaces. WARNING: Renaming a workspace
+          can cause Terraform resources that depend on the workspace name to be
+          destroyed and recreated, potentially causing data loss. Only enable
+          this if your templates do not use workspace names in resource
+          identifiers, or if you understand the risks.
 
       --cache-dir string, $CODER_CACHE_DIRECTORY (default: [cache dir])
           The directory to cache temporary files. If unspecified and
@@ -46,6 +48,12 @@ OPTIONS:
           the workspace serves malicious JavaScript. This is recommended for
           security purposes if a --wildcard-access-url is configured.
 
+      --disable-workspace-sharing bool, $CODER_DISABLE_WORKSPACE_SHARING
+          Disable workspace sharing. Workspace ACL checking is disabled and only
+          owners can have ssh, apps and terminal access to workspaces. Access
+          based on the 'owner' role is also allowed unless disabled via
+          --disable-owner-workspace-access.
+
       --swagger-enable bool, $CODER_SWAGGER_ENABLE
           Expose the swagger endpoint via /swagger.
 
@@ -54,9 +62,20 @@ OPTIONS:
           Separate multiple experiments with commas, or enter '*' to opt-in to
           all available experiments.
 
+      --external-auth-github-default-provider-enable bool, $CODER_EXTERNAL_AUTH_GITHUB_DEFAULT_PROVIDER_ENABLE (default: true)
+          Enable the default GitHub external auth provider managed by Coder.
+
       --postgres-auth password|awsiamrds, $CODER_PG_AUTH (default: password)
           Type of auth to use when connecting to postgres. For AWS RDS, using
           IAM authentication (awsiamrds) is recommended.
+
+      --postgres-conn-max-idle string, $CODER_PG_CONN_MAX_IDLE (default: auto)
+          Maximum number of idle connections to the database. Set to "auto" (the
+          default) to use max open / 3. Value must be greater or equal to 0; 0
+          means explicitly no idle connections.
+
+      --postgres-conn-max-open int, $CODER_PG_CONN_MAX_OPEN (default: 10)
+          Maximum number of open connections to the database. Defaults to 10.
 
       --postgres-url string, $CODER_PG_CONNECTION_URL
           URL of a PostgreSQL database. If empty, PostgreSQL binaries will be
@@ -80,6 +99,125 @@ OPTIONS:
           Periodically check for new releases of Coder and inform the owner. The
           check is performed once per day.
 
+AI BRIDGE OPTIONS: 
+      --aibridge-anthropic-base-url string, $CODER_AIBRIDGE_ANTHROPIC_BASE_URL (default: https://api.anthropic.com/)
+          The base URL of the Anthropic API.
+
+      --aibridge-anthropic-key string, $CODER_AIBRIDGE_ANTHROPIC_KEY
+          The key to authenticate against the Anthropic API.
+
+      --aibridge-bedrock-access-key string, $CODER_AIBRIDGE_BEDROCK_ACCESS_KEY
+          The access key to authenticate against the AWS Bedrock API.
+
+      --aibridge-bedrock-access-key-secret string, $CODER_AIBRIDGE_BEDROCK_ACCESS_KEY_SECRET
+          The access key secret to use with the access key to authenticate
+          against the AWS Bedrock API.
+
+      --aibridge-bedrock-base-url string, $CODER_AIBRIDGE_BEDROCK_BASE_URL
+          The base URL to use for the AWS Bedrock API. Use this setting to
+          specify an exact URL to use. Takes precedence over
+          CODER_AIBRIDGE_BEDROCK_REGION.
+
+      --aibridge-bedrock-model string, $CODER_AIBRIDGE_BEDROCK_MODEL (default: global.anthropic.claude-sonnet-4-5-20250929-v1:0)
+          The model to use when making requests to the AWS Bedrock API.
+
+      --aibridge-bedrock-region string, $CODER_AIBRIDGE_BEDROCK_REGION
+          The AWS Bedrock API region to use. Constructs a base URL to use for
+          the AWS Bedrock API in the form of
+          'https://bedrock-runtime.<region>.amazonaws.com'.
+
+      --aibridge-bedrock-small-fastmodel string, $CODER_AIBRIDGE_BEDROCK_SMALL_FAST_MODEL (default: global.anthropic.claude-haiku-4-5-20251001-v1:0)
+          The small fast model to use when making requests to the AWS Bedrock
+          API. Claude Code uses Haiku-class models to perform background tasks.
+          See
+          https://docs.claude.com/en/docs/claude-code/settings#environment-variables.
+
+      --aibridge-circuit-breaker-enabled bool, $CODER_AIBRIDGE_CIRCUIT_BREAKER_ENABLED (default: false)
+          Enable the circuit breaker to protect against cascading failures from
+          upstream AI provider rate limits (429, 503, 529 overloaded).
+
+      --aibridge-retention duration, $CODER_AIBRIDGE_RETENTION (default: 60d)
+          Length of time to retain data such as interceptions and all related
+          records (token, prompt, tool use).
+
+      --aibridge-enabled bool, $CODER_AIBRIDGE_ENABLED (default: false)
+          Whether to start an in-memory aibridged instance.
+
+      --aibridge-max-concurrency int, $CODER_AIBRIDGE_MAX_CONCURRENCY (default: 0)
+          Maximum number of concurrent AI Bridge requests per replica. Set to 0
+          to disable (unlimited).
+
+      --aibridge-openai-base-url string, $CODER_AIBRIDGE_OPENAI_BASE_URL (default: https://api.openai.com/v1/)
+          The base URL of the OpenAI API.
+
+      --aibridge-openai-key string, $CODER_AIBRIDGE_OPENAI_KEY
+          The key to authenticate against the OpenAI API.
+
+      --aibridge-rate-limit int, $CODER_AIBRIDGE_RATE_LIMIT (default: 0)
+          Maximum number of AI Bridge requests per second per replica. Set to 0
+          to disable (unlimited).
+
+      --aibridge-send-actor-headers bool, $CODER_AIBRIDGE_SEND_ACTOR_HEADERS (default: false)
+          Once enabled, extra headers will be added to upstream requests to
+          identify the user (actor) making requests to AI Bridge. This is only
+          needed if you are using a proxy between AI Bridge and an upstream AI
+          provider. This will send X-Ai-Bridge-Actor-Id (the ID of the user
+          making the request) and X-Ai-Bridge-Actor-Metadata-Username (their
+          username).
+
+      --aibridge-structured-logging bool, $CODER_AIBRIDGE_STRUCTURED_LOGGING (default: false)
+          Emit structured logs for AI Bridge interception records. Use this for
+          exporting these records to external SIEM or observability systems.
+
+AI BRIDGE PROXY OPTIONS: 
+      --aibridge-proxy-allowed-private-cidrs string-array, $CODER_AIBRIDGE_PROXY_ALLOWED_PRIVATE_CIDRS
+          Comma-separated list of CIDR ranges that are permitted even though
+          they fall within blocked private/reserved IP ranges. By default all
+          private ranges are blocked to prevent SSRF attacks. Use this to allow
+          access to specific internal networks.
+
+      --aibridge-proxy-enabled bool, $CODER_AIBRIDGE_PROXY_ENABLED (default: false)
+          Enable the AI Bridge MITM Proxy for intercepting and decrypting AI
+          provider requests.
+
+      --aibridge-proxy-listen-addr string, $CODER_AIBRIDGE_PROXY_LISTEN_ADDR (default: :8888)
+          The address the AI Bridge Proxy will listen on.
+
+      --aibridge-proxy-cert-file string, $CODER_AIBRIDGE_PROXY_CERT_FILE
+          Path to the CA certificate file used to intercept (MITM) HTTPS traffic
+          from AI clients. This CA must be trusted by AI clients for the proxy
+          to decrypt their requests.
+
+      --aibridge-proxy-key-file string, $CODER_AIBRIDGE_PROXY_KEY_FILE
+          Path to the CA private key file used to intercept (MITM) HTTPS traffic
+          from AI clients.
+
+      --aibridge-proxy-tls-cert-file string, $CODER_AIBRIDGE_PROXY_TLS_CERT_FILE
+          Path to the TLS certificate file for the AI Bridge Proxy listener.
+          Must be set together with AI Bridge Proxy TLS Key File.
+
+      --aibridge-proxy-tls-key-file string, $CODER_AIBRIDGE_PROXY_TLS_KEY_FILE
+          Path to the TLS private key file for the AI Bridge Proxy listener.
+          Must be set together with AI Bridge Proxy TLS Certificate File.
+
+      --aibridge-proxy-upstream string, $CODER_AIBRIDGE_PROXY_UPSTREAM
+          URL of an upstream HTTP proxy to chain tunneled (non-allowlisted)
+          requests through. Format: http://[user:pass@]host:port or
+          https://[user:pass@]host:port.
+
+      --aibridge-proxy-upstream-ca string, $CODER_AIBRIDGE_PROXY_UPSTREAM_CA
+          Path to a PEM-encoded CA certificate to trust for the upstream proxy's
+          TLS connection. Only needed for HTTPS upstream proxies with
+          certificates not trusted by the system. If not provided, the system
+          certificate pool is used.
+
+CHAT OPTIONS: 
+Configure the background chat processing daemon.
+
+      --chat-debug-logging-enabled bool, $CODER_CHAT_DEBUG_LOGGING_ENABLED (default: false)
+          Force chat debug logging on for every chat, bypassing the runtime
+          admin and user opt-in settings.
+
 CLIENT OPTIONS: 
 These options change the behavior of how clients interact with the Coder.
 Clients include the Coder CLI, Coder Desktop, IDE extensions, and the web UI.
@@ -97,9 +235,6 @@ Clients include the Coder CLI, Coder Desktop, IDE extensions, and the web UI.
           Provide options in "key=value" or "key value" format separated by
           commas.Using this incorrectly can break SSH to your deployment, use
           cautiously.
-
-      --ssh-hostname-prefix string, $CODER_SSH_HOSTNAME_PREFIX (default: coder.)
-          The SSH deployment prefix is used in the Host of the ssh config.
 
       --web-terminal-renderer string, $CODER_WEB_TERMINAL_RENDERER (default: canvas)
           The renderer to use when opening a web terminal. Valid values are
@@ -218,6 +353,14 @@ INTROSPECTION / PROMETHEUS OPTIONS:
       --prometheus-enable bool, $CODER_PROMETHEUS_ENABLE
           Serve prometheus metrics on the address defined by prometheus address.
 
+INTROSPECTION / STATS COLLECTION / USAGE STATS OPTIONS: 
+      --stats-collection-usage-stats-enable bool, $CODER_STATS_COLLECTION_USAGE_STATS_ENABLE (default: true)
+          Enable the collection of application and workspace usage along with
+          the associated API endpoints and the template insights page. Disabling
+          this will also disable traffic and connection insights in the
+          deployment stats shown to admins in the bottom bar of the Coder UI,
+          and will prevent Prometheus collection of these values.
+
 INTROSPECTION / TRACING OPTIONS: 
       --trace-logs bool, $CODER_TRACE_LOGS
           Enables capturing of logs as events in traces. This is useful for
@@ -261,12 +404,18 @@ NETWORKING OPTIONS:
       --samesite-auth-cookie lax|none, $CODER_SAMESITE_AUTH_COOKIE (default: lax)
           Controls the 'SameSite' property is set on browser session cookies.
 
-      --secure-auth-cookie bool, $CODER_SECURE_AUTH_COOKIE
+      --secure-auth-cookie bool, $CODER_SECURE_AUTH_COOKIE (default: false)
           Controls if the 'Secure' property is set on browser session cookies.
 
       --wildcard-access-url string, $CODER_WILDCARD_ACCESS_URL
           Specifies the wildcard hostname to use for workspace applications in
           the form "*.example.com".
+
+      --host-prefix-cookie bool, $CODER_HOST_PREFIX_COOKIE (default: false)
+          Recommended to be enabled. Enables `__Host-` prefix for cookies to
+          guarantee they are only set by the right domain. This change is
+          disruptive to any workspaces built before release 2.31, requiring a
+          workspace restart.
 
 NETWORKING / DERP OPTIONS: 
 Most Coder deployments never have to think about DERP because all connections
@@ -651,6 +800,33 @@ updating, and deleting workspace resources.
       --provisioner-daemons int, $CODER_PROVISIONER_DAEMONS (default: 3)
           Number of provisioner daemons to create on start. If builds are stuck
           in queued state for a long time, consider increasing this.
+
+RETENTION OPTIONS: 
+Configure data retention policies for various database tables. Retention
+policies automatically purge old data to reduce database size and improve
+performance. Setting a retention duration to 0 disables automatic purging for
+that data type.
+
+      --api-keys-retention duration, $CODER_API_KEYS_RETENTION (default: 7d)
+          How long expired API keys are retained before being deleted. Keeping
+          expired keys allows the backend to return a more helpful error when a
+          user tries to use an expired key. Set to 0 to disable automatic
+          deletion of expired keys.
+
+      --audit-logs-retention duration, $CODER_AUDIT_LOGS_RETENTION (default: 0)
+          How long audit log entries are retained. Set to 0 to disable (keep
+          indefinitely). We advise keeping audit logs for at least a year, and
+          in accordance with your compliance requirements.
+
+      --connection-logs-retention duration, $CODER_CONNECTION_LOGS_RETENTION (default: 0)
+          How long connection log entries are retained. Set to 0 to disable
+          (keep indefinitely).
+
+      --workspace-agent-logs-retention duration, $CODER_WORKSPACE_AGENT_LOGS_RETENTION (default: 7d)
+          How long workspace agent logs are retained. Logs from non-latest
+          builds are deleted if the agent hasn't connected within this period.
+          Logs from the latest build are always retained. Set to 0 to disable
+          automatic deletion.
 
 TELEMETRY OPTIONS: 
 Telemetry is critical to our ability to improve Coder. We strip all personal

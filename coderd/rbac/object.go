@@ -3,6 +3,7 @@ package rbac
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
@@ -235,4 +236,20 @@ func (z Object) WithGroupACL(groups map[string][]policy.Action) Object {
 		ACLGroupList: groups,
 		AnyOrgOwner:  z.AnyOrgOwner,
 	}
+}
+
+// TODO(geokat): similar to builtInRoles, this should ideally be
+// scoped to a coderd rather than a global.
+var workspaceACLDisabled atomic.Bool
+
+// SetWorkspaceACLDisabled disables/enables workspace sharing for the
+// deployment.
+func SetWorkspaceACLDisabled(v bool) {
+	workspaceACLDisabled.Store(v)
+}
+
+// WorkspaceACLDisabled returns true if workspace sharing is disabled
+// for the deployment.
+func WorkspaceACLDisabled() bool {
+	return workspaceACLDisabled.Load()
 }

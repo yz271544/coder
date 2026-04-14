@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
+	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/enterprise/coderd/coderdenttest"
 	"github.com/coder/coder/v2/enterprise/coderd/license"
@@ -54,6 +55,56 @@ func TestPostLicense(t *testing.T) {
 		require.Contains(t, errResp.Message, "License cannot be used on this deployment!")
 	})
 
+	t.Run("InvalidAccountID", func(t *testing.T) {
+		t.Parallel()
+		// The generated deployment will start out with a different deployment ID.
+		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
+		license := coderdenttest.GenerateLicense(t, coderdenttest.LicenseOptions{
+			AllowEmpty: true,
+			AccountID:  "",
+		})
+		_, err := client.AddLicense(context.Background(), codersdk.AddLicenseRequest{
+			License: license,
+		})
+		errResp := &codersdk.Error{}
+		require.ErrorAs(t, err, &errResp)
+		require.Equal(t, http.StatusBadRequest, errResp.StatusCode())
+		require.Contains(t, errResp.Message, "Invalid license")
+	})
+
+	t.Run("InvalidAccountType", func(t *testing.T) {
+		t.Parallel()
+		// The generated deployment will start out with a different deployment ID.
+		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
+		license := coderdenttest.GenerateLicense(t, coderdenttest.LicenseOptions{
+			AllowEmpty:  true,
+			AccountType: "",
+		})
+		_, err := client.AddLicense(context.Background(), codersdk.AddLicenseRequest{
+			License: license,
+		})
+		errResp := &codersdk.Error{}
+		require.ErrorAs(t, err, &errResp)
+		require.Equal(t, http.StatusBadRequest, errResp.StatusCode())
+		require.Contains(t, errResp.Message, "Invalid license")
+	})
+
+	t.Run("InvalidLicenseExpires", func(t *testing.T) {
+		t.Parallel()
+		// The generated deployment will start out with a different deployment ID.
+		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
+		license := coderdenttest.GenerateLicense(t, coderdenttest.LicenseOptions{
+			GraceAt: time.Unix(99999999999, 0),
+		})
+		_, err := client.AddLicense(context.Background(), codersdk.AddLicenseRequest{
+			License: license,
+		})
+		errResp := &codersdk.Error{}
+		require.ErrorAs(t, err, &errResp)
+		require.Equal(t, http.StatusBadRequest, errResp.StatusCode())
+		require.Contains(t, errResp.Message, "Invalid license")
+	})
+
 	t.Run("Unauthorized", func(t *testing.T) {
 		t.Parallel()
 		client, _ := coderdenttest.New(t, &coderdenttest.Options{DontAddLicense: true})
@@ -95,7 +146,7 @@ func TestPostLicense(t *testing.T) {
 			Features: license.Features{
 				codersdk.FeatureAuditLog: 1,
 			},
-			NotBefore: time.Now().Add(time.Hour),
+			NotBefore: dbtime.Now().Add(time.Hour),
 			GraceAt:   time.Now().Add(2 * time.Hour),
 			ExpiresAt: time.Now().Add(3 * time.Hour),
 		})
@@ -118,7 +169,7 @@ func TestPostLicense(t *testing.T) {
 			Features: license.Features{
 				codersdk.FeatureAuditLog: 1,
 			},
-			NotBefore: time.Now().Add(time.Hour),
+			NotBefore: dbtime.Now().Add(time.Hour),
 			GraceAt:   time.Now().Add(2 * time.Hour),
 			ExpiresAt: time.Now().Add(-time.Hour),
 		})

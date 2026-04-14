@@ -67,10 +67,9 @@ curl -X GET http://coder-server:8080/api/v2/insights/templates?start_time=2019-0
 
 #### Enumerated Values
 
-| Parameter  | Value  |
-|------------|--------|
-| `interval` | `week` |
-| `interval` | `day`  |
+| Parameter  | Value(s)      |
+|------------|---------------|
+| `interval` | `day`, `week` |
 
 ### Example responses
 
@@ -267,7 +266,7 @@ To perform this operation, you must be authenticated. [Learn more](authenticatio
 
 ```shell
 # Example request using curl
-curl -X GET http://coder-server:8080/api/v2/insights/user-status-counts?tz_offset=0 \
+curl -X GET http://coder-server:8080/api/v2/insights/user-status-counts \
   -H 'Accept: application/json' \
   -H 'Coder-Session-Token: API_KEY'
 ```
@@ -276,9 +275,10 @@ curl -X GET http://coder-server:8080/api/v2/insights/user-status-counts?tz_offse
 
 ### Parameters
 
-| Name        | In    | Type    | Required | Description                |
-|-------------|-------|---------|----------|----------------------------|
-| `tz_offset` | query | integer | true     | Time-zone offset (e.g. -2) |
+| Name        | In    | Type    | Required | Description                                                   |
+|-------------|-------|---------|----------|---------------------------------------------------------------|
+| `timezone`  | query | string  | false    | IANA timezone name (e.g. America/St_Johns)                    |
+| `tz_offset` | query | integer | false    | Deprecated: Time-zone offset (e.g. -2). Use timezone instead. |
 
 ### Example responses
 

@@ -352,8 +352,6 @@ func TestScheduleOverride(t *testing.T) {
 			require.NoError(t, err, "invalid schedule")
 			ownerClient, _, _, ws := setupTestSchedule(t, sched)
 			now := time.Now()
-			// To avoid the likelihood of time-related flakes, only matching up to the hour.
-			expectedDeadline := now.In(loc).Add(10 * time.Hour).Format("2006-01-02T15:")
 
 			// When: we override the stop schedule
 			inv, root := clitest.New(t,
@@ -364,6 +362,19 @@ func TestScheduleOverride(t *testing.T) {
 			pty := ptytest.New(t).Attach(inv)
 			require.NoError(t, inv.Run())
 
+			// Fetch the workspace to get the actual deadline set by the
+			// server. Computing our own expected deadline from a separately
+			// captured time.Now() is racy: the CLI command calls time.Now()
+			// internally, and with the Asia/Kolkata +05:30 offset the hour
+			// boundary falls at :30 UTC minutes. A small delay between our
+			// time.Now() and the command's is enough to land in different
+			// hours.
+			updated, err := ownerClient.Workspace(context.Background(), ws[0].ID)
+			require.NoError(t, err)
+			require.False(t, updated.LatestBuild.Deadline.IsZero(), "deadline should be set after extend")
+			require.WithinDuration(t, now.Add(10*time.Hour), updated.LatestBuild.Deadline.Time, 5*time.Minute)
+			expectedDeadline := updated.LatestBuild.Deadline.Time.In(loc).Format(time.RFC3339)
+
 			// Then: the updated schedule should be shown
 			pty.ExpectMatch(ws[0].OwnerName + "/" + ws[0].Name)
 			pty.ExpectMatch(sched.Humanize())
@@ -372,4 +383,68 @@ func TestScheduleOverride(t *testing.T) {
 			pty.ExpectMatch(expectedDeadline)
 		})
 	}
+}
+
+//nolint:paralleltest // t.Setenv
+func TestScheduleStart_TemplateAutostartRequirement(t *testing.T) {
+	t.Setenv("TZ", "UTC")
+	loc, err := tz.TimezoneIANA()
+	require.NoError(t, err)
+	require.Equal(t, "UTC", loc.String())
+
+	client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
+	user := coderdtest.CreateFirstUser(t, client)
+
+	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, nil)
+	coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+	template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
+
+	// Update template to have autostart requirement
+	// Note: In AGPL, this will be ignored and all days will be allowed (enterprise feature).
+	template, err = client.UpdateTemplateMeta(context.Background(), template.ID, codersdk.UpdateTemplateMeta{
+		AutostartRequirement: &codersdk.TemplateAutostartRequirement{
+			DaysOfWeek: []string{"monday", "wednesday", "friday"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Verify the template - in AGPL, AutostartRequirement will have all days (enterprise feature)
+	template, err = client.Template(context.Background(), template.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, template.AutostartRequirement.DaysOfWeek, "template should have autostart requirement days")
+
+	workspace := coderdtest.CreateWorkspace(t, client, template.ID)
+	coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)
+
+	t.Run("ShowsWarning", func(t *testing.T) {
+		// When: user sets autostart schedule
+		inv, root := clitest.New(t,
+			"schedule", "start", workspace.Name, "9:30AM", "Mon-Fri",
+		)
+		clitest.SetupConfig(t, client, root)
+		pty := ptytest.New(t).Attach(inv)
+		require.NoError(t, inv.Run())
+
+		// Then: warning should be shown
+		// In AGPL, this will show all days (enterprise feature defaults to all days allowed)
+		pty.ExpectMatch("Warning")
+		pty.ExpectMatch("may only autostart")
+	})
+
+	t.Run("NoWarningWhenManual", func(t *testing.T) {
+		// When: user sets manual schedule
+		inv, root := clitest.New(t,
+			"schedule", "start", workspace.Name, "manual",
+		)
+		clitest.SetupConfig(t, client, root)
+
+		var stderrBuf bytes.Buffer
+		inv.Stderr = &stderrBuf
+
+		require.NoError(t, inv.Run())
+
+		// Then: no warning should be shown on stderr
+		stderrOutput := stderrBuf.String()
+		require.NotContains(t, stderrOutput, "Warning")
+	})
 }

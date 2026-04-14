@@ -1,7 +1,7 @@
-import type { HealthcheckReport } from "api/typesGenerated";
-import { Alert } from "components/Alert/Alert";
 import { useOutletContext } from "react-router";
-import { pageTitle } from "utils/page";
+import type { HealthcheckReport } from "#/api/typesGenerated";
+import { Alert } from "#/components/Alert/Alert";
+import { pageTitle } from "#/utils/page";
 import {
 	GridData,
 	GridDataLabel,
@@ -37,6 +37,7 @@ const DatabasePage = () => {
 							actions={<HealthMessageDocsLink {...warning} />}
 							key={warning.code}
 							severity="warning"
+							prominent
 						>
 							{warning.message}
 						</Alert>

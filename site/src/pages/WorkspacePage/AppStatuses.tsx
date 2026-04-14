@@ -1,33 +1,25 @@
+import capitalize from "lodash/capitalize";
+import { ExternalLinkIcon, FileIcon, LayoutGridIcon } from "lucide-react";
+import { type FC, useState } from "react";
 import type {
 	WorkspaceAppStatus as APIWorkspaceAppStatus,
 	Workspace,
 	WorkspaceAgent,
 	WorkspaceApp,
-} from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import { ExternalImage } from "components/ExternalImage/ExternalImage";
-import { ScrollArea } from "components/ScrollArea/ScrollArea";
+} from "#/api/typesGenerated";
+import { ChevronDownIcon } from "#/components/AnimatedIcons/ChevronDown";
+import { Button } from "#/components/Button/Button";
+import { ExternalImage } from "#/components/ExternalImage/ExternalImage";
+import { ScrollArea } from "#/components/ScrollArea/ScrollArea";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import capitalize from "lodash/capitalize";
-import {
-	ChevronDownIcon,
-	ChevronUpIcon,
-	ExternalLinkIcon,
-	FileIcon,
-	LayoutGridIcon,
-	SquareCheckBigIcon,
-} from "lucide-react";
-import { AppStatusStateIcon } from "modules/apps/AppStatusStateIcon";
-import { useAppLink } from "modules/apps/useAppLink";
-import { type FC, useState } from "react";
-import { Link as RouterLink } from "react-router";
-import { timeFrom } from "utils/time";
-import { truncateURI } from "utils/uri";
+} from "#/components/Tooltip/Tooltip";
+import { AppStatusStateIcon } from "#/modules/apps/AppStatusStateIcon";
+import { useAppLink } from "#/modules/apps/useAppLink";
+import { timeFrom } from "#/utils/time";
+import { truncateURI } from "#/utils/uri";
 
 interface AppStatusesProps {
 	workspace: Workspace;
@@ -48,16 +40,12 @@ export const AppStatuses: FC<AppStatusesProps> = ({
 	referenceDate,
 }) => {
 	const [displayStatuses, setDisplayStatuses] = useState(false);
+	// Statuses are returned from the API sorted by created_at DESC, id DESC.
 	const allStatuses: StatusWithAppInfo[] = agent.apps.flatMap((app) =>
-		app.statuses
-			.map((status) => ({
-				...status,
-				app,
-			}))
-			.sort(
-				(a, b) =>
-					new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
-			),
+		app.statuses.map((status) => ({
+			...status,
+			app,
+		})),
 	);
 
 	if (allStatuses.length === 0) {
@@ -99,19 +87,17 @@ export const AppStatuses: FC<AppStatusesProps> = ({
 
 					{latestStatus.uri &&
 						(latestStatus.uri.startsWith("file://") ? (
-							<TooltipProvider>
-								<Tooltip>
-									<TooltipTrigger>
-										<span className="flex items-center gap-1">
-											<FileIcon className="size-icon-xs" />
-											{truncateURI(latestStatus.uri)}
-										</span>
-									</TooltipTrigger>
-									<TooltipContent>
-										This file is located in your workspace
-									</TooltipContent>
-								</Tooltip>
-							</TooltipProvider>
+							<Tooltip>
+								<TooltipTrigger>
+									<span className="flex items-center gap-1">
+										<FileIcon className="size-icon-xs" />
+										{truncateURI(latestStatus.uri)}
+									</span>
+								</TooltipTrigger>
+								<TooltipContent>
+									This file is located in your workspace
+								</TooltipContent>
+							</Tooltip>
 						) : (
 							<Button asChild variant="outline" size="sm">
 								<a href={latestStatus.uri} target="_blank" rel="noreferrer">
@@ -121,32 +107,23 @@ export const AppStatuses: FC<AppStatusesProps> = ({
 							</Button>
 						))}
 
-					<Button asChild size="sm" variant="outline">
-						<RouterLink to={`/tasks/${workspace.owner_name}/${workspace.name}`}>
-							<SquareCheckBigIcon />
-							View task
-						</RouterLink>
-					</Button>
-
-					<TooltipProvider>
-						<Tooltip>
-							<TooltipTrigger asChild>
-								<Button
-									disabled={otherStatuses.length === 0}
-									size="icon"
-									variant="subtle"
-									onClick={() => {
-										setDisplayStatuses((display) => !display);
-									}}
-								>
-									{displayStatuses ? <ChevronUpIcon /> : <ChevronDownIcon />}
-								</Button>
-							</TooltipTrigger>
-							<TooltipContent>
-								{displayStatuses ? "Hide statuses" : "Show statuses"}
-							</TooltipContent>
-						</Tooltip>
-					</TooltipProvider>
+					<Tooltip>
+						<TooltipTrigger asChild>
+							<Button
+								disabled={otherStatuses.length === 0}
+								size="icon"
+								variant="subtle"
+								onClick={() => {
+									setDisplayStatuses((display) => !display);
+								}}
+							>
+								<ChevronDownIcon />
+							</Button>
+						</TooltipTrigger>
+						<TooltipContent>
+							{displayStatuses ? "Hide statuses" : "Show statuses"}
+						</TooltipContent>
+					</Tooltip>
 				</div>
 			</div>
 

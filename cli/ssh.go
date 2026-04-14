@@ -32,8 +32,8 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"tailscale.com/types/netlogtype"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/sloghuman"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/coder/v2/agent/agentssh"
 	"github.com/coder/coder/v2/cli/cliui"
 	"github.com/coder/coder/v2/cli/cliutil"
@@ -52,6 +52,10 @@ import (
 
 const (
 	disableUsageApp = "disable"
+
+	// Retry transient errors during SSH connection establishment.
+	sshRetryInterval = 2 * time.Second
+	sshMaxAttempts   = 10 // initial + retries per step
 )
 
 var (
@@ -61,6 +65,53 @@ var (
 	gracefulShutdownTimeout = 2 * time.Second
 	workspaceNameRe         = regexp.MustCompile(`[/.]+|--`)
 )
+
+// isRetryableError checks for transient connection errors worth
+// retrying: DNS failures, connection refused, and server 5xx.
+func isRetryableError(err error) bool {
+	if err == nil || xerrors.Is(err, context.Canceled) {
+		return false
+	}
+	// Check connection errors before context.DeadlineExceeded because
+	// net.Dialer.Timeout produces *net.OpError that matches both.
+	if codersdk.IsConnectionError(err) {
+		return true
+	}
+	if xerrors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var sdkErr *codersdk.Error
+	if xerrors.As(err, &sdkErr) {
+		return sdkErr.StatusCode() >= 500
+	}
+	return false
+}
+
+// retryWithInterval calls fn up to maxAttempts times, waiting
+// interval between attempts. Stops on success, non-retryable
+// error, or context cancellation.
+func retryWithInterval(ctx context.Context, logger slog.Logger, interval time.Duration, maxAttempts int, fn func() error) error {
+	var lastErr error
+	attempt := 0
+	for r := retry.New(interval, interval); r.Wait(ctx); {
+		lastErr = fn()
+		if lastErr == nil || !isRetryableError(lastErr) {
+			return lastErr
+		}
+		attempt++
+		if attempt >= maxAttempts {
+			break
+		}
+		logger.Warn(ctx, "transient error, retrying",
+			slog.Error(lastErr),
+			slog.F("attempt", attempt),
+		)
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return ctx.Err()
+}
 
 func (r *RootCmd) ssh() *serpent.Command {
 	var (
@@ -109,6 +160,51 @@ func (r *RootCmd) ssh() *serpent.Command {
 				}
 			},
 		),
+		CompletionHandler: func(inv *serpent.Invocation) []string {
+			client, err := r.InitClient(inv)
+			if err != nil {
+				return []string{}
+			}
+
+			res, err := client.Workspaces(inv.Context(), codersdk.WorkspaceFilter{
+				Owner: codersdk.Me,
+			})
+			if err != nil {
+				return []string{}
+			}
+
+			var mu sync.Mutex
+			var completions []string
+			var wg sync.WaitGroup
+			for _, ws := range res.Workspaces {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					resources, err := client.TemplateVersionResources(inv.Context(), ws.LatestBuild.TemplateVersionID)
+					if err != nil {
+						return
+					}
+					var agents []codersdk.WorkspaceAgent
+					for _, resource := range resources {
+						agents = append(agents, resource.Agents...)
+					}
+
+					mu.Lock()
+					defer mu.Unlock()
+					if len(agents) == 1 {
+						completions = append(completions, ws.Name)
+					} else {
+						for _, agent := range agents {
+							completions = append(completions, fmt.Sprintf("%s.%s", ws.Name, agent.Name))
+						}
+					}
+				}()
+			}
+			wg.Wait()
+
+			slices.Sort(completions)
+			return completions
+		},
 		Handler: func(inv *serpent.Invocation) (retErr error) {
 			client, err := r.InitClient(inv)
 			if err != nil {
@@ -232,10 +328,17 @@ func (r *RootCmd) ssh() *serpent.Command {
 				HostnameSuffix: hostnameSuffix,
 			}
 
-			workspace, workspaceAgent, err := findWorkspaceAndAgentByHostname(
-				ctx, inv, client,
-				inv.Args[0], cliConfig, disableAutostart)
-			if err != nil {
+			// Populated by the closure below.
+			var workspace codersdk.Workspace
+			var workspaceAgent codersdk.WorkspaceAgent
+			resolveWorkspace := func() error {
+				var err error
+				workspace, workspaceAgent, err = findWorkspaceAndAgentByHostname(
+					ctx, inv, client,
+					inv.Args[0], cliConfig, disableAutostart)
+				return err
+			}
+			if err := retryWithInterval(ctx, logger, sshRetryInterval, sshMaxAttempts, resolveWorkspace); err != nil {
 				return err
 			}
 
@@ -261,8 +364,13 @@ func (r *RootCmd) ssh() *serpent.Command {
 				wait = false
 			}
 
-			templateVersion, err := client.TemplateVersion(ctx, workspace.LatestBuild.TemplateVersionID)
-			if err != nil {
+			var templateVersion codersdk.TemplateVersion
+			fetchVersion := func() error {
+				var err error
+				templateVersion, err = client.TemplateVersion(ctx, workspace.LatestBuild.TemplateVersionID)
+				return err
+			}
+			if err := retryWithInterval(ctx, logger, sshRetryInterval, sshMaxAttempts, fetchVersion); err != nil {
 				return err
 			}
 
@@ -302,13 +410,27 @@ func (r *RootCmd) ssh() *serpent.Command {
 			// If we're in stdio mode, check to see if we can use Coder Connect.
 			// We don't support Coder Connect over non-stdio coder ssh yet.
 			if stdio && !forceNewTunnel {
-				connInfo, err := wsClient.AgentConnectionInfoGeneric(ctx)
-				if err != nil {
+				var connInfo workspacesdk.AgentConnectionInfo
+				if err := retryWithInterval(ctx, logger, sshRetryInterval, sshMaxAttempts, func() error {
+					var err error
+					connInfo, err = wsClient.AgentConnectionInfoGeneric(ctx)
+					return err
+				}); err != nil {
 					return xerrors.Errorf("get agent connection info: %w", err)
 				}
 				coderConnectHost := fmt.Sprintf("%s.%s.%s.%s",
 					workspaceAgent.Name, workspace.Name, workspace.OwnerName, connInfo.HostnameSuffix)
-				exists, _ := workspacesdk.ExistsViaCoderConnect(ctx, coderConnectHost)
+				// Use trailing dot to indicate FQDN and prevent DNS
+				// search domain expansion, which can add 20-30s of
+				// delay on corporate networks with search domains
+				// configured.
+				exists, ccErr := workspacesdk.ExistsViaCoderConnect(ctx, coderConnectHost+".")
+				if ccErr != nil {
+					logger.Debug(ctx, "failed to check coder connect",
+						slog.F("hostname", coderConnectHost),
+						slog.Error(ccErr),
+					)
+				}
 				if exists {
 					defer cancel()
 
@@ -329,23 +451,27 @@ func (r *RootCmd) ssh() *serpent.Command {
 						})
 						defer closeUsage()
 					}
-					return runCoderConnectStdio(ctx, fmt.Sprintf("%s:22", coderConnectHost), stdioReader, stdioWriter, stack)
+					return runCoderConnectStdio(ctx, fmt.Sprintf("%s:22", coderConnectHost), stdioReader, stdioWriter, stack, logger)
 				}
 			}
 
 			if r.disableDirect {
 				_, _ = fmt.Fprintln(inv.Stderr, "Direct connections disabled.")
 			}
-			conn, err := wsClient.
-				DialAgent(ctx, workspaceAgent.ID, &workspacesdk.DialAgentOptions{
+			var conn workspacesdk.AgentConn
+			if err := retryWithInterval(ctx, logger, sshRetryInterval, sshMaxAttempts, func() error {
+				var err error
+				conn, err = wsClient.DialAgent(ctx, workspaceAgent.ID, &workspacesdk.DialAgentOptions{
 					Logger:          logger,
 					BlockEndpoints:  r.disableDirect,
 					EnableTelemetry: !r.disableNetworkTelemetry,
 				})
-			if err != nil {
+				return err
+			}); err != nil {
 				return xerrors.Errorf("dial agent: %w", err)
 			}
 			if err = stack.push("agent conn", conn); err != nil {
+				_ = conn.Close()
 				return err
 			}
 			conn.AwaitReachable(ctx)
@@ -906,6 +1032,8 @@ func GetWorkspaceAndAgent(ctx context.Context, inv *serpent.Invocation, client *
 					return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, nil, xerrors.Errorf("start workspace with active template version: %w", err)
 				}
 				_, _ = fmt.Fprintln(inv.Stdout, "Unable to start the workspace with template version from last build. Your workspace has been updated to the current active template version.")
+			default:
+				return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, nil, xerrors.Errorf("start workspace with current template version: %w", err)
 			}
 		} else if err != nil {
 			return codersdk.Workspace{}, codersdk.WorkspaceAgent{}, nil, xerrors.Errorf("start workspace with current template version: %w", err)
@@ -1521,16 +1649,27 @@ func WithTestOnlyCoderConnectDialer(ctx context.Context, dialer coderConnectDial
 func testOrDefaultDialer(ctx context.Context) coderConnectDialer {
 	dialer, ok := ctx.Value(coderConnectDialerContextKey{}).(coderConnectDialer)
 	if !ok || dialer == nil {
-		return &net.Dialer{}
+		// Timeout prevents hanging on broken tunnels (OS default is very long).
+		return &net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}
 	}
 	return dialer
 }
 
-func runCoderConnectStdio(ctx context.Context, addr string, stdin io.Reader, stdout io.Writer, stack *closerStack) error {
+func runCoderConnectStdio(ctx context.Context, addr string, stdin io.Reader, stdout io.Writer, stack *closerStack, logger slog.Logger) error {
 	dialer := testOrDefaultDialer(ctx)
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
-	if err != nil {
-		return xerrors.Errorf("dial coder connect host: %w", err)
+	var conn net.Conn
+	if err := retryWithInterval(ctx, logger, sshRetryInterval, sshMaxAttempts, func() error {
+		var err error
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
+		if err != nil {
+			return xerrors.Errorf("dial coder connect host %q over tcp: %w", addr, err)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	if err := stack.push("tcp conn", conn); err != nil {
 		return err

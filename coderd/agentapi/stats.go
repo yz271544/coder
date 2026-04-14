@@ -4,10 +4,11 @@ import (
 	"context"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 	"google.golang.org/protobuf/types/known/durationpb"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	agentproto "github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
@@ -16,7 +17,9 @@ import (
 )
 
 type StatsAPI struct {
-	AgentFn                   func(context.Context) (database.WorkspaceAgent, error)
+	AgentID                   uuid.UUID
+	AgentName                 string
+	Workspace                 *CachedWorkspaceFields
 	Database                  database.Store
 	Log                       slog.Logger
 	StatsReporter             *workspacestats.Reporter
@@ -42,18 +45,20 @@ func (a *StatsAPI) UpdateStats(ctx context.Context, req *agentproto.UpdateStatsR
 		return res, nil
 	}
 
-	workspaceAgent, err := a.AgentFn(ctx)
-	if err != nil {
-		return nil, err
+	// If cache is empty (prebuild or invalid), fall back to DB
+	var ws database.WorkspaceIdentity
+	var ok bool
+	if ws, ok = a.Workspace.AsWorkspaceIdentity(); !ok {
+		w, err := a.Database.GetWorkspaceByAgentID(ctx, a.AgentID)
+		if err != nil {
+			return nil, xerrors.Errorf("get workspace by agent ID %q: %w", a.AgentID, err)
+		}
+		ws = database.WorkspaceIdentityFromWorkspace(w)
 	}
-	getWorkspaceAgentByIDRow, err := a.Database.GetWorkspaceByAgentID(ctx, workspaceAgent.ID)
-	if err != nil {
-		return nil, xerrors.Errorf("get workspace by agent ID %q: %w", workspaceAgent.ID, err)
-	}
-	workspace := getWorkspaceAgentByIDRow
+
 	a.Log.Debug(ctx, "read stats report",
 		slog.F("interval", a.AgentStatsRefreshInterval),
-		slog.F("workspace_id", workspace.ID),
+		slog.F("workspace_id", ws.ID),
 		slog.F("payload", req),
 	)
 
@@ -67,12 +72,12 @@ func (a *StatsAPI) UpdateStats(ctx context.Context, req *agentproto.UpdateStatsR
 		req.Stats.SessionCountReconnectingPty = 0
 	}
 
-	err = a.StatsReporter.ReportAgentStats(
+	err := a.StatsReporter.ReportAgentStats(
 		ctx,
 		a.now(),
-		workspace,
-		workspaceAgent,
-		getWorkspaceAgentByIDRow.TemplateName,
+		ws,
+		a.AgentID,
+		a.AgentName,
 		req.Stats,
 		false,
 	)

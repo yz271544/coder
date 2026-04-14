@@ -9,9 +9,8 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/sloghuman"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/scaletest/agentconn"
@@ -78,7 +77,14 @@ func (r *Runner) Run(ctx context.Context, id string, logs io.Writer) error {
 			return xerrors.Errorf("create user: %w", err)
 		}
 		user = newUser.User
-		client = codersdk.New(r.client.URL)
+		// Duplicate the client with an independent transport to ensure each
+		// workspace creation gets its own HTTP connection pool. This prevents
+		// HTTP/2 connection multiplexing from causing all workspace GET requests
+		// to route to a single backend pod during load testing.
+		client, err = loadtestutil.DupClientCopyingHeaders(r.client, nil)
+		if err != nil {
+			return xerrors.Errorf("duplicate client: %w", err)
+		}
 		client.SetSessionToken(newUser.SessionToken)
 	}
 
@@ -87,9 +93,13 @@ func (r *Runner) Run(ctx context.Context, id string, logs io.Writer) error {
 	workspaceBuildConfig.OrganizationID = r.cfg.User.OrganizationID
 	workspaceBuildConfig.UserID = user.ID.String()
 	r.workspacebuildRunner = workspacebuild.NewRunner(client, workspaceBuildConfig)
-	workspace, err := r.workspacebuildRunner.RunReturningWorkspace(ctx, id, logs)
+	slimWorkspace, err := r.workspacebuildRunner.RunReturningWorkspace(ctx, id, logs)
 	if err != nil {
 		return xerrors.Errorf("create workspace: %w", err)
+	}
+	workspace, err := client.Workspace(ctx, slimWorkspace.ID)
+	if err != nil {
+		return xerrors.Errorf("get full workspace info: %w", err)
 	}
 
 	if r.cfg.Workspace.NoWaitForAgents {

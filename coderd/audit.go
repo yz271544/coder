@@ -15,7 +15,7 @@ import (
 	"github.com/sqlc-dev/pqtype"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
@@ -25,6 +25,11 @@ import (
 	"github.com/coder/coder/v2/coderd/searchquery"
 	"github.com/coder/coder/v2/codersdk"
 )
+
+// Limit the count query to avoid a slow sequential scan due to joins
+// on a large table. Set to 0 to disable capping (but also see the note
+// in the SQL query).
+const auditLogCountCap = 2000
 
 // @Summary Get audit logs
 // @ID get-audit-logs
@@ -66,7 +71,7 @@ func (api *API) auditLogs(rw http.ResponseWriter, r *http.Request) {
 		countFilter.Username = ""
 	}
 
-	// Use the same filters to count the number of audit logs
+	countFilter.CountCap = auditLogCountCap
 	count, err := api.Database.CountAuditLogs(ctx, countFilter)
 	if dbauthz.IsNotAuthorizedError(err) {
 		httpapi.Forbidden(rw)
@@ -81,6 +86,7 @@ func (api *API) auditLogs(rw http.ResponseWriter, r *http.Request) {
 		httpapi.Write(ctx, rw, http.StatusOK, codersdk.AuditLogResponse{
 			AuditLogs: []codersdk.AuditLog{},
 			Count:     0,
+			CountCap:  auditLogCountCap,
 		})
 		return
 	}
@@ -98,6 +104,7 @@ func (api *API) auditLogs(rw http.ResponseWriter, r *http.Request) {
 	httpapi.Write(ctx, rw, http.StatusOK, codersdk.AuditLogResponse{
 		AuditLogs: api.convertAuditLogs(ctx, dblogs),
 		Count:     count,
+		CountCap:  auditLogCountCap,
 	})
 }
 
@@ -420,6 +427,14 @@ func (api *API) auditLogIsResourceDeleted(ctx context.Context, alog database.Get
 			api.Logger.Error(ctx, "unable to fetch oauth2 app secret", slog.Error(err))
 		}
 		return false
+	case database.ResourceTypeTask:
+		task, err := api.Database.GetTaskByID(ctx, alog.AuditLog.ResourceID)
+		if xerrors.Is(err, sql.ErrNoRows) {
+			return true
+		} else if err != nil {
+			api.Logger.Error(ctx, "unable to fetch task", slog.Error(err))
+		}
+		return task.DeletedAt.Valid && task.DeletedAt.Time.Before(time.Now())
 	default:
 		return false
 	}
@@ -495,6 +510,17 @@ func (api *API) auditLogResourceLink(ctx context.Context, alog database.GetAudit
 			return ""
 		}
 		return fmt.Sprintf("/deployment/oauth2-provider/apps/%s", secret.AppID)
+
+	case database.ResourceTypeTask:
+		task, err := api.Database.GetTaskByID(ctx, alog.AuditLog.ResourceID)
+		if err != nil {
+			return ""
+		}
+		user, err := api.Database.GetUserByID(ctx, task.OwnerID)
+		if err != nil {
+			return ""
+		}
+		return fmt.Sprintf("/tasks/%s/%s", user.Username, task.ID)
 
 	default:
 		return ""

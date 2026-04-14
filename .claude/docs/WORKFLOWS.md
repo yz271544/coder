@@ -40,11 +40,15 @@
 - Use proper error types
 - Pattern: `xerrors.Errorf("failed to X: %w", err)`
 
-### Naming Conventions
+## Naming Conventions
 
-- Use clear, descriptive names
-- Abbreviate only when obvious
+- Names MUST tell what code does, not how it's implemented or its history
 - Follow Go and TypeScript naming conventions
+- When changing code, never document the old behavior or the behavior change
+- NEVER use implementation details in names (e.g., "ZodValidator", "MCPWrapper", "JSONParser")
+- NEVER use temporal/historical context in names (e.g., "LegacyHandler", "UnifiedTool", "ImprovedInterface", "EnhancedParser")
+- NEVER use pattern names unless they add clarity (e.g., prefer "Tool" over "ToolFactory")
+- Abbreviate only when obvious
 
 ### Comments
 
@@ -105,7 +109,6 @@
 
 - Run full test suite: `make test`
 - Run specific test: `make test RUN=TestFunctionName`
-- Run with Postgres: `make test-postgres`
 - Run with race detector: `make test-race`
 - Run end-to-end tests: `make test-e2e`
 
@@ -117,11 +120,27 @@
 - Use `testutil.WaitLong` for timeouts in tests
 - Always use `t.Parallel()` in tests
 
+## Git Workflow
+
+### Working on PR branches
+
+When working on an existing PR branch:
+
+```sh
+git fetch origin
+git checkout branch-name
+git pull origin branch-name
+```
+
+Then make your changes and push normally. Don't use `git push --force` unless the user specifically asks for it.
+
 ## Commit Style
 
-- Follow [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
-- Format: `type(scope): message`
-- Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+Format: `type(scope): message`. See [CONTRIBUTING.md](docs/about/contributing/CONTRIBUTING.md#commit-messages) for full rules. PR titles are linted in CI.
+
+- Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`
+- Scopes must be a real path (directory or file stem) containing all changed files
+- Omit scope if changes span multiple top-level directories
 - Keep message titles concise (~70 characters)
 - Use imperative, present tense in commit titles
 

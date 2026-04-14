@@ -5,6 +5,8 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -14,10 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
-	"github.com/coder/serpent"
-
 	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/serpent"
 )
 
 type exclusion struct {
@@ -82,6 +83,20 @@ func TestDeploymentValues_HighlyConfigurable(t *testing.T) {
 			yaml: true,
 		},
 		"Notifications: Email Auth: Password": {
+			yaml: true,
+		},
+		// We don't want these to be configurable via YAML because they are secrets.
+		// However, we do want to allow them to be shown in documentation.
+		"AI Bridge OpenAI Key": {
+			yaml: true,
+		},
+		"AI Bridge Anthropic Key": {
+			yaml: true,
+		},
+		"AI Bridge Bedrock Access Key": {
+			yaml: true,
+		},
+		"AI Bridge Bedrock Access Key Secret": {
 			yaml: true,
 		},
 	}
@@ -382,27 +397,28 @@ func TestExternalAuthYAMLConfig(t *testing.T) {
 		return string(data)
 	}
 	githubCfg := codersdk.ExternalAuthConfig{
-		Type:                "github",
-		ClientID:            "client_id",
-		ClientSecret:        "client_secret",
-		ID:                  "id",
-		AuthURL:             "https://example.com/auth",
-		TokenURL:            "https://example.com/token",
-		ValidateURL:         "https://example.com/validate",
-		RevokeURL:           "https://example.com/revoke",
-		AppInstallURL:       "https://example.com/install",
-		AppInstallationsURL: "https://example.com/installations",
-		NoRefresh:           true,
-		Scopes:              []string{"user:email", "read:org"},
-		ExtraTokenKeys:      []string{"extra", "token"},
-		DeviceFlow:          true,
-		DeviceCodeURL:       "https://example.com/device",
-		Regex:               "^https://example.com/.*$",
-		DisplayName:         "GitHub",
-		DisplayIcon:         "/static/icons/github.svg",
-		MCPURL:              "https://api.githubcopilot.com/mcp/",
-		MCPToolAllowRegex:   ".*",
-		MCPToolDenyRegex:    "create_gist",
+		Type:                          "github",
+		ClientID:                      "client_id",
+		ClientSecret:                  "client_secret",
+		ID:                            "id",
+		AuthURL:                       "https://example.com/auth",
+		TokenURL:                      "https://example.com/token",
+		ValidateURL:                   "https://example.com/validate",
+		RevokeURL:                     "https://example.com/revoke",
+		AppInstallURL:                 "https://example.com/install",
+		AppInstallationsURL:           "https://example.com/installations",
+		NoRefresh:                     true,
+		Scopes:                        []string{"user:email", "read:org"},
+		ExtraTokenKeys:                []string{"extra", "token"},
+		DeviceFlow:                    true,
+		DeviceCodeURL:                 "https://example.com/device",
+		Regex:                         "^https://example.com/.*$",
+		DisplayName:                   "GitHub",
+		DisplayIcon:                   "/static/icons/github.svg",
+		MCPURL:                        "https://api.githubcopilot.com/mcp/",
+		MCPToolAllowRegex:             ".*",
+		MCPToolDenyRegex:              "create_gist",
+		CodeChallengeMethodsSupported: []string{"S256"},
 	}
 
 	// Input the github section twice for testing a slice of configs.
@@ -609,7 +625,8 @@ func TestPremiumSuperSet(t *testing.T) {
 	// Premium ⊃ Enterprise
 	require.Subset(t, premium.Features(), enterprise.Features(), "premium should be a superset of enterprise. If this fails, update the premium feature set to include all enterprise features.")
 
-	// Premium = All Features EXCEPT usage limit features
+	// Premium = All Features EXCEPT limit-based features.
+	// TODO: In future release, also exclude addon features (f.IsAddonFeature()).
 	expectedPremiumFeatures := []codersdk.FeatureName{}
 	for _, feature := range codersdk.FeatureNames {
 		if feature.UsesLimit() {
@@ -686,6 +703,406 @@ func TestNotificationsCanBeDisabled(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, tt.expectNotificationsEnabled, dv.Notifications.Enabled())
+		})
+	}
+}
+
+func TestRetentionConfigParsing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                   string
+		environment            []serpent.EnvVar
+		expectedAuditLogs      time.Duration
+		expectedConnectionLogs time.Duration
+		expectedAPIKeys        time.Duration
+	}{
+		{
+			name:                   "Defaults",
+			environment:            []serpent.EnvVar{},
+			expectedAuditLogs:      0,
+			expectedConnectionLogs: 0,
+			expectedAPIKeys:        7 * 24 * time.Hour, // 7 days default
+		},
+		{
+			name: "IndividualRetentionSet",
+			environment: []serpent.EnvVar{
+				{Name: "CODER_AUDIT_LOGS_RETENTION", Value: "30d"},
+				{Name: "CODER_CONNECTION_LOGS_RETENTION", Value: "60d"},
+				{Name: "CODER_API_KEYS_RETENTION", Value: "14d"},
+			},
+			expectedAuditLogs:      30 * 24 * time.Hour,
+			expectedConnectionLogs: 60 * 24 * time.Hour,
+			expectedAPIKeys:        14 * 24 * time.Hour,
+		},
+		{
+			name: "AllRetentionSet",
+			environment: []serpent.EnvVar{
+				{Name: "CODER_AUDIT_LOGS_RETENTION", Value: "365d"},
+				{Name: "CODER_CONNECTION_LOGS_RETENTION", Value: "30d"},
+				{Name: "CODER_API_KEYS_RETENTION", Value: "0"},
+			},
+			expectedAuditLogs:      365 * 24 * time.Hour,
+			expectedConnectionLogs: 30 * 24 * time.Hour,
+			expectedAPIKeys:        0, // Explicitly disabled
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			dv := codersdk.DeploymentValues{}
+			opts := dv.Options()
+
+			err := opts.SetDefaults()
+			require.NoError(t, err)
+
+			err = opts.ParseEnv(tt.environment)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.expectedAuditLogs, dv.Retention.AuditLogs.Value(), "audit logs retention mismatch")
+			assert.Equal(t, tt.expectedConnectionLogs, dv.Retention.ConnectionLogs.Value(), "connection logs retention mismatch")
+			assert.Equal(t, tt.expectedAPIKeys, dv.Retention.APIKeys.Value(), "api keys retention mismatch")
+		})
+	}
+}
+
+func TestComputeMaxIdleConns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		maxOpen        int
+		configuredIdle string
+		expectedIdle   int
+		expectError    bool
+		errorContains  string
+	}{
+		{
+			name:           "auto_default_10_open",
+			maxOpen:        10,
+			configuredIdle: "auto",
+			expectedIdle:   3, // 10/3 = 3
+		},
+		{
+			name:           "auto_with_whitespace",
+			maxOpen:        10,
+			configuredIdle: " auto ",
+			expectedIdle:   3, // 10/3 = 3
+		},
+		{
+			name:           "auto_30_open",
+			maxOpen:        30,
+			configuredIdle: "auto",
+			expectedIdle:   10, // 30/3 = 10
+		},
+		{
+			name:           "auto_minimum_1",
+			maxOpen:        1,
+			configuredIdle: "auto",
+			expectedIdle:   1, // 1/3 = 0, but minimum is 1
+		},
+		{
+			name:           "auto_minimum_2_open",
+			maxOpen:        2,
+			configuredIdle: "auto",
+			expectedIdle:   1, // 2/3 = 0, but minimum is 1
+		},
+		{
+			name:           "auto_3_open",
+			maxOpen:        3,
+			configuredIdle: "auto",
+			expectedIdle:   1, // 3/3 = 1
+		},
+		{
+			name:           "explicit_equal_to_max",
+			maxOpen:        10,
+			configuredIdle: "10",
+			expectedIdle:   10,
+		},
+		{
+			name:           "explicit_less_than_max",
+			maxOpen:        10,
+			configuredIdle: "5",
+			expectedIdle:   5,
+		},
+		{
+			name:           "explicit_with_whitespace",
+			maxOpen:        10,
+			configuredIdle: " 5 ",
+			expectedIdle:   5,
+		},
+		{
+			name:           "explicit_0",
+			maxOpen:        10,
+			configuredIdle: "0",
+			expectedIdle:   0,
+		},
+		{
+			name:           "error_exceeds_max",
+			maxOpen:        10,
+			configuredIdle: "15",
+			expectError:    true,
+			errorContains:  "cannot exceed",
+		},
+		{
+			name:           "error_exceeds_max_by_1",
+			maxOpen:        10,
+			configuredIdle: "11",
+			expectError:    true,
+			errorContains:  "cannot exceed",
+		},
+		{
+			name:           "error_invalid_string",
+			maxOpen:        10,
+			configuredIdle: "invalid",
+			expectError:    true,
+			errorContains:  "must be \"auto\" or >= 0",
+		},
+		{
+			name:           "error_negative",
+			maxOpen:        10,
+			configuredIdle: "-1",
+			expectError:    true,
+			errorContains:  "must be \"auto\" or >= 0",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result, err := codersdk.ComputeMaxIdleConns(tt.maxOpen, tt.configuredIdle)
+			if tt.expectError {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.errorContains)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tt.expectedIdle, result)
+			}
+		})
+	}
+}
+
+func TestHTTPCookieConfigMiddleware(t *testing.T) {
+	t.Parallel()
+
+	// Realistic cookies that are always present in production.
+	// These cookies are added to every test.
+	baseCookies := []*http.Cookie{
+		{Name: "_ga", Value: "GA1.1.661026807.1770083336"},
+		{Name: "_ga_G0Q1B9GRC0", Value: "GS2.1.s1771343727$o49$g1$t1771343993$j48$l0$h0"},
+		{Name: "csrf_token", Value: "gDiKk8GjTM2iCUHAPfN9GlC+DGjzAprlLi2vJ+5TBU0="},
+	}
+
+	cases := []struct {
+		name            string
+		cfg             codersdk.HTTPCookieConfig
+		extraCookies    []*http.Cookie
+		expectedCookies map[string]string // cookie name -> value that handler should see
+		expectedDeleted []string          // if any cookies are supposed to be deleted via Set-Cookie
+	}{
+		{
+			name: "Disabled_PassesThrough",
+			cfg:  codersdk.HTTPCookieConfig{},
+			extraCookies: []*http.Cookie{
+				{Name: codersdk.SessionTokenCookie, Value: "token123"},
+			},
+			expectedCookies: map[string]string{
+				codersdk.SessionTokenCookie: "token123",
+			},
+		},
+		{
+			name: "Enabled_StripsPrefixFromCookie",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "token123"},
+			},
+			expectedCookies: map[string]string{
+				codersdk.SessionTokenCookie: "token123",
+			},
+		},
+		{
+			name: "Enabled_DeletesUnprefixedCookie",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				// Unprefixed cookie that should be in the "to prefix" list.
+				{Name: codersdk.SessionTokenCookie, Value: "unprefixed-token"},
+			},
+			expectedCookies: map[string]string{
+				// Session token should NOT be present - it was deleted.
+			},
+			expectedDeleted: []string{codersdk.SessionTokenCookie},
+		},
+		{
+			name: "Enabled_BothPrefixedAndUnprefixed",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				// Browser might send both during migration.
+				{Name: codersdk.SessionTokenCookie, Value: "unprefixed-token"},
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "prefixed-token"},
+			},
+			expectedCookies: map[string]string{
+				codersdk.SessionTokenCookie: "prefixed-token", // Prefixed wins.
+			},
+			expectedDeleted: []string{codersdk.SessionTokenCookie},
+		},
+		{
+			name: "Enabled_MultiplePrefixedCookies",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "session"},
+				{Name: "__Host-SomeOtherCookie", Value: "other-cookie"},
+				{Name: "__Host-Santa", Value: "santa"},
+			},
+			expectedCookies: map[string]string{
+				codersdk.SessionTokenCookie: "session",
+				"__Host-SomeOtherCookie":    "other-cookie",
+				"__Host-Santa":              "santa",
+			},
+		},
+		{
+			name: "Enabled_UnrelatedCookiesUnchanged",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: "custom_cookie", Value: "custom-value"},
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "session"},
+				{Name: "__Host-foobar", Value: "do-not-change-me"},
+			},
+			expectedCookies: map[string]string{
+				"custom_cookie":             "custom-value",
+				codersdk.SessionTokenCookie: "session",
+				"__Host-foobar":             "do-not-change-me",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var handlerCookies []*http.Cookie
+			handler := tc.cfg.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				handlerCookies = r.Cookies()
+			}))
+
+			req := httptest.NewRequest("GET", "/", nil)
+			for _, c := range baseCookies {
+				req.AddCookie(c)
+			}
+			for _, c := range tc.extraCookies {
+				req.AddCookie(c)
+			}
+
+			rw := httptest.NewRecorder()
+			handler.ServeHTTP(rw, req)
+
+			// Verify cookies seen by handler.
+			gotCookies := make(map[string]string)
+			for _, c := range handlerCookies {
+				gotCookies[c.Name] = c.Value
+			}
+
+			for _, v := range baseCookies {
+				tc.expectedCookies[v.Name] = v.Value
+			}
+			assert.Equal(t, tc.expectedCookies, gotCookies)
+
+			// Verify Set-Cookie header for deletion.
+			setCookies := rw.Result().Cookies()
+			if len(tc.expectedDeleted) > 0 {
+				assert.NotEmpty(t, setCookies, "expected Set-Cookie header for cookie deletion")
+				expDel := make(map[string]struct{})
+				for _, name := range tc.expectedDeleted {
+					expDel[name] = struct{}{}
+				}
+				// Verify it's a deletion (MaxAge < 0).
+				for _, c := range setCookies {
+					assert.Less(t, c.MaxAge, 0, "Set-Cookie should have MaxAge < 0 for deletion")
+					delete(expDel, c.Name)
+				}
+				require.Empty(t, expDel, "expected Set-Cookie header for deletion")
+			} else {
+				assert.Empty(t, setCookies, "did not expect Set-Cookie header")
+			}
+		})
+	}
+}
+
+func BenchmarkHTTPCookieConfigMiddleware(b *testing.B) {
+	noop := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	// Realistic cookies that are always present in production.
+	baseCookies := []*http.Cookie{
+		{Name: "_ga", Value: "GA1.1.661026807.1770083336"},
+		{Name: "_ga_G0Q1B9GRC0", Value: "GS2.1.s1771343727$o49$g1$t1771343993$j48$l0$h0"},
+		{Name: "csrf_token", Value: "gDiKk8GjTM2iCUHAPfN9GlC+DGjzAprlLi2vJ+5TBU0="},
+	}
+
+	cases := []struct {
+		name         string
+		cfg          codersdk.HTTPCookieConfig
+		extraCookies []*http.Cookie
+	}{
+		{
+			name: "Disabled",
+			cfg:  codersdk.HTTPCookieConfig{},
+			extraCookies: []*http.Cookie{
+				{Name: codersdk.SessionTokenCookie, Value: "KybJV9fNul-u11vlll9wiF6eLQDxBVucD"},
+			},
+		},
+		{
+			name: "Enabled_NoPrefixedCookies",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: codersdk.SessionTokenCookie, Value: "KybJV9fNul-u11vlll9wiF6eLQDxBVucD"},
+			},
+		},
+		{
+			name: "Enabled_WithPrefixedCookie",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "KybJV9fNul-u11vlll9wiF6eLQDxBVucD"},
+			},
+		},
+		{
+			name: "Enabled_MultiplePrefixedCookies",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "KybJV9fNul-u11vlll9wiF6eLQDxBVucD"},
+				{Name: "__Host-" + codersdk.PathAppSessionTokenCookie, Value: "xyz123"},
+				{Name: "__Host-" + codersdk.SubdomainAppSessionTokenCookie, Value: "abc456"},
+				{Name: "__Host-" + "foobar", Value: "do-not-change-me"},
+			},
+		},
+		{
+			name: "Enabled_NonSessionPrefixedCookies",
+			cfg:  codersdk.HTTPCookieConfig{EnableHostPrefix: true},
+			extraCookies: []*http.Cookie{
+				{Name: "__Host-" + codersdk.SessionTokenCookie, Value: "KybJV9fNul-u11vlll9wiF6eLQDxBVucD"},
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		b.Run(tc.name, func(b *testing.B) {
+			handler := tc.cfg.Middleware(noop)
+			rw := httptest.NewRecorder()
+
+			allCookies := make([]*http.Cookie, 1, len(baseCookies))
+			copy(allCookies, baseCookies)
+			// Combine base cookies with test-specific cookies.
+			allCookies = append(allCookies, tc.extraCookies...)
+
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				req := httptest.NewRequest("GET", "/", nil)
+				for _, c := range allCookies {
+					req.AddCookie(c)
+				}
+				handler.ServeHTTP(rw, req)
+			}
 		})
 	}
 }

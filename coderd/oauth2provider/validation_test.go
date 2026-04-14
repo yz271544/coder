@@ -18,11 +18,12 @@ import (
 func TestOAuth2ClientMetadataValidation(t *testing.T) {
 	t.Parallel()
 
+	// Single instance shared across all sub-tests. Each registers independent OAuth2 apps with unique client names.
+	client := coderdtest.New(t, nil)
+	_ = coderdtest.CreateFirstUser(t, client)
+
 	t.Run("RedirectURIValidation", func(t *testing.T) {
 		t.Parallel()
-
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 
 		tests := []struct {
 			name          string
@@ -132,9 +133,6 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 	t.Run("ClientURIValidation", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
-
 		tests := []struct {
 			name        string
 			clientURI   string
@@ -207,9 +205,6 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 	t.Run("LogoURIValidation", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
-
 		tests := []struct {
 			name        string
 			logoURI     string
@@ -272,52 +267,49 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 	t.Run("GrantTypeValidation", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
-
 		tests := []struct {
 			name        string
-			grantTypes  []string
+			grantTypes  []codersdk.OAuth2ProviderGrantType
 			expectError bool
 		}{
 			{
 				name:        "DefaultEmpty",
-				grantTypes:  []string{},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{},
 				expectError: false,
 			},
 			{
 				name:        "ValidAuthorizationCode",
-				grantTypes:  []string{"authorization_code"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeAuthorizationCode},
 				expectError: false,
 			},
 			{
 				name:        "InvalidRefreshTokenAlone",
-				grantTypes:  []string{"refresh_token"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeRefreshToken},
 				expectError: true, // refresh_token requires authorization_code to be present
 			},
 			{
 				name:        "ValidMultiple",
-				grantTypes:  []string{"authorization_code", "refresh_token"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeAuthorizationCode, codersdk.OAuth2ProviderGrantTypeRefreshToken},
 				expectError: false,
 			},
 			{
 				name:        "InvalidUnsupported",
-				grantTypes:  []string{"client_credentials"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeClientCredentials},
 				expectError: true,
 			},
 			{
 				name:        "InvalidPassword",
-				grantTypes:  []string{"password"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypePassword},
 				expectError: true,
 			},
 			{
 				name:        "InvalidImplicit",
-				grantTypes:  []string{"implicit"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeImplicit},
 				expectError: true,
 			},
 			{
 				name:        "MixedValidInvalid",
-				grantTypes:  []string{"authorization_code", "client_credentials"},
+				grantTypes:  []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeAuthorizationCode, codersdk.OAuth2ProviderGrantTypeClientCredentials},
 				expectError: true,
 			},
 		}
@@ -347,37 +339,34 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 	t.Run("ResponseTypeValidation", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
-
 		tests := []struct {
 			name          string
-			responseTypes []string
+			responseTypes []codersdk.OAuth2ProviderResponseType
 			expectError   bool
 		}{
 			{
 				name:          "DefaultEmpty",
-				responseTypes: []string{},
+				responseTypes: []codersdk.OAuth2ProviderResponseType{},
 				expectError:   false,
 			},
 			{
 				name:          "ValidCode",
-				responseTypes: []string{"code"},
+				responseTypes: []codersdk.OAuth2ProviderResponseType{codersdk.OAuth2ProviderResponseTypeCode},
 				expectError:   false,
 			},
 			{
 				name:          "InvalidToken",
-				responseTypes: []string{"token"},
+				responseTypes: []codersdk.OAuth2ProviderResponseType{codersdk.OAuth2ProviderResponseTypeToken},
 				expectError:   true,
 			},
 			{
-				name:          "InvalidImplicit",
-				responseTypes: []string{"id_token"},
+				name:          "InvalidIDToken",
+				responseTypes: []codersdk.OAuth2ProviderResponseType{"id_token"}, // OIDC-specific, no constant
 				expectError:   true,
 			},
 			{
 				name:          "InvalidMultiple",
-				responseTypes: []string{"code", "token"},
+				responseTypes: []codersdk.OAuth2ProviderResponseType{codersdk.OAuth2ProviderResponseTypeCode, codersdk.OAuth2ProviderResponseTypeToken},
 				expectError:   true,
 			},
 		}
@@ -407,12 +396,9 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 	t.Run("TokenEndpointAuthMethodValidation", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
-
 		tests := []struct {
 			name        string
-			authMethod  string
+			authMethod  codersdk.OAuth2TokenEndpointAuthMethod
 			expectError bool
 		}{
 			{
@@ -422,27 +408,27 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 			},
 			{
 				name:        "ValidClientSecretBasic",
-				authMethod:  "client_secret_basic",
+				authMethod:  codersdk.OAuth2TokenEndpointAuthMethodClientSecretBasic,
 				expectError: false,
 			},
 			{
 				name:        "ValidClientSecretPost",
-				authMethod:  "client_secret_post",
+				authMethod:  codersdk.OAuth2TokenEndpointAuthMethodClientSecretPost,
 				expectError: false,
 			},
 			{
 				name:        "ValidNone",
-				authMethod:  "none",
+				authMethod:  codersdk.OAuth2TokenEndpointAuthMethodNone,
 				expectError: false, // "none" is valid for public clients per RFC 7591
 			},
 			{
 				name:        "InvalidPrivateKeyJWT",
-				authMethod:  "private_key_jwt",
+				authMethod:  "private_key_jwt", // OIDC-specific, no constant defined
 				expectError: true,
 			},
 			{
 				name:        "InvalidClientSecretJWT",
-				authMethod:  "client_secret_jwt",
+				authMethod:  "client_secret_jwt", // OIDC-specific, no constant defined
 				expectError: true,
 			},
 			{
@@ -478,6 +464,10 @@ func TestOAuth2ClientMetadataValidation(t *testing.T) {
 // TestOAuth2ClientNameValidation tests client name validation requirements
 func TestOAuth2ClientNameValidation(t *testing.T) {
 	t.Parallel()
+
+	// Single instance shared across all sub-tests. Each registers independent OAuth2 apps.
+	client := coderdtest.New(t, nil)
+	_ = coderdtest.CreateFirstUser(t, client)
 
 	tests := []struct {
 		name        string
@@ -530,8 +520,6 @@ func TestOAuth2ClientNameValidation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			client := coderdtest.New(t, nil)
-			_ = coderdtest.CreateFirstUser(t, client)
 			ctx := testutil.Context(t, testutil.WaitLong)
 
 			req := codersdk.OAuth2ClientRegistrationRequest{
@@ -553,6 +541,10 @@ func TestOAuth2ClientNameValidation(t *testing.T) {
 // TestOAuth2ClientScopeValidation tests scope parameter validation
 func TestOAuth2ClientScopeValidation(t *testing.T) {
 	t.Parallel()
+
+	// Single instance shared across all sub-tests. Each registers independent OAuth2 apps.
+	client := coderdtest.New(t, nil)
+	_ = coderdtest.CreateFirstUser(t, client)
 
 	tests := []struct {
 		name        string
@@ -615,8 +607,6 @@ func TestOAuth2ClientScopeValidation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			client := coderdtest.New(t, nil)
-			_ = coderdtest.CreateFirstUser(t, client)
 			ctx := testutil.Context(t, testutil.WaitLong)
 
 			req := codersdk.OAuth2ClientRegistrationRequest{
@@ -659,14 +649,14 @@ func TestOAuth2ClientMetadataDefaults(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should default to authorization_code
-	require.Contains(t, config.GrantTypes, "authorization_code")
+	require.Contains(t, config.GrantTypes, codersdk.OAuth2ProviderGrantTypeAuthorizationCode)
 
 	// Should default to code
-	require.Contains(t, config.ResponseTypes, "code")
+	require.Contains(t, config.ResponseTypes, codersdk.OAuth2ProviderResponseTypeCode)
 
 	// Should default to client_secret_basic or client_secret_post
-	require.True(t, config.TokenEndpointAuthMethod == "client_secret_basic" ||
-		config.TokenEndpointAuthMethod == "client_secret_post" ||
+	require.True(t, config.TokenEndpointAuthMethod == codersdk.OAuth2TokenEndpointAuthMethodClientSecretBasic ||
+		config.TokenEndpointAuthMethod == codersdk.OAuth2TokenEndpointAuthMethodClientSecretPost ||
 		config.TokenEndpointAuthMethod == "")
 
 	// Client secret should be generated
@@ -682,11 +672,13 @@ func TestOAuth2ClientMetadataDefaults(t *testing.T) {
 func TestOAuth2ClientMetadataEdgeCases(t *testing.T) {
 	t.Parallel()
 
+	// Single instance shared across all sub-tests. Each registers independent OAuth2 apps with unique client names.
+	client := coderdtest.New(t, nil)
+	_ = coderdtest.CreateFirstUser(t, client)
+
 	t.Run("ExtremelyLongRedirectURI", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// Create a very long but valid HTTPS URI
@@ -709,8 +701,6 @@ func TestOAuth2ClientMetadataEdgeCases(t *testing.T) {
 	t.Run("ManyRedirectURIs", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// Test with many redirect URIs
@@ -732,8 +722,6 @@ func TestOAuth2ClientMetadataEdgeCases(t *testing.T) {
 	t.Run("URIWithUnusualPort", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		req := codersdk.OAuth2ClientRegistrationRequest{
@@ -748,8 +736,6 @@ func TestOAuth2ClientMetadataEdgeCases(t *testing.T) {
 	t.Run("URIWithComplexPath", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		req := codersdk.OAuth2ClientRegistrationRequest{
@@ -764,8 +750,6 @@ func TestOAuth2ClientMetadataEdgeCases(t *testing.T) {
 	t.Run("URIWithEncodedCharacters", func(t *testing.T) {
 		t.Parallel()
 
-		client := coderdtest.New(t, nil)
-		_ = coderdtest.CreateFirstUser(t, client)
 		ctx := testutil.Context(t, testutil.WaitLong)
 
 		// Test with URL-encoded characters

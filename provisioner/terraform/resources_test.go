@@ -2,6 +2,7 @@ package terraform_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,18 +13,18 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/uuid"
 	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/stretchr/testify/require"
 	protobuf "google.golang.org/protobuf/proto"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
-
-	"github.com/coder/coder/v2/testutil"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
+	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/cryptorand"
 	"github.com/coder/coder/v2/provisioner/terraform"
 	"github.com/coder/coder/v2/provisionersdk/proto"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func ctxAndLogger(t *testing.T) (context.Context, slog.Logger) {
@@ -324,12 +325,14 @@ func TestConvertResources(t *testing.T) {
 					Architecture:    "amd64",
 					ExtraEnvs: []*proto.Env{
 						{
-							Name:  "ENV_1",
-							Value: "Env 1",
+							Name:          "ENV_1",
+							Value:         "Env 1",
+							MergeStrategy: "replace",
 						},
 						{
-							Name:  "ENV_2",
-							Value: "Env 2",
+							Name:          "ENV_2",
+							Value:         "Env 2",
+							MergeStrategy: "replace",
 						},
 					},
 					Auth:                     &proto.Agent_Token{},
@@ -347,8 +350,9 @@ func TestConvertResources(t *testing.T) {
 					Architecture:    "amd64",
 					ExtraEnvs: []*proto.Env{
 						{
-							Name:  "ENV_3",
-							Value: "Env 3",
+							Name:          "ENV_3",
+							Value:         "Env 3",
+							MergeStrategy: "replace",
 						},
 					},
 					Auth:                     &proto.Agent_Token{},
@@ -365,6 +369,51 @@ func TestConvertResources(t *testing.T) {
 				Type: "coder_env",
 			}, {
 				Name: "env3",
+				Type: "coder_env",
+			}},
+		},
+		// Verifies that when multiple coder_env resources define the
+		// same key, the ordering is deterministic (sorted by Terraform
+		// address). This prevents a race condition where Go map
+		// iteration order could cause non-deterministic env values.
+		"duplicate-env-keys": {
+			resources: []*proto.Resource{{
+				Name: "dev",
+				Type: "null_resource",
+				Agents: []*proto.Agent{{
+					Name:            "dev",
+					OperatingSystem: "linux",
+					Architecture:    "amd64",
+					ExtraEnvs: []*proto.Env{
+						{
+							Name:          "PATH",
+							Value:         "/a/bin",
+							MergeStrategy: "append",
+						},
+						{
+							Name:          "PATH",
+							Value:         "/b/bin",
+							MergeStrategy: "append",
+						},
+						{
+							Name:  "UNIQUE",
+							Value: "unique_value",
+						},
+					},
+					Auth:                     &proto.Agent_Token{},
+					ApiKeyScope:              "all",
+					ConnectionTimeoutSeconds: 120,
+					DisplayApps:              &displayApps,
+					ResourcesMonitoring:      &proto.ResourcesMonitoring{},
+				}},
+			}, {
+				Name: "path_a",
+				Type: "coder_env",
+			}, {
+				Name: "path_b",
+				Type: "coder_env",
+			}, {
+				Name: "unique_env",
 				Type: "coder_env",
 			}},
 		},
@@ -654,22 +703,22 @@ func TestConvertResources(t *testing.T) {
 				Name:          "number_example_max_zero",
 				Type:          "number",
 				DefaultValue:  "-2",
-				ValidationMin: terraform.PtrInt32(-3),
-				ValidationMax: terraform.PtrInt32(0),
+				ValidationMin: ptr.Ref(int32(-3)),
+				ValidationMax: ptr.Ref(int32(0)),
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:          "number_example_min_max",
 				Type:          "number",
 				DefaultValue:  "4",
-				ValidationMin: terraform.PtrInt32(3),
-				ValidationMax: terraform.PtrInt32(6),
+				ValidationMin: ptr.Ref(int32(3)),
+				ValidationMax: ptr.Ref(int32(6)),
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:          "number_example_min_zero",
 				Type:          "number",
 				DefaultValue:  "4",
-				ValidationMin: terraform.PtrInt32(0),
-				ValidationMax: terraform.PtrInt32(6),
+				ValidationMin: ptr.Ref(int32(0)),
+				ValidationMax: ptr.Ref(int32(6)),
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:         "Sample",
@@ -738,34 +787,34 @@ func TestConvertResources(t *testing.T) {
 				Type:          "number",
 				DefaultValue:  "4",
 				ValidationMin: nil,
-				ValidationMax: terraform.PtrInt32(6),
+				ValidationMax: ptr.Ref(int32(6)),
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:          "number_example_max_zero",
 				Type:          "number",
 				DefaultValue:  "-3",
 				ValidationMin: nil,
-				ValidationMax: terraform.PtrInt32(0),
+				ValidationMax: ptr.Ref(int32(0)),
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:          "number_example_min",
 				Type:          "number",
 				DefaultValue:  "4",
-				ValidationMin: terraform.PtrInt32(3),
+				ValidationMin: ptr.Ref(int32(3)),
 				ValidationMax: nil,
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:          "number_example_min_max",
 				Type:          "number",
 				DefaultValue:  "4",
-				ValidationMin: terraform.PtrInt32(3),
-				ValidationMax: terraform.PtrInt32(6),
+				ValidationMin: ptr.Ref(int32(3)),
+				ValidationMax: ptr.Ref(int32(6)),
 				FormType:      proto.ParameterFormType_INPUT,
 			}, {
 				Name:          "number_example_min_zero",
 				Type:          "number",
 				DefaultValue:  "4",
-				ValidationMin: terraform.PtrInt32(0),
+				ValidationMin: ptr.Ref(int32(0)),
 				ValidationMax: nil,
 				FormType:      proto.ParameterFormType_INPUT,
 			}},
@@ -930,6 +979,105 @@ func TestConvertResources(t *testing.T) {
 				{Name: "dev2", Type: "coder_devcontainer"},
 			},
 		},
+		"devcontainer-resources": {
+			resources: []*proto.Resource{
+				{Name: "dev", Type: "coder_devcontainer"},
+				{
+					Name: "dev",
+					Type: "null_resource",
+					Agents: []*proto.Agent{{
+						Name:                     "main",
+						OperatingSystem:          "linux",
+						Architecture:             "amd64",
+						Auth:                     &proto.Agent_Token{},
+						ApiKeyScope:              "all",
+						ConnectionTimeoutSeconds: 120,
+						DisplayApps:              &displayApps,
+						ResourcesMonitoring:      &proto.ResourcesMonitoring{},
+						Devcontainers: []*proto.Devcontainer{
+							{
+								Name:            "dev",
+								WorkspaceFolder: "/workspace",
+								Apps: []*proto.App{
+									{
+										Slug:        "devcontainer-app",
+										DisplayName: "devcontainer-app",
+										OpenIn:      proto.AppOpenIn_SLIM_WINDOW,
+									},
+								},
+								Scripts: []*proto.Script{
+									{
+										DisplayName: "Devcontainer Script",
+										Script:      "echo devcontainer",
+										RunOnStart:  true,
+										RunOnStop:   false,
+									},
+								},
+								Envs: []*proto.Env{
+									{
+										Name:          "DEVCONTAINER_ENV",
+										Value:         "devcontainer-value",
+										MergeStrategy: "replace",
+									},
+								},
+							},
+						},
+					}},
+				},
+				{Name: "devcontainer-env", Type: "coder_env"},
+			},
+		},
+		"devcontainer-multiple-agents": {
+			resources: []*proto.Resource{
+				{Name: "dev", Type: "coder_devcontainer"},
+				{
+					Name: "dev",
+					Type: "null_resource",
+					Agents: []*proto.Agent{{
+						Name:                     "main",
+						OperatingSystem:          "linux",
+						Architecture:             "amd64",
+						Auth:                     &proto.Agent_Token{},
+						ApiKeyScope:              "all",
+						ConnectionTimeoutSeconds: 120,
+						DisplayApps:              &displayApps,
+						ResourcesMonitoring:      &proto.ResourcesMonitoring{},
+						Devcontainers: []*proto.Devcontainer{
+							{
+								Name:            "dev",
+								WorkspaceFolder: "/workspace",
+								Apps: []*proto.App{
+									{
+										Slug:        "devcontainer-app",
+										DisplayName: "devcontainer-app",
+										OpenIn:      proto.AppOpenIn_SLIM_WINDOW,
+									},
+								},
+							},
+							{
+								Name:            "other",
+								WorkspaceFolder: "/other",
+							},
+						},
+					}},
+				},
+				{Name: "other", Type: "coder_devcontainer"},
+				{
+					Name: "secondary",
+					Type: "null_resource",
+					Agents: []*proto.Agent{{
+						Name:                     "secondary",
+						OperatingSystem:          "linux",
+						Architecture:             "amd64",
+						Auth:                     &proto.Agent_Token{},
+						ApiKeyScope:              "all",
+						ConnectionTimeoutSeconds: 120,
+						DisplayApps:              &displayApps,
+						ResourcesMonitoring:      &proto.ResourcesMonitoring{},
+					}},
+				},
+			},
+		},
 	} {
 		t.Run(folderName, func(t *testing.T) {
 			t.Parallel()
@@ -970,6 +1118,13 @@ func TestConvertResources(t *testing.T) {
 						}
 						for _, app := range agent.Apps {
 							app.Id = ""
+						}
+						for _, dc := range agent.Devcontainers {
+							dc.Id = ""
+							dc.SubagentId = ""
+							for _, app := range dc.Apps {
+								app.Id = ""
+							}
 						}
 					}
 				}
@@ -1043,6 +1198,13 @@ func TestConvertResources(t *testing.T) {
 						}
 						for _, app := range agent.Apps {
 							app.Id = ""
+						}
+						for _, dc := range agent.Devcontainers {
+							dc.Id = ""
+							dc.SubagentId = ""
+							for _, app := range dc.Apps {
+								app.Id = ""
+							}
 						}
 					}
 				}
@@ -1360,7 +1522,6 @@ func TestDefaultPresets(t *testing.T) {
 	}
 
 	for name, tc := range cases {
-		tc := tc
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			ctx, logger := ctxAndLogger(t)
@@ -1549,6 +1710,60 @@ func TestAITasks(t *testing.T) {
 		// This is validated once all parameters are resolved etc as part of the workspace build, but for now we can allow it.
 		require.Len(t, state.AITasks, 2)
 	})
+
+	t.Run("Can use sidebar app ID", func(t *testing.T) {
+		t.Parallel()
+
+		// nolint:dogsled
+		_, filename, _, _ := runtime.Caller(0)
+
+		dir := filepath.Join(filepath.Dir(filename), "testdata", "resources", "ai-tasks-sidebar")
+		tfPlanRaw, err := os.ReadFile(filepath.Join(dir, "ai-tasks-sidebar.tfplan.json"))
+		require.NoError(t, err)
+		var tfPlan tfjson.Plan
+		err = json.Unmarshal(tfPlanRaw, &tfPlan)
+		require.NoError(t, err)
+		tfPlanGraph, err := os.ReadFile(filepath.Join(dir, "ai-tasks-sidebar.tfplan.dot"))
+		require.NoError(t, err)
+
+		state, err := terraform.ConvertState(ctx, []*tfjson.StateModule{tfPlan.PlannedValues.RootModule, tfPlan.PriorState.Values.RootModule}, string(tfPlanGraph), logger)
+		require.NotNil(t, state)
+		require.NoError(t, err)
+		require.True(t, state.HasAITasks)
+		require.Len(t, state.AITasks, 1)
+
+		sidebarApp := state.AITasks[0].GetSidebarApp()
+		require.NotNil(t, sidebarApp)
+		require.Equal(t, "5ece4674-dd35-4f16-88c8-82e40e72e2fd", sidebarApp.GetId())
+		require.Equal(t, "5ece4674-dd35-4f16-88c8-82e40e72e2fd", state.AITasks[0].AppId)
+	})
+
+	t.Run("Can use app ID", func(t *testing.T) {
+		t.Parallel()
+
+		// nolint:dogsled
+		_, filename, _, _ := runtime.Caller(0)
+
+		dir := filepath.Join(filepath.Dir(filename), "testdata", "resources", "ai-tasks-app")
+		tfPlanRaw, err := os.ReadFile(filepath.Join(dir, "ai-tasks-app.tfplan.json"))
+		require.NoError(t, err)
+		var tfPlan tfjson.Plan
+		err = json.Unmarshal(tfPlanRaw, &tfPlan)
+		require.NoError(t, err)
+		tfPlanGraph, err := os.ReadFile(filepath.Join(dir, "ai-tasks-app.tfplan.dot"))
+		require.NoError(t, err)
+
+		state, err := terraform.ConvertState(ctx, []*tfjson.StateModule{tfPlan.PlannedValues.RootModule, tfPlan.PriorState.Values.RootModule}, string(tfPlanGraph), logger)
+		require.NotNil(t, state)
+		require.NoError(t, err)
+		require.True(t, state.HasAITasks)
+		require.Len(t, state.AITasks, 1)
+
+		sidebarApp := state.AITasks[0].GetSidebarApp()
+		require.NotNil(t, sidebarApp)
+		require.Equal(t, "5ece4674-dd35-4f16-88c8-82e40e72e2fd", sidebarApp.GetId())
+		require.Equal(t, "5ece4674-dd35-4f16-88c8-82e40e72e2fd", state.AITasks[0].AppId)
+	})
 }
 
 func TestExternalAgents(t *testing.T) {
@@ -1603,6 +1818,11 @@ func sortResources(resources []*proto.Resource) {
 			sort.Slice(agent.Devcontainers, func(i, j int) bool {
 				return agent.Devcontainers[i].Name < agent.Devcontainers[j].Name
 			})
+			for _, dc := range agent.Devcontainers {
+				sort.Slice(dc.Apps, func(i, j int) bool {
+					return dc.Apps[i].Slug < dc.Apps[j].Slug
+				})
+			}
 		}
 		sort.Slice(resource.Agents, func(i, j int) bool {
 			return resource.Agents[i].Name < resource.Agents[j].Name
@@ -1614,4 +1834,26 @@ func sortExternalAuthProviders(providers []*proto.ExternalAuthProviderResource) 
 	sort.Slice(providers, func(i, j int) bool {
 		return strings.Compare(providers[i].Id, providers[j].Id) == -1
 	})
+}
+
+// deterministicAppIDs handles setting agent app ids to something deterministic.
+// In plan files, ids are not present. In state files, they are.
+// It is simpler for comparisons if we just set it to something deterministic.
+func deterministicAppIDs(resources []*proto.Resource) {
+	for _, resource := range resources {
+		for _, agent := range resource.Agents {
+			for _, app := range agent.Apps {
+				data := sha256.Sum256([]byte(app.Slug + app.DisplayName))
+				id, _ := uuid.FromBytes(data[:16])
+				app.Id = id.String()
+			}
+			for _, dc := range agent.Devcontainers {
+				for _, app := range dc.Apps {
+					data := sha256.Sum256([]byte(app.Slug + app.DisplayName))
+					id, _ := uuid.FromBytes(data[:16])
+					app.Id = id.String()
+				}
+			}
+		}
+	}
 }

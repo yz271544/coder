@@ -1,26 +1,19 @@
-import type { Workspace } from "api/typesGenerated";
-import { Avatar } from "components/Avatar/Avatar";
-import {
-	Sidebar as BaseSidebar,
-	SidebarHeader,
-	SidebarNavItem,
-} from "components/Sidebar/Sidebar";
 import {
 	SettingsIcon as GeneralIcon,
 	CodeIcon as ParameterIcon,
 	TimerIcon as ScheduleIcon,
 	Users as SharingIcon,
 } from "lucide-react";
-import { useDashboard } from "modules/dashboard/useDashboard";
-import type { FC } from "react";
+import { Avatar } from "#/components/Avatar/Avatar";
+import {
+	Sidebar as BaseSidebar,
+	SidebarHeader,
+	SidebarNavItem,
+} from "#/components/Sidebar/Sidebar";
+import { useWorkspaceSettings } from "./useWorkspaceSettings";
 
-interface SidebarProps {
-	username: string;
-	workspace: Workspace;
-}
-
-export const Sidebar: FC<SidebarProps> = ({ username, workspace }) => {
-	const { experiments } = useDashboard();
+export const Sidebar: React.FC = () => {
+	const { owner, workspace, permissions } = useWorkspaceSettings();
 
 	return (
 		<BaseSidebar>
@@ -33,7 +26,7 @@ export const Sidebar: FC<SidebarProps> = ({ username, workspace }) => {
 					/>
 				}
 				title={workspace.name}
-				linkTo={`/@${username}/${workspace.name}`}
+				linkTo={`/@${owner}/${workspace.name}`}
 				subtitle={workspace.template_display_name ?? workspace.template_name}
 			/>
 
@@ -46,7 +39,7 @@ export const Sidebar: FC<SidebarProps> = ({ username, workspace }) => {
 			<SidebarNavItem href="schedule" icon={ScheduleIcon}>
 				Schedule
 			</SidebarNavItem>
-			{experiments.includes("workspace-sharing") && (
+			{permissions?.shareWorkspace && (
 				<SidebarNavItem href="sharing" icon={SharingIcon}>
 					Sharing
 				</SidebarNavItem>

@@ -5,6 +5,13 @@ USAGE:
 
   Authenticate with Coder deployment
 
+  By default, the session token is stored in the operating system keyring on
+  macOS and Windows and a plain text file on Linux. Use the --use-keyring flag
+  or CODER_USE_KEYRING environment variable to change the storage mechanism.
+
+SUBCOMMANDS:
+    token    Print the current session token
+
 OPTIONS:
       --first-user-email string, $CODER_FIRST_USER_EMAIL
           Specifies an email address to use if creating the first user for the

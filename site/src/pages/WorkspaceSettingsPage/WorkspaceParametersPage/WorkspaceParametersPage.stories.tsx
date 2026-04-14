@@ -1,3 +1,5 @@
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import { action } from "storybook/actions";
 import {
 	MockOutdatedStoppedWorkspaceRequireActiveVersion,
 	MockTemplateVersionParameter1,
@@ -7,9 +9,7 @@ import {
 	MockWorkspaceBuildParameter1,
 	MockWorkspaceBuildParameter2,
 	MockWorkspaceBuildParameter3,
-} from "testHelpers/entities";
-import type { Meta, StoryObj } from "@storybook/react-vite";
-import { action } from "storybook/actions";
+} from "#/testHelpers/entities";
 import { WorkspaceParametersPageView } from "./WorkspaceParametersPage";
 
 const meta: Meta<typeof WorkspaceParametersPageView> = {
@@ -21,22 +21,19 @@ const meta: Meta<typeof WorkspaceParametersPageView> = {
 		workspace: MockWorkspace,
 		canChangeVersions: true,
 		onCancel: action("onCancel"),
-
-		data: {
-			buildParameters: [
-				MockWorkspaceBuildParameter1,
-				MockWorkspaceBuildParameter2,
-				MockWorkspaceBuildParameter3,
-			],
-			templateVersionRichParameters: [
-				MockTemplateVersionParameter1,
-				MockTemplateVersionParameter2,
-				{
-					...MockTemplateVersionParameter3,
-					mutable: false,
-				},
-			],
-		},
+		buildParameters: [
+			MockWorkspaceBuildParameter1,
+			MockWorkspaceBuildParameter2,
+			MockWorkspaceBuildParameter3,
+		],
+		templateVersionParameters: [
+			MockTemplateVersionParameter1,
+			MockTemplateVersionParameter2,
+			{
+				...MockTemplateVersionParameter3,
+				mutable: false,
+			},
+		],
 	},
 };
 
@@ -47,10 +44,8 @@ const Example: Story = {};
 
 export const Empty: Story = {
 	args: {
-		data: {
-			buildParameters: [],
-			templateVersionRichParameters: [],
-		},
+		buildParameters: [],
+		templateVersionParameters: [],
 	},
 };
 
@@ -58,21 +53,19 @@ export const RequireActiveVersionNoChangeVersion: Story = {
 	args: {
 		workspace: MockOutdatedStoppedWorkspaceRequireActiveVersion,
 		canChangeVersions: false,
-		data: {
-			buildParameters: [
-				MockWorkspaceBuildParameter1,
-				MockWorkspaceBuildParameter2,
-				MockWorkspaceBuildParameter3,
-			],
-			templateVersionRichParameters: [
-				MockTemplateVersionParameter1,
-				MockTemplateVersionParameter2,
-				{
-					...MockTemplateVersionParameter3,
-					mutable: false,
-				},
-			],
-		},
+		buildParameters: [
+			MockWorkspaceBuildParameter1,
+			MockWorkspaceBuildParameter2,
+			MockWorkspaceBuildParameter3,
+		],
+		templateVersionParameters: [
+			MockTemplateVersionParameter1,
+			MockTemplateVersionParameter2,
+			{
+				...MockTemplateVersionParameter3,
+				mutable: false,
+			},
+		],
 	},
 };
 
@@ -80,21 +73,19 @@ export const RequireActiveVersionCanChangeVersion: Story = {
 	args: {
 		workspace: MockOutdatedStoppedWorkspaceRequireActiveVersion,
 		canChangeVersions: true,
-		data: {
-			buildParameters: [
-				MockWorkspaceBuildParameter1,
-				MockWorkspaceBuildParameter2,
-				MockWorkspaceBuildParameter3,
-			],
-			templateVersionRichParameters: [
-				MockTemplateVersionParameter1,
-				MockTemplateVersionParameter2,
-				{
-					...MockTemplateVersionParameter3,
-					mutable: false,
-				},
-			],
-		},
+		buildParameters: [
+			MockWorkspaceBuildParameter1,
+			MockWorkspaceBuildParameter2,
+			MockWorkspaceBuildParameter3,
+		],
+		templateVersionParameters: [
+			MockTemplateVersionParameter1,
+			MockTemplateVersionParameter2,
+			{
+				...MockTemplateVersionParameter3,
+				mutable: false,
+			},
+		],
 	},
 };
 

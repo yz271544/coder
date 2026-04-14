@@ -41,7 +41,7 @@ import (
 	"tailscale.com/derp/derphttp"
 	"tailscale.com/types/key"
 
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/cli"
 	"github.com/coder/coder/v2/cli/clitest"
@@ -53,6 +53,7 @@ import (
 	"github.com/coder/coder/v2/coderd/database/migrations"
 	"github.com/coder/coder/v2/coderd/httpapi"
 	"github.com/coder/coder/v2/coderd/telemetry"
+	"github.com/coder/coder/v2/coderd/userpassword"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/cryptorand"
 	"github.com/coder/coder/v2/pty/ptytest"
@@ -105,6 +106,29 @@ func TestReadExternalAuthProvidersFromEnv(t *testing.T) {
 		assert.Equal(t, "Google", providers[1].DisplayName)
 		assert.Equal(t, "/icon/google.svg", providers[1].DisplayIcon)
 	})
+}
+
+func TestReadExternalAuthProvidersFromEnv_APIBaseURL(t *testing.T) {
+	t.Parallel()
+	providers, err := cli.ReadExternalAuthProvidersFromEnv([]string{
+		"CODER_EXTERNAL_AUTH_0_TYPE=github",
+		"CODER_EXTERNAL_AUTH_0_CLIENT_ID=xxx",
+		"CODER_EXTERNAL_AUTH_0_API_BASE_URL=https://ghes.corp.com/api/v3",
+	})
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	assert.Equal(t, "https://ghes.corp.com/api/v3", providers[0].APIBaseURL)
+}
+
+func TestReadExternalAuthProvidersFromEnv_APIBaseURLDefault(t *testing.T) {
+	t.Parallel()
+	providers, err := cli.ReadExternalAuthProvidersFromEnv([]string{
+		"CODER_EXTERNAL_AUTH_0_TYPE=github",
+		"CODER_EXTERNAL_AUTH_0_CLIENT_ID=xxx",
+	})
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	assert.Equal(t, "", providers[0].APIBaseURL)
 }
 
 // TestReadGitAuthProvidersFromEnv ensures that the deprecated `CODER_GITAUTH_`
@@ -302,6 +326,7 @@ func TestServer(t *testing.T) {
 			"open install.sh: file does not exist",
 			"telemetry disabled, unable to notify of security issues",
 			"installed terraform version newer than expected",
+			"report generator",
 		}
 
 		countLines := func(fullOutput string) int {
@@ -348,9 +373,6 @@ func TestServer(t *testing.T) {
 
 		runGitHubProviderTest := func(t *testing.T, tc testCase) {
 			t.Parallel()
-			if !dbtestutil.WillUsePostgres() {
-				t.Skip("test requires postgres")
-			}
 
 			ctx, cancelFunc := context.WithCancel(testutil.Context(t, testutil.WaitLong))
 			defer cancelFunc()
@@ -1743,6 +1765,18 @@ func TestServer(t *testing.T) {
 
 			// Next, we instruct the same server to display the YAML config
 			// and then save it.
+			// Because this is literally the same invocation, DefaultFn sets the
+			// value of 'Default'. Which triggers a mutually exclusive error
+			// on the next parse.
+			// Usually we only parse flags once, so this is not an issue
+			for _, c := range inv.Command.Children {
+				if c.Name() == "server" {
+					for i := range c.Options {
+						c.Options[i].DefaultFn = nil
+					}
+					break
+				}
+			}
 			inv = inv.WithContext(testutil.Context(t, testutil.WaitMedium))
 			//nolint:gocritic
 			inv.Args = append(args, "--write-config")
@@ -1794,6 +1828,155 @@ func TestServer(t *testing.T) {
 			w.RequireSuccess()
 		})
 	})
+}
+
+//nolint:tparallel,paralleltest // This test sets environment variables.
+func TestServer_ExternalAuthGitHubDefaultProvider(t *testing.T) {
+	type testCase struct {
+		name               string
+		args               []string
+		env                map[string]string
+		createUserPreStart bool
+		expectedProviders  []string
+	}
+
+	run := func(t *testing.T, tc testCase) {
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		unsetPrefixedEnv := func(prefix string) {
+			t.Helper()
+			for _, envVar := range os.Environ() {
+				envKey, _, found := strings.Cut(envVar, "=")
+				if !found || !strings.HasPrefix(envKey, prefix) {
+					continue
+				}
+				value, had := os.LookupEnv(envKey)
+				require.True(t, had)
+				require.NoError(t, os.Unsetenv(envKey))
+				keyCopy := envKey
+				valueCopy := value
+				t.Cleanup(func() {
+					// This is for setting/unsetting a number of prefixed env vars.
+					// t.Setenv doesn't cover this use case.
+					// nolint:usetesting
+					_ = os.Setenv(keyCopy, valueCopy)
+				})
+			}
+		}
+		unsetPrefixedEnv("CODER_EXTERNAL_AUTH_")
+		unsetPrefixedEnv("CODER_GITAUTH_")
+
+		dbURL, err := dbtestutil.Open(t)
+		require.NoError(t, err)
+		db, _ := dbtestutil.NewDB(t, dbtestutil.WithURL(dbURL))
+
+		const (
+			existingUserEmail    = "existing-user@coder.com"
+			existingUserUsername = "existing-user"
+			existingUserPassword = "SomeSecurePassword!"
+		)
+		if tc.createUserPreStart {
+			hashedPassword, err := userpassword.Hash(existingUserPassword)
+			require.NoError(t, err)
+			_ = dbgen.User(t, db, database.User{
+				Email:          existingUserEmail,
+				Username:       existingUserUsername,
+				HashedPassword: []byte(hashedPassword),
+			})
+		}
+
+		args := []string{
+			"server",
+			"--postgres-url", dbURL,
+			"--http-address", ":0",
+			"--access-url", "https://example.com",
+		}
+		args = append(args, tc.args...)
+
+		inv, cfg := clitest.New(t, args...)
+		for envKey, value := range tc.env {
+			t.Setenv(envKey, value)
+		}
+		clitest.Start(t, inv)
+
+		accessURL := waitAccessURL(t, cfg)
+		client := codersdk.New(accessURL)
+
+		if tc.createUserPreStart {
+			loginResp, err := client.LoginWithPassword(ctx, codersdk.LoginWithPasswordRequest{
+				Email:    existingUserEmail,
+				Password: existingUserPassword,
+			})
+			require.NoError(t, err)
+			client.SetSessionToken(loginResp.SessionToken)
+		} else {
+			_ = coderdtest.CreateFirstUser(t, client)
+		}
+
+		externalAuthResp, err := client.ListExternalAuths(ctx)
+		require.NoError(t, err)
+
+		gotProviders := map[string]codersdk.ExternalAuthLinkProvider{}
+		for _, provider := range externalAuthResp.Providers {
+			gotProviders[provider.ID] = provider
+		}
+		require.Len(t, gotProviders, len(tc.expectedProviders))
+
+		for _, providerID := range tc.expectedProviders {
+			provider, ok := gotProviders[providerID]
+			require.Truef(t, ok, "expected provider %q to be configured", providerID)
+			if providerID == codersdk.EnhancedExternalAuthProviderGitHub.String() {
+				require.Equal(t, codersdk.EnhancedExternalAuthProviderGitHub.String(), provider.Type)
+				require.True(t, provider.Device)
+			}
+		}
+	}
+
+	for _, tc := range []testCase{
+		{
+			name:              "NewDeployment_NoExplicitProviders_InjectsDefaultGithub",
+			expectedProviders: []string{codersdk.EnhancedExternalAuthProviderGitHub.String()},
+		},
+		{
+			name:               "ExistingDeployment_DoesNotInjectDefaultGithub",
+			createUserPreStart: true,
+			expectedProviders:  nil,
+		},
+		{
+			name: "DefaultProviderDisabled_DoesNotInjectDefaultGithub",
+			args: []string{
+				"--external-auth-github-default-provider-enable=false",
+			},
+			expectedProviders: nil,
+		},
+		{
+			name: "ExplicitProviderViaConfig_DoesNotInjectDefaultGithub",
+			args: []string{
+				`--external-auth-providers=[{"type":"gitlab","client_id":"config-client-id"}]`,
+			},
+			expectedProviders: []string{codersdk.EnhancedExternalAuthProviderGitLab.String()},
+		},
+		{
+			name: "ExplicitProviderViaEnv_DoesNotInjectDefaultGithub",
+			env: map[string]string{
+				"CODER_EXTERNAL_AUTH_0_TYPE":      codersdk.EnhancedExternalAuthProviderGitLab.String(),
+				"CODER_EXTERNAL_AUTH_0_CLIENT_ID": "env-client-id",
+			},
+			expectedProviders: []string{codersdk.EnhancedExternalAuthProviderGitLab.String()},
+		},
+		{
+			name: "ExplicitProviderViaLegacyEnv_DoesNotInjectDefaultGithub",
+			env: map[string]string{
+				"CODER_GITAUTH_0_TYPE":      codersdk.EnhancedExternalAuthProviderGitLab.String(),
+				"CODER_GITAUTH_0_CLIENT_ID": "legacy-env-client-id",
+			},
+			expectedProviders: []string{codersdk.EnhancedExternalAuthProviderGitLab.String()},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run(t, tc)
+		})
+	}
 }
 
 //nolint:tparallel,paralleltest // This test sets environment variables.
@@ -1940,7 +2123,6 @@ func TestServer_TelemetryDisable(t *testing.T) {
 	// Set the default telemetry to true (normally disabled in tests).
 	t.Setenv("CODER_TEST_TELEMETRY_DEFAULT_ENABLE", "true")
 
-	//nolint:paralleltest // No need to reinitialise the variable tt (Go version).
 	for _, tt := range []struct {
 		key  string
 		val  string
@@ -2142,10 +2324,6 @@ func TestServerYAMLConfig(t *testing.T) {
 func TestConnectToPostgres(t *testing.T) {
 	t.Parallel()
 
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("this test does not make sense without postgres")
-	}
-
 	t.Run("Migrate", func(t *testing.T) {
 		t.Parallel()
 
@@ -2251,14 +2429,11 @@ type runServerOpts struct {
 	waitForSnapshot               bool
 	telemetryDisabled             bool
 	waitForTelemetryDisabledCheck bool
+	name                          string
 }
 
 func TestServer_TelemetryDisabled_FinalReport(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("this test requires postgres")
-	}
 
 	telemetryServerURL, deployment, snapshot := mockTelemetryServer(t)
 	dbConnURL, err := dbtestutil.Open(t)
@@ -2277,25 +2452,23 @@ func TestServer_TelemetryDisabled_FinalReport(t *testing.T) {
 			"--cache-dir", cacheDir,
 			"--log-filter", ".*",
 		)
-		finished := make(chan bool, 2)
+		inv.Logger = inv.Logger.Named(opts.name)
+
 		errChan := make(chan error, 1)
-		pty := ptytest.New(t).Attach(inv)
+		pty := ptytest.New(t).Named(opts.name).Attach(inv)
 		go func() {
 			errChan <- inv.WithContext(ctx).Run()
-			finished <- true
+			// close the pty here so that we can start tearing down resources. This test creates multiple servers with
+			// associated ptys. There is a `t.Cleanup()` that does this, but it waits until the whole test is complete.
+			_ = pty.Close()
 		}()
-		go func() {
-			defer func() {
-				finished <- true
-			}()
-			if opts.waitForSnapshot {
-				pty.ExpectMatchContext(testutil.Context(t, testutil.WaitLong), "submitted snapshot")
-			}
-			if opts.waitForTelemetryDisabledCheck {
-				pty.ExpectMatchContext(testutil.Context(t, testutil.WaitLong), "finished telemetry status check")
-			}
-		}()
-		<-finished
+
+		if opts.waitForSnapshot {
+			pty.ExpectMatchContext(testutil.Context(t, testutil.WaitLong), "submitted snapshot")
+		}
+		if opts.waitForTelemetryDisabledCheck {
+			pty.ExpectMatchContext(testutil.Context(t, testutil.WaitLong), "finished telemetry status check")
+		}
 		return errChan, cancelFunc
 	}
 	waitForShutdown := func(t *testing.T, errChan chan error) error {
@@ -2309,7 +2482,9 @@ func TestServer_TelemetryDisabled_FinalReport(t *testing.T) {
 		return nil
 	}
 
-	errChan, cancelFunc := runServer(t, runServerOpts{telemetryDisabled: true, waitForTelemetryDisabledCheck: true})
+	errChan, cancelFunc := runServer(t, runServerOpts{
+		telemetryDisabled: true, waitForTelemetryDisabledCheck: true, name: "0disabled",
+	})
 	cancelFunc()
 	require.NoError(t, waitForShutdown(t, errChan))
 
@@ -2317,7 +2492,7 @@ func TestServer_TelemetryDisabled_FinalReport(t *testing.T) {
 	require.Empty(t, deployment)
 	require.Empty(t, snapshot)
 
-	errChan, cancelFunc = runServer(t, runServerOpts{waitForSnapshot: true})
+	errChan, cancelFunc = runServer(t, runServerOpts{waitForSnapshot: true, name: "1enabled"})
 	cancelFunc()
 	require.NoError(t, waitForShutdown(t, errChan))
 	// we expect to see a deployment and a snapshot twice:
@@ -2336,7 +2511,9 @@ func TestServer_TelemetryDisabled_FinalReport(t *testing.T) {
 		}
 	}
 
-	errChan, cancelFunc = runServer(t, runServerOpts{telemetryDisabled: true, waitForTelemetryDisabledCheck: true})
+	errChan, cancelFunc = runServer(t, runServerOpts{
+		telemetryDisabled: true, waitForTelemetryDisabledCheck: true, name: "2disabled",
+	})
 	cancelFunc()
 	require.NoError(t, waitForShutdown(t, errChan))
 
@@ -2352,7 +2529,9 @@ func TestServer_TelemetryDisabled_FinalReport(t *testing.T) {
 		t.Fatalf("timed out waiting for snapshot")
 	}
 
-	errChan, cancelFunc = runServer(t, runServerOpts{telemetryDisabled: true, waitForTelemetryDisabledCheck: true})
+	errChan, cancelFunc = runServer(t, runServerOpts{
+		telemetryDisabled: true, waitForTelemetryDisabledCheck: true, name: "3disabled",
+	})
 	cancelFunc()
 	require.NoError(t, waitForShutdown(t, errChan))
 	// Since telemetry is disabled and we've already sent a snapshot, we expect no

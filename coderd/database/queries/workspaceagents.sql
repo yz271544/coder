@@ -17,6 +17,8 @@ WHERE
 	auth_instance_id = @auth_instance_id :: TEXT
 	-- Filter out deleted sub agents.
 	AND deleted = FALSE
+	-- Filter out sub agents, they do not authenticate with auth_instance_id.
+	AND parent_id IS NULL
 ORDER BY
 	created_at DESC;
 
@@ -142,6 +144,27 @@ WHERE
 	wam.workspace_agent_id = $1
 	AND wam.key = m.key;
 
+-- name: BatchUpdateWorkspaceAgentMetadata :exec
+WITH metadata AS (
+	SELECT
+		unnest(sqlc.arg('workspace_agent_id')::uuid[]) AS workspace_agent_id,
+		unnest(sqlc.arg('key')::text[]) AS key,
+		unnest(sqlc.arg('value')::text[]) AS value,
+		unnest(sqlc.arg('error')::text[]) AS error,
+		unnest(sqlc.arg('collected_at')::timestamptz[]) AS collected_at
+)
+UPDATE
+	workspace_agent_metadata wam
+SET
+	value = m.value,
+	error = m.error,
+	collected_at = m.collected_at
+FROM
+	metadata m
+WHERE
+	wam.workspace_agent_id = m.workspace_agent_id
+	AND wam.key = m.key;
+
 -- name: GetWorkspaceAgentMetadata :many
 SELECT
 	*
@@ -156,6 +179,22 @@ UPDATE
 	workspace_agents
 SET
 	logs_overflowed = $2
+WHERE
+	id = $1;
+
+-- name: UpdateWorkspaceAgentDisplayAppsByID :exec
+UPDATE
+	workspace_agents
+SET
+	display_apps = $2, updated_at = $3
+WHERE
+	id = $1;
+
+-- name: UpdateWorkspaceAgentDirectoryByID :exec
+UPDATE
+	workspace_agents
+SET
+	directory = $2, updated_at = $3
 WHERE
 	id = $1;
 
@@ -199,10 +238,10 @@ INSERT INTO
 -- name: GetWorkspaceAgentLogSourcesByAgentIDs :many
 SELECT * FROM workspace_agent_log_sources WHERE workspace_agent_id = ANY(@ids :: uuid [ ]);
 
--- If an agent hasn't connected in the last 7 days, we purge it's logs.
+-- If an agent hasn't connected within the retention period, we purge its logs.
 -- Exception: if the logs are related to the latest build, we keep those around.
 -- Logs can take up a lot of space, so it's important we clean up frequently.
--- name: DeleteOldWorkspaceAgentLogs :exec
+-- name: DeleteOldWorkspaceAgentLogs :execrows
 WITH
 	latest_builds AS (
 		SELECT
@@ -281,11 +320,17 @@ WHERE
 	-- Filter out deleted sub agents.
 	AND workspace_agents.deleted = FALSE;
 
--- name: GetWorkspaceAgentAndLatestBuildByAuthToken :one
+-- GetAuthenticatedWorkspaceAgentAndBuildByAuthToken returns an authenticated
+-- workspace agent and its associated build. During normal operation, this is
+-- the latest build. During shutdown, this may be the previous START build while
+-- the STOP build is executing, allowing shutdown scripts to authenticate (see
+-- issue #19467).
+-- name: GetAuthenticatedWorkspaceAgentAndBuildByAuthToken :one
 SELECT
 	sqlc.embed(workspaces),
 	sqlc.embed(workspace_agents),
-	sqlc.embed(workspace_build_with_user)
+	sqlc.embed(workspace_build_with_user),
+	tasks.id AS task_id
 FROM
 	workspace_agents
 JOIN
@@ -300,23 +345,50 @@ JOIN
 	workspaces
 ON
 	workspace_build_with_user.workspace_id = workspaces.id
+LEFT JOIN
+	tasks
+ON
+	tasks.workspace_id = workspaces.id
 WHERE
 	-- This should only match 1 agent, so 1 returned row or 0.
 	workspace_agents.auth_token = @auth_token::uuid
 	AND workspaces.deleted = FALSE
 	-- Filter out deleted sub agents.
 	AND workspace_agents.deleted = FALSE
-	-- Filter out builds that are not the latest.
-	AND workspace_build_with_user.build_number = (
-		-- Select from workspace_builds as it's one less join compared
-		-- to workspace_build_with_user.
-		SELECT
-			MAX(build_number)
-		FROM
-			workspace_builds
-		WHERE
-			workspace_id = workspace_build_with_user.workspace_id
-	)
+	-- Filter out builds that are not the latest, with exception for shutdown case.
+	-- Use CASE for short-circuiting: check normal case first (most common), then shutdown case.
+	AND CASE
+		-- Normal case: Agent's build is the latest build.
+		WHEN workspace_build_with_user.build_number = (
+			SELECT
+				MAX(build_number)
+			FROM
+				workspace_builds
+			WHERE
+				workspace_id = workspace_build_with_user.workspace_id
+		) THEN TRUE
+		-- Shutdown case: Agent from previous START build during STOP build execution.
+		WHEN workspace_build_with_user.transition = 'start'
+			-- Agent's START build job succeeded.
+			AND (SELECT job_status FROM provisioner_jobs WHERE id = workspace_build_with_user.job_id) = 'succeeded'
+			-- Latest build is a STOP build whose job is still active,
+			-- and agent's build is immediately previous.
+			AND EXISTS (
+				SELECT 1
+				FROM workspace_builds latest
+				JOIN provisioner_jobs pj ON pj.id = latest.job_id
+				WHERE latest.workspace_id = workspace_build_with_user.workspace_id
+				AND latest.build_number = workspace_build_with_user.build_number + 1
+				AND latest.build_number = (
+					SELECT MAX(build_number)
+					FROM workspace_builds l2
+					WHERE l2.workspace_id = latest.workspace_id
+				)
+				AND latest.transition = 'stop'
+				AND pj.job_status IN ('pending', 'running')
+			) THEN TRUE
+		ELSE FALSE
+	END
 ;
 
 -- name: InsertWorkspaceAgentScriptTimings :one
@@ -365,3 +437,51 @@ WHERE
 	id = $1
 	AND parent_id IS NOT NULL
 	AND deleted = FALSE;
+
+-- name: GetWorkspaceAgentsForMetrics :many
+SELECT
+    w.id as workspace_id,
+    w.name as workspace_name,
+    u.username as owner_username,
+    t.name as template_name,
+    tv.name as template_version_name,
+    sqlc.embed(workspace_agents)
+FROM workspaces w
+JOIN users u ON w.owner_id = u.id
+JOIN templates t ON w.template_id = t.id
+JOIN workspace_builds wb ON w.id = wb.workspace_id
+LEFT JOIN template_versions tv ON wb.template_version_id = tv.id
+JOIN workspace_resources wr ON wb.job_id = wr.job_id
+JOIN workspace_agents ON wr.id = workspace_agents.resource_id
+WHERE w.deleted = false
+AND wb.build_number = (
+    SELECT MAX(wb2.build_number)
+    FROM workspace_builds wb2
+    WHERE wb2.workspace_id = w.id
+)
+AND workspace_agents.deleted = FALSE;
+
+-- name: GetWorkspaceAgentAndWorkspaceByID :one
+SELECT
+	sqlc.embed(workspace_agents),
+	sqlc.embed(workspaces),
+	users.username as owner_username
+FROM
+	workspace_agents
+JOIN
+	workspace_resources ON workspace_agents.resource_id = workspace_resources.id
+JOIN
+	provisioner_jobs ON workspace_resources.job_id = provisioner_jobs.id
+JOIN
+	workspace_builds ON provisioner_jobs.id = workspace_builds.job_id
+JOIN
+	workspaces ON workspace_builds.workspace_id = workspaces.id
+JOIN
+	users ON workspaces.owner_id = users.id
+WHERE
+	workspace_agents.id = @id
+	AND workspace_agents.deleted = FALSE
+	AND provisioner_jobs.type = 'workspace_build'::provisioner_job_type
+	AND workspaces.deleted = FALSE
+	AND users.deleted = FALSE
+LIMIT 1;

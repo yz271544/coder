@@ -3,7 +3,6 @@ package dbgen
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -20,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
+	"github.com/coder/coder/v2/coderd/apikey"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
@@ -28,6 +28,7 @@ import (
 	"github.com/coder/coder/v2/coderd/database/pubsub"
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
+	"github.com/coder/coder/v2/coderd/rbac/rolestore"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/cryptorand"
 	"github.com/coder/coder/v2/provisionerd/proto"
@@ -75,7 +76,7 @@ func AuditLog(t testing.TB, db database.Store, seed database.AuditLog) database.
 }
 
 func ConnectionLog(t testing.TB, db database.Store, seed database.UpsertConnectionLogParams) database.ConnectionLog {
-	log, err := db.UpsertConnectionLog(genCtx, database.UpsertConnectionLogParams{
+	arg := database.UpsertConnectionLogParams{
 		ID:               takeFirst(seed.ID, uuid.New()),
 		Time:             takeFirst(seed.Time, dbtime.Now()),
 		OrganizationID:   takeFirst(seed.OrganizationID, uuid.New()),
@@ -88,7 +89,7 @@ func ConnectionLog(t testing.TB, db database.Store, seed database.UpsertConnecti
 			Int32: takeFirst(seed.Code.Int32, 0),
 			Valid: takeFirst(seed.Code.Valid, false),
 		},
-		Ip: pqtype.Inet{
+		IP: pqtype.Inet{
 			IPNet: net.IPNet{
 				IP:   net.IPv4(127, 0, 0, 1),
 				Mask: net.IPv4Mask(255, 255, 255, 255),
@@ -116,9 +117,53 @@ func ConnectionLog(t testing.TB, db database.Store, seed database.UpsertConnecti
 			Valid:  takeFirst(seed.DisconnectReason.Valid, false),
 		},
 		ConnectionStatus: takeFirst(seed.ConnectionStatus, database.ConnectionStatusConnected),
+	}
+
+	var disconnectTime sql.NullTime
+	if arg.ConnectionStatus == database.ConnectionStatusDisconnected {
+		disconnectTime = sql.NullTime{Time: arg.Time, Valid: true}
+	}
+
+	err := db.BatchUpsertConnectionLogs(genCtx, database.BatchUpsertConnectionLogsParams{
+		ID:               []uuid.UUID{arg.ID},
+		ConnectTime:      []time.Time{arg.Time},
+		OrganizationID:   []uuid.UUID{arg.OrganizationID},
+		WorkspaceOwnerID: []uuid.UUID{arg.WorkspaceOwnerID},
+		WorkspaceID:      []uuid.UUID{arg.WorkspaceID},
+		WorkspaceName:    []string{arg.WorkspaceName},
+		AgentName:        []string{arg.AgentName},
+		Type:             []database.ConnectionType{arg.Type},
+		Code:             []int32{arg.Code.Int32},
+		CodeValid:        []bool{arg.Code.Valid},
+		Ip:               []pqtype.Inet{arg.IP},
+		UserAgent:        []string{arg.UserAgent.String},
+		UserID:           []uuid.UUID{arg.UserID.UUID},
+		SlugOrPort:       []string{arg.SlugOrPort.String},
+		ConnectionID:     []uuid.UUID{arg.ConnectionID.UUID},
+		DisconnectReason: []string{arg.DisconnectReason.String},
+		DisconnectTime:   []time.Time{disconnectTime.Time},
 	})
 	require.NoError(t, err, "insert connection log")
-	return log
+
+	// Query back the actual row from the database. On upsert
+	// conflict the DB keeps the original row's ID, so we can't
+	// rely on arg.ID. Match on the conflict key for rows with a
+	// connection_id, or by primary key for NULL connection_id.
+	rows, err := db.GetConnectionLogsOffset(genCtx, database.GetConnectionLogsOffsetParams{})
+	require.NoError(t, err, "query connection logs")
+	for _, row := range rows {
+		if arg.ConnectionID.Valid {
+			if row.ConnectionLog.ConnectionID == arg.ConnectionID &&
+				row.ConnectionLog.WorkspaceID == arg.WorkspaceID &&
+				row.ConnectionLog.AgentName == arg.AgentName {
+				return row.ConnectionLog
+			}
+		} else if row.ConnectionLog.ID == arg.ID {
+			return row.ConnectionLog
+		}
+	}
+	require.Failf(t, "connection log not found", "id=%s", arg.ID)
+	return database.ConnectionLog{} // unreachable
 }
 
 func Template(t testing.TB, db database.Store, seed database.Template) database.Template {
@@ -160,8 +205,8 @@ func Template(t testing.TB, db database.Store, seed database.Template) database.
 
 func APIKey(t testing.TB, db database.Store, seed database.APIKey, munge ...func(*database.InsertAPIKeyParams)) (key database.APIKey, token string) {
 	id, _ := cryptorand.String(10)
-	secret, _ := cryptorand.String(22)
-	hashed := sha256.Sum256([]byte(secret))
+	secret, hashed, err := apikey.GenerateSecret(22)
+	require.NoError(t, err)
 
 	ip := seed.IPAddress
 	if !ip.Valid {
@@ -174,16 +219,23 @@ func APIKey(t testing.TB, db database.Store, seed database.APIKey, munge ...func
 		}
 	}
 
+	// It does not make sense for the created_at to be after the expires_at.
+	// So if expires is set, change the default created_at to be 24 hours before.
+	var createdAt time.Time
+	if !seed.ExpiresAt.IsZero() && seed.CreatedAt.IsZero() {
+		createdAt = seed.ExpiresAt.Add(-24 * time.Hour)
+	}
+
 	params := database.InsertAPIKeyParams{
 		ID: takeFirst(seed.ID, id),
 		// 0 defaults to 86400 at the db layer
 		LifetimeSeconds: takeFirst(seed.LifetimeSeconds, 0),
-		HashedSecret:    takeFirstSlice(seed.HashedSecret, hashed[:]),
+		HashedSecret:    takeFirstSlice(seed.HashedSecret, hashed),
 		IPAddress:       ip,
 		UserID:          takeFirst(seed.UserID, uuid.New()),
 		LastUsed:        takeFirst(seed.LastUsed, dbtime.Now()),
 		ExpiresAt:       takeFirst(seed.ExpiresAt, dbtime.Now().Add(time.Hour)),
-		CreatedAt:       takeFirst(seed.CreatedAt, dbtime.Now()),
+		CreatedAt:       takeFirst(seed.CreatedAt, createdAt, dbtime.Now()),
 		UpdatedAt:       takeFirst(seed.UpdatedAt, dbtime.Now()),
 		LoginType:       takeFirst(seed.LoginType, database.LoginTypePassword),
 		Scopes:          takeFirstSlice([]database.APIKeyScope(seed.Scopes), []database.APIKeyScope{database.ApiKeyScopeCoderAll}),
@@ -193,7 +245,7 @@ func APIKey(t testing.TB, db database.Store, seed database.APIKey, munge ...func
 	for _, fn := range munge {
 		fn(&params)
 	}
-	key, err := db.InsertAPIKey(genCtx, params)
+	key, err = db.InsertAPIKey(genCtx, params)
 	require.NoError(t, err, "insert api key")
 	return key, fmt.Sprintf("%s-%s", key.ID, secret)
 }
@@ -384,6 +436,7 @@ func WorkspaceAgentDevcontainer(t testing.TB, db database.Store, orig database.W
 		Name:             []string{takeFirst(orig.Name, testutil.GetRandomName(t))},
 		WorkspaceFolder:  []string{takeFirst(orig.WorkspaceFolder, "/workspace")},
 		ConfigPath:       []string{takeFirst(orig.ConfigPath, "")},
+		SubagentID:       []uuid.UUID{orig.SubagentID.UUID},
 	})
 	require.NoError(t, err, "insert workspace agent devcontainer")
 	return devcontainers[0]
@@ -429,6 +482,24 @@ func Workspace(t testing.TB, db database.Store, orig database.WorkspaceTable) da
 		require.NoError(t, err, "set workspace as dormant")
 		workspace.DormantAt = orig.DormantAt
 	}
+	if len(orig.UserACL) > 0 || len(orig.GroupACL) > 0 {
+		userACL := orig.UserACL
+		if userACL == nil {
+			userACL = database.WorkspaceACL{}
+		}
+		groupACL := orig.GroupACL
+		if groupACL == nil {
+			groupACL = database.WorkspaceACL{}
+		}
+		err = db.UpdateWorkspaceACLByID(genCtx, database.UpdateWorkspaceACLByIDParams{
+			ID:       workspace.ID,
+			UserACL:  userACL,
+			GroupACL: groupACL,
+		})
+		require.NoError(t, err, "set workspace ACL")
+		workspace.UserACL = orig.UserACL
+		workspace.GroupACL = orig.GroupACL
+	}
 	return workspace
 }
 
@@ -444,13 +515,26 @@ func WorkspaceAgentLogSource(t testing.TB, db database.Store, orig database.Work
 	return sources[0]
 }
 
+func WorkspaceAgentLog(t testing.TB, db database.Store, orig database.WorkspaceAgentLog) database.WorkspaceAgentLog {
+	log, err := db.InsertWorkspaceAgentLogs(genCtx, database.InsertWorkspaceAgentLogsParams{
+		AgentID:      takeFirst(orig.AgentID, uuid.New()),
+		CreatedAt:    takeFirst(orig.CreatedAt, dbtime.Now()),
+		LogSourceID:  takeFirst(orig.LogSourceID, uuid.New()),
+		OutputLength: int32(len(orig.Output)), // nolint: gosec // integer overflow is not a concern here
+		Level:        []database.LogLevel{takeFirst(orig.Level, database.LogLevelInfo)},
+		Output:       []string{takeFirst(orig.Output, "Test agent log")},
+	})
+	require.NoError(t, err, "insert workspace agent log")
+	require.Len(t, log, 1, "incorrect number of agent logs returned")
+	return log[0]
+}
+
 func WorkspaceBuild(t testing.TB, db database.Store, orig database.WorkspaceBuild) database.WorkspaceBuild {
 	t.Helper()
 
 	buildID := takeFirst(orig.ID, uuid.New())
 	jobID := takeFirst(orig.JobID, uuid.New())
 	hasAITask := takeFirst(orig.HasAITask, sql.NullBool{})
-	sidebarAppID := takeFirst(orig.AITaskSidebarAppID, uuid.NullUUID{})
 	hasExternalAgent := takeFirst(orig.HasExternalAgent, sql.NullBool{})
 	var build database.WorkspaceBuild
 	err := db.InTx(func(db database.Store) error {
@@ -464,7 +548,7 @@ func WorkspaceBuild(t testing.TB, db database.Store, orig database.WorkspaceBuil
 			Transition:        takeFirst(orig.Transition, database.WorkspaceTransitionStart),
 			InitiatorID:       takeFirst(orig.InitiatorID, uuid.New()),
 			JobID:             jobID,
-			ProvisionerState:  takeFirstSlice(orig.ProvisionerState, []byte{}),
+			ProvisionerState:  []byte{},
 			Deadline:          takeFirst(orig.Deadline, dbtime.Now().Add(time.Hour)),
 			MaxDeadline:       takeFirst(orig.MaxDeadline, time.Time{}),
 			Reason:            takeFirst(orig.Reason, database.BuildReasonInitiator),
@@ -490,7 +574,6 @@ func WorkspaceBuild(t testing.TB, db database.Store, orig database.WorkspaceBuil
 				ID:               buildID,
 				HasAITask:        hasAITask,
 				HasExternalAgent: hasExternalAgent,
-				SidebarAppID:     sidebarAppID,
 				UpdatedAt:        dbtime.Now(),
 			}))
 		}
@@ -539,24 +622,35 @@ func WorkspaceBuildParameters(t testing.TB, db database.Store, orig []database.W
 }
 
 func User(t testing.TB, db database.Store, orig database.User) database.User {
+	loginType := takeFirst(orig.LoginType, database.LoginTypePassword)
+	email := takeFirst(orig.Email, testutil.GetRandomName(t))
+	// A DB constraint requires login_type = 'none' and email = '' for service
+	// accounts.
+	if orig.IsServiceAccount {
+		loginType = database.LoginTypeNone
+		email = ""
+	}
+
 	user, err := db.InsertUser(genCtx, database.InsertUserParams{
-		ID:             takeFirst(orig.ID, uuid.New()),
-		Email:          takeFirst(orig.Email, testutil.GetRandomName(t)),
-		Username:       takeFirst(orig.Username, testutil.GetRandomName(t)),
-		Name:           takeFirst(orig.Name, testutil.GetRandomName(t)),
-		HashedPassword: takeFirstSlice(orig.HashedPassword, []byte(must(cryptorand.String(32)))),
-		CreatedAt:      takeFirst(orig.CreatedAt, dbtime.Now()),
-		UpdatedAt:      takeFirst(orig.UpdatedAt, dbtime.Now()),
-		RBACRoles:      takeFirstSlice(orig.RBACRoles, []string{}),
-		LoginType:      takeFirst(orig.LoginType, database.LoginTypePassword),
-		Status:         string(takeFirst(orig.Status, database.UserStatusDormant)),
+		ID:               takeFirst(orig.ID, uuid.New()),
+		Email:            email,
+		Username:         takeFirst(orig.Username, testutil.GetRandomName(t)),
+		Name:             takeFirst(orig.Name, testutil.GetRandomName(t)),
+		HashedPassword:   takeFirstSlice(orig.HashedPassword, []byte(must(cryptorand.String(32)))),
+		CreatedAt:        takeFirst(orig.CreatedAt, dbtime.Now()),
+		UpdatedAt:        takeFirst(orig.UpdatedAt, dbtime.Now()),
+		RBACRoles:        takeFirstSlice(orig.RBACRoles, []string{}),
+		LoginType:        loginType,
+		Status:           string(takeFirst(orig.Status, database.UserStatusDormant)),
+		IsServiceAccount: orig.IsServiceAccount,
 	})
 	require.NoError(t, err, "insert user")
 
 	user, err = db.UpdateUserStatus(genCtx, database.UpdateUserStatusParams{
-		ID:        user.ID,
-		Status:    takeFirst(orig.Status, database.UserStatusActive),
-		UpdatedAt: dbtime.Now(),
+		ID:         user.ID,
+		Status:     takeFirst(orig.Status, database.UserStatusActive),
+		UpdatedAt:  dbtime.Now(),
+		UserIsSeen: false,
 	})
 	require.NoError(t, err, "insert user")
 
@@ -599,6 +693,28 @@ func Organization(t testing.TB, db database.Store, orig database.Organization) d
 		UpdatedAt:   takeFirst(orig.UpdatedAt, dbtime.Now()),
 	})
 	require.NoError(t, err, "insert organization")
+
+	// Populate the placeholder system roles (created by DB
+	// trigger/migration) so org members have expected permissions.
+	//nolint:gocritic // ReconcileSystemRole needs the system:update
+	// permission that `genCtx` does not have.
+	sysCtx := dbauthz.AsSystemRestricted(genCtx)
+	for roleName := range rolestore.SystemRoleNames {
+		role := database.CustomRole{
+			Name:           roleName,
+			OrganizationID: uuid.NullUUID{UUID: org.ID, Valid: true},
+		}
+		_, _, err = rolestore.ReconcileSystemRole(sysCtx, db, role, org)
+		if errors.Is(err, sql.ErrNoRows) {
+			// The trigger that creates the placeholder role didn't run (e.g.,
+			// triggers were disabled in the test). Create the role manually.
+			err = rolestore.CreateSystemRole(sysCtx, db, org, roleName)
+			require.NoError(t, err, "create role "+roleName)
+			_, _, err = rolestore.ReconcileSystemRole(sysCtx, db, role, org)
+		}
+		require.NoError(t, err, "reconcile role "+roleName)
+	}
+
 	return org
 }
 
@@ -836,6 +952,20 @@ func ProvisionerJob(t testing.TB, db database.Store, ps pubsub.Pubsub, orig data
 	return job
 }
 
+func ProvisionerJobLog(t testing.TB, db database.Store, orig database.ProvisionerJobLog) database.ProvisionerJobLog {
+	logs, err := db.InsertProvisionerJobLogs(genCtx, database.InsertProvisionerJobLogsParams{
+		JobID:     takeFirst(orig.JobID, uuid.New()),
+		CreatedAt: []time.Time{takeFirst(orig.CreatedAt, dbtime.Now())},
+		Source:    []database.LogSource{takeFirst(orig.Source, database.LogSourceProvisioner)},
+		Level:     []database.LogLevel{takeFirst(orig.Level, database.LogLevelInfo)},
+		Stage:     []string{takeFirst(orig.Stage, "Test")},
+		Output:    []string{takeFirst(orig.Output, "Provisioner job log")},
+	})
+	require.NoError(t, err, "insert provisioner job log")
+	require.Len(t, logs, 1, "insert provisioner job log returned incorrect number of logs")
+	return logs[0]
+}
+
 func ProvisionerKey(t testing.TB, db database.Store, orig database.ProvisionerKey) database.ProvisionerKey {
 	key, err := db.InsertProvisionerKey(genCtx, database.InsertProvisionerKeyParams{
 		ID:             takeFirst(orig.ID, uuid.New()),
@@ -979,16 +1109,15 @@ func WorkspaceResourceMetadatums(t testing.TB, db database.Store, seed database.
 }
 
 func WorkspaceProxy(t testing.TB, db database.Store, orig database.WorkspaceProxy) (database.WorkspaceProxy, string) {
-	secret, err := cryptorand.HexString(64)
+	secret, hashedSecret, err := apikey.GenerateSecret(64)
 	require.NoError(t, err, "generate secret")
-	hashedSecret := sha256.Sum256([]byte(secret))
 
 	proxy, err := db.InsertWorkspaceProxy(genCtx, database.InsertWorkspaceProxyParams{
 		ID:                takeFirst(orig.ID, uuid.New()),
 		Name:              takeFirst(orig.Name, testutil.GetRandomName(t)),
 		DisplayName:       takeFirst(orig.DisplayName, testutil.GetRandomName(t)),
 		Icon:              takeFirst(orig.Icon, testutil.GetRandomName(t)),
-		TokenHashedSecret: hashedSecret[:],
+		TokenHashedSecret: hashedSecret,
 		CreatedAt:         takeFirst(orig.CreatedAt, dbtime.Now()),
 		UpdatedAt:         takeFirst(orig.UpdatedAt, dbtime.Now()),
 		DerpEnabled:       takeFirst(orig.DerpEnabled, false),
@@ -1258,7 +1387,7 @@ func OAuth2ProviderApp(t testing.TB, db database.Store, seed database.OAuth2Prov
 		Jwks:                    seed.Jwks, // pqtype.NullRawMessage{} is not comparable, use existing value
 		SoftwareID:              takeFirst(seed.SoftwareID, sql.NullString{}),
 		SoftwareVersion:         takeFirst(seed.SoftwareVersion, sql.NullString{}),
-		RegistrationAccessToken: takeFirst(seed.RegistrationAccessToken, sql.NullString{}),
+		RegistrationAccessToken: seed.RegistrationAccessToken,
 		RegistrationClientUri:   takeFirst(seed.RegistrationClientUri, sql.NullString{}),
 	})
 	require.NoError(t, err, "insert oauth2 app")
@@ -1290,6 +1419,8 @@ func OAuth2ProviderAppCode(t testing.TB, db database.Store, seed database.OAuth2
 		ResourceUri:         seed.ResourceUri,
 		CodeChallenge:       seed.CodeChallenge,
 		CodeChallengeMethod: seed.CodeChallengeMethod,
+		StateHash:           seed.StateHash,
+		RedirectUri:         seed.RedirectUri,
 	})
 	require.NoError(t, err, "insert oauth2 app code")
 	return code
@@ -1342,12 +1473,14 @@ func WorkspaceAgentVolumeResourceMonitor(t testing.TB, db database.Store, seed d
 
 func CustomRole(t testing.TB, db database.Store, seed database.CustomRole) database.CustomRole {
 	role, err := db.InsertCustomRole(genCtx, database.InsertCustomRoleParams{
-		Name:            takeFirst(seed.Name, strings.ToLower(testutil.GetRandomName(t))),
-		DisplayName:     testutil.GetRandomName(t),
-		OrganizationID:  seed.OrganizationID,
-		SitePermissions: takeFirstSlice(seed.SitePermissions, []database.CustomRolePermission{}),
-		OrgPermissions:  takeFirstSlice(seed.SitePermissions, []database.CustomRolePermission{}),
-		UserPermissions: takeFirstSlice(seed.SitePermissions, []database.CustomRolePermission{}),
+		Name:              takeFirst(seed.Name, strings.ToLower(testutil.GetRandomName(t))),
+		DisplayName:       testutil.GetRandomName(t),
+		OrganizationID:    seed.OrganizationID,
+		SitePermissions:   takeFirstSlice(seed.SitePermissions, []database.CustomRolePermission{}),
+		OrgPermissions:    takeFirstSlice(seed.SitePermissions, []database.CustomRolePermission{}),
+		UserPermissions:   takeFirstSlice(seed.SitePermissions, []database.CustomRolePermission{}),
+		MemberPermissions: takeFirstSlice(seed.MemberPermissions, []database.CustomRolePermission{}),
+		IsSystem:          seed.IsSystem,
 	})
 	require.NoError(t, err, "insert custom role")
 	return role
@@ -1430,6 +1563,7 @@ func Preset(t testing.TB, db database.Store, seed database.InsertPresetParams) d
 		IsDefault:           seed.IsDefault,
 		Description:         seed.Description,
 		Icon:                seed.Icon,
+		LastInvalidatedAt:   seed.LastInvalidatedAt,
 	})
 	require.NoError(t, err, "insert preset")
 	return preset
@@ -1463,6 +1597,7 @@ func UserSecret(t testing.TB, db database.Store, seed database.UserSecret) datab
 		Name:        takeFirst(seed.Name, "secret-name"),
 		Description: takeFirst(seed.Description, "secret description"),
 		Value:       takeFirst(seed.Value, "secret value"),
+		ValueKeyID:  seed.ValueKeyID,
 		EnvName:     takeFirst(seed.EnvName, "SECRET_ENV_NAME"),
 		FilePath:    takeFirst(seed.FilePath, "~/secret/file/path"),
 	})
@@ -1495,28 +1630,45 @@ func ClaimPrebuild(
 	return claimedWorkspace
 }
 
-func AIBridgeInterception(t testing.TB, db database.Store, seed database.InsertAIBridgeInterceptionParams) database.AIBridgeInterception {
+func AIBridgeInterception(t testing.TB, db database.Store, seed database.InsertAIBridgeInterceptionParams, endedAt *time.Time) database.AIBridgeInterception {
 	interception, err := db.InsertAIBridgeInterception(genCtx, database.InsertAIBridgeInterceptionParams{
-		ID:          takeFirst(seed.ID, uuid.New()),
-		InitiatorID: takeFirst(seed.InitiatorID, uuid.New()),
-		Provider:    takeFirst(seed.Provider, "provider"),
-		Model:       takeFirst(seed.Model, "model"),
-		Metadata:    takeFirstSlice(seed.Metadata, json.RawMessage("{}")),
-		StartedAt:   takeFirst(seed.StartedAt, dbtime.Now()),
+		ID:                         takeFirst(seed.ID, uuid.New()),
+		APIKeyID:                   seed.APIKeyID,
+		InitiatorID:                takeFirst(seed.InitiatorID, uuid.New()),
+		Provider:                   takeFirst(seed.Provider, "provider"),
+		ProviderName:               takeFirst(seed.ProviderName, "provider-name"),
+		Model:                      takeFirst(seed.Model, "model"),
+		Metadata:                   takeFirstSlice(seed.Metadata, json.RawMessage("{}")),
+		StartedAt:                  takeFirst(seed.StartedAt, dbtime.Now()),
+		Client:                     seed.Client,
+		ThreadParentInterceptionID: seed.ThreadParentInterceptionID,
+		ThreadRootInterceptionID:   seed.ThreadRootInterceptionID,
+		ClientSessionID:            seed.ClientSessionID,
+		CredentialKind:             takeFirst(seed.CredentialKind, database.CredentialKindCentralized),
+		CredentialHint:             takeFirst(seed.CredentialHint, ""),
 	})
+	if endedAt != nil {
+		interception, err = db.UpdateAIBridgeInterceptionEnded(genCtx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      interception.ID,
+			EndedAt: *endedAt,
+		})
+		require.NoError(t, err, "insert aibridge interception")
+	}
 	require.NoError(t, err, "insert aibridge interception")
 	return interception
 }
 
 func AIBridgeTokenUsage(t testing.TB, db database.Store, seed database.InsertAIBridgeTokenUsageParams) database.AIBridgeTokenUsage {
 	usage, err := db.InsertAIBridgeTokenUsage(genCtx, database.InsertAIBridgeTokenUsageParams{
-		ID:                 takeFirst(seed.ID, uuid.New()),
-		InterceptionID:     takeFirst(seed.InterceptionID, uuid.New()),
-		ProviderResponseID: takeFirst(seed.ProviderResponseID, "provider_response_id"),
-		InputTokens:        takeFirst(seed.InputTokens, 100),
-		OutputTokens:       takeFirst(seed.OutputTokens, 100),
-		Metadata:           takeFirstSlice(seed.Metadata, json.RawMessage("{}")),
-		CreatedAt:          takeFirst(seed.CreatedAt, dbtime.Now()),
+		ID:                    takeFirst(seed.ID, uuid.New()),
+		InterceptionID:        takeFirst(seed.InterceptionID, uuid.New()),
+		ProviderResponseID:    takeFirst(seed.ProviderResponseID, "provider_response_id"),
+		InputTokens:           takeFirst(seed.InputTokens, 100),
+		OutputTokens:          takeFirst(seed.OutputTokens, 100),
+		CacheReadInputTokens:  seed.CacheReadInputTokens,
+		CacheWriteInputTokens: seed.CacheWriteInputTokens,
+		Metadata:              takeFirstSlice(seed.Metadata, json.RawMessage("{}")),
+		CreatedAt:             takeFirst(seed.CreatedAt, dbtime.Now()),
 	})
 	require.NoError(t, err, "insert aibridge token usage")
 	return usage
@@ -1548,6 +1700,7 @@ func AIBridgeToolUsage(t testing.TB, db database.Store, seed database.InsertAIBr
 		ID:                 takeFirst(seed.ID, uuid.New()),
 		InterceptionID:     takeFirst(seed.InterceptionID, uuid.New()),
 		ProviderResponseID: takeFirst(seed.ProviderResponseID, "provider_response_id"),
+		ProviderToolCallID: takeFirst(seed.ProviderToolCallID),
 		Tool:               takeFirst(seed.Tool, "tool"),
 		ServerUrl:          serverURL,
 		Input:              takeFirst(seed.Input, "input"),
@@ -1558,6 +1711,61 @@ func AIBridgeToolUsage(t testing.TB, db database.Store, seed database.InsertAIBr
 	})
 	require.NoError(t, err, "insert aibridge tool usage")
 	return toolUsage
+}
+
+func AIBridgeModelThought(t testing.TB, db database.Store, seed database.InsertAIBridgeModelThoughtParams) database.AIBridgeModelThought {
+	thought, err := db.InsertAIBridgeModelThought(genCtx, database.InsertAIBridgeModelThoughtParams{
+		InterceptionID: takeFirst(seed.InterceptionID, uuid.New()),
+		Content:        takeFirst(seed.Content, ""),
+		Metadata:       takeFirstSlice(seed.Metadata, json.RawMessage("{}")),
+		CreatedAt:      takeFirst(seed.CreatedAt, dbtime.Now()),
+	})
+	require.NoError(t, err, "insert aibridge model thought")
+	return thought
+}
+
+func Task(t testing.TB, db database.Store, orig database.TaskTable) database.Task {
+	t.Helper()
+
+	parameters := orig.TemplateParameters
+	if parameters == nil {
+		parameters = json.RawMessage([]byte("{}"))
+	}
+
+	task, err := db.InsertTask(genCtx, database.InsertTaskParams{
+		ID:                 takeFirst(orig.ID, uuid.New()),
+		OrganizationID:     orig.OrganizationID,
+		OwnerID:            orig.OwnerID,
+		Name:               takeFirst(orig.Name, testutil.GetRandomNameHyphenated(t)),
+		DisplayName:        takeFirst(orig.DisplayName, testutil.GetRandomNameHyphenated(t)),
+		WorkspaceID:        orig.WorkspaceID,
+		TemplateVersionID:  orig.TemplateVersionID,
+		TemplateParameters: parameters,
+		Prompt:             orig.Prompt,
+		CreatedAt:          takeFirst(orig.CreatedAt, dbtime.Now()),
+	})
+	require.NoError(t, err, "failed to insert task")
+
+	// Return the Task from the view instead of the TaskTable
+	fetched, err := db.GetTaskByID(genCtx, task.ID)
+	require.NoError(t, err, "failed to fetch task")
+	require.Equal(t, task.ID, fetched.ID)
+
+	return fetched
+}
+
+func TaskWorkspaceApp(t testing.TB, db database.Store, orig database.TaskWorkspaceApp) database.TaskWorkspaceApp {
+	t.Helper()
+
+	app, err := db.UpsertTaskWorkspaceApp(genCtx, database.UpsertTaskWorkspaceAppParams{
+		TaskID:               orig.TaskID,
+		WorkspaceBuildNumber: orig.WorkspaceBuildNumber,
+		WorkspaceAgentID:     orig.WorkspaceAgentID,
+		WorkspaceAppID:       orig.WorkspaceAppID,
+	})
+	require.NoError(t, err, "failed to upsert task workspace app")
+
+	return app
 }
 
 func provisionerJobTiming(t testing.TB, db database.Store, seed database.ProvisionerJobTiming) database.ProvisionerJobTiming {

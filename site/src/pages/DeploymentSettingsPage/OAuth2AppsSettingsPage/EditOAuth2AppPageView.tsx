@@ -1,21 +1,24 @@
 import { type Interpolation, type Theme, useTheme } from "@emotion/react";
 import Divider from "@mui/material/Divider";
-import type * as TypesGen from "api/typesGenerated";
-import { Alert } from "components/Alert/Alert";
-import { ErrorAlert } from "components/Alert/ErrorAlert";
-import { Button } from "components/Button/Button";
-import { CodeExample } from "components/CodeExample/CodeExample";
-import { CopyableValue } from "components/CopyableValue/CopyableValue";
-import { ConfirmDialog } from "components/Dialogs/ConfirmDialog/ConfirmDialog";
-import { DeleteDialog } from "components/Dialogs/DeleteDialog/DeleteDialog";
-import { Loader } from "components/Loader/Loader";
+import { ChevronLeftIcon, CopyIcon } from "lucide-react";
+import { type FC, useState } from "react";
+import { Link as RouterLink, useSearchParams } from "react-router";
+import type * as TypesGen from "#/api/typesGenerated";
+import { Alert } from "#/components/Alert/Alert";
+import { ErrorAlert } from "#/components/Alert/ErrorAlert";
+import { Button } from "#/components/Button/Button";
+import { CodeExample } from "#/components/CodeExample/CodeExample";
+import { CopyableValue } from "#/components/CopyableValue/CopyableValue";
+import { ConfirmDialog } from "#/components/Dialogs/ConfirmDialog/ConfirmDialog";
+import { DeleteDialog } from "#/components/Dialogs/DeleteDialog/DeleteDialog";
+import { Loader } from "#/components/Loader/Loader";
 import {
 	SettingsHeader,
 	SettingsHeaderDescription,
 	SettingsHeaderTitle,
-} from "components/SettingsHeader/SettingsHeader";
-import { Spinner } from "components/Spinner/Spinner";
-import { Stack } from "components/Stack/Stack";
+} from "#/components/SettingsHeader/SettingsHeader";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { Stack } from "#/components/Stack/Stack";
 import {
 	Table,
 	TableBody,
@@ -23,12 +26,9 @@ import {
 	TableHead,
 	TableHeader,
 	TableRow,
-} from "components/Table/Table";
-import { TableLoader } from "components/TableLoader/TableLoader";
-import { ChevronLeftIcon, CopyIcon } from "lucide-react";
-import { type FC, useState } from "react";
-import { Link as RouterLink, useSearchParams } from "react-router";
-import { createDayString } from "utils/createDayString";
+} from "#/components/Table/Table";
+import { TableLoader } from "#/components/TableLoader/TableLoader";
+import { createDayString } from "#/utils/createDayString";
 import { OAuth2AppForm } from "./OAuth2AppForm";
 
 type MutatingResource = {
@@ -49,6 +49,9 @@ type EditOAuth2AppProps = {
 	deleteApp: (name: string) => void;
 	generateAppSecret: () => void;
 	deleteAppSecret: (id: string) => void;
+	canEditApp: boolean;
+	canDeleteApp: boolean;
+	canViewAppSecrets: boolean;
 	secrets?: readonly TypesGen.OAuth2ProviderAppSecret[];
 	fullNewSecret?: TypesGen.OAuth2ProviderAppSecretFull;
 	ackFullNewSecret: () => void;
@@ -64,6 +67,9 @@ export const EditOAuth2AppPageView: FC<EditOAuth2AppProps> = ({
 	deleteApp,
 	generateAppSecret,
 	deleteAppSecret,
+	canEditApp,
+	canDeleteApp,
+	canViewAppSecrets,
 	secrets,
 	fullNewSecret,
 	ackFullNewSecret,
@@ -111,12 +117,7 @@ export const EditOAuth2AppPageView: FC<EditOAuth2AppProps> = ({
 							</p>
 							<CodeExample
 								code={fullNewSecret.client_secret_full}
-								css={{
-									minHeight: "auto",
-									userSelect: "all",
-									width: "100%",
-									marginTop: 24,
-								}}
+								className="min-h-auto select-all w-full mt-6"
 							/>
 						</>
 					}
@@ -150,20 +151,20 @@ export const EditOAuth2AppPageView: FC<EditOAuth2AppProps> = ({
 						<dl css={styles.dataList}>
 							<dt>Client ID</dt>
 							<dd>
-								<CopyableValue value={app.id}>
+								<CopyableValue value={app.id} side="right">
 									{app.id} <CopyIcon className="size-icon-xs" />
 								</CopyableValue>
 							</dd>
 							<dt>Authorization URL</dt>
 							<dd>
-								<CopyableValue value={app.endpoints.authorization}>
+								<CopyableValue value={app.endpoints.authorization} side="right">
 									{app.endpoints.authorization}{" "}
 									<CopyIcon className="size-icon-xs" />
 								</CopyableValue>
 							</dd>
 							<dt>Token URL</dt>
 							<dd>
-								<CopyableValue value={app.endpoints.token}>
+								<CopyableValue value={app.endpoints.token} side="right">
 									{app.endpoints.token} <CopyIcon className="size-icon-xs" />
 								</CopyableValue>
 							</dd>
@@ -180,21 +181,27 @@ export const EditOAuth2AppPageView: FC<EditOAuth2AppProps> = ({
 								<Button
 									variant="destructive"
 									onClick={() => setShowDelete(true)}
+									disabled={!canDeleteApp}
 								>
 									Delete&hellip;
 								</Button>
 							}
+							disabled={!canEditApp}
 						/>
 
-						<Divider css={{ borderColor: theme.palette.divider }} />
+						{canViewAppSecrets && (
+							<>
+								<Divider css={{ borderColor: theme.palette.divider }} />
 
-						<OAuth2AppSecretsTable
-							secrets={secrets}
-							generateAppSecret={generateAppSecret}
-							deleteAppSecret={deleteAppSecret}
-							isLoadingSecrets={isLoadingSecrets}
-							mutatingResource={mutatingResource}
-						/>
+								<OAuth2AppSecretsTable
+									secrets={secrets}
+									generateAppSecret={generateAppSecret}
+									deleteAppSecret={deleteAppSecret}
+									isLoadingSecrets={isLoadingSecrets}
+									mutatingResource={mutatingResource}
+								/>
+							</>
+						)}
 					</>
 				)}
 			</Stack>
@@ -248,7 +255,7 @@ const OAuth2AppSecretsTable: FC<OAuth2AppSecretsTableProps> = ({
 					{!isLoadingSecrets && (!secrets || secrets.length === 0) && (
 						<TableRow>
 							<TableCell colSpan={999}>
-								<div css={{ textAlign: "center" }}>
+								<div className="text-center">
 									No client secrets have been generated.
 								</div>
 							</TableCell>

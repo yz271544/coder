@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -18,10 +20,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database"
-	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbfake"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
@@ -33,6 +34,7 @@ import (
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
 	"github.com/coder/coder/v2/coderd/util/slice"
+	"github.com/coder/coder/v2/coderd/x/chatd/chatprompt"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/provisionersdk"
 	"github.com/coder/coder/v2/testutil"
@@ -1233,6 +1235,264 @@ func TestGetAuthorizedWorkspacesAndAgentsByOwnerID(t *testing.T) {
 	})
 }
 
+func TestGetAuthorizedChats(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	sqlDB := testSQLDB(t)
+	err := migrations.Up(sqlDB)
+	require.NoError(t, err)
+	db := database.New(sqlDB)
+	authorizer := rbac.NewStrictCachingAuthorizer(prometheus.NewRegistry())
+
+	// Create users with different roles.
+	owner := dbgen.User(t, db, database.User{
+		RBACRoles: []string{rbac.RoleOwner().String()},
+	})
+	member := dbgen.User(t, db, database.User{
+		RBACRoles: pq.StringArray{rbac.RoleAgentsAccess().String()},
+	})
+	secondMember := dbgen.User(t, db, database.User{
+		RBACRoles: pq.StringArray{rbac.RoleAgentsAccess().String()},
+	})
+
+	org := dbgen.Organization(t, db, database.Organization{})
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: owner.ID, OrganizationID: org.ID})
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: member.ID, OrganizationID: org.ID})
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: secondMember.ID, OrganizationID: org.ID})
+
+	// Create FK dependencies: a chat provider and model config.
+	ctx := testutil.Context(t, testutil.WaitMedium)
+	_, err = db.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             "openai",
+		DisplayName:          "OpenAI",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := db.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "openai",
+		Model:                "test-model",
+		DisplayName:          "Test Model",
+		CreatedBy:            uuid.NullUUID{UUID: owner.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: owner.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	// Create 3 chats owned by owner.
+	for i := range 3 {
+		_, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           owner.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             fmt.Sprintf("owner chat %d", i+1),
+		})
+		require.NoError(t, err)
+	}
+
+	// Create 2 chats owned by member.
+	for i := range 2 {
+		_, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           member.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             fmt.Sprintf("member chat %d", i+1),
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("sqlQuerier", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		// Member should only see their own 2 chats.
+		memberSubject, _, err := httpmw.UserRBACSubject(ctx, db, member.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		preparedMember, err := authorizer.Prepare(ctx, memberSubject, policy.ActionRead, rbac.ResourceChat.Type)
+		require.NoError(t, err)
+		memberRows, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{}, preparedMember)
+		require.NoError(t, err)
+		require.Len(t, memberRows, 2)
+		for _, row := range memberRows {
+			require.Equal(t, member.ID, row.Chat.OwnerID, "member should only see own chats")
+		}
+
+		// Owner should see at least the 5 pre-created chats (site-wide
+		// access). Parallel subtests may add more, so use GreaterOrEqual.
+		ownerSubject, _, err := httpmw.UserRBACSubject(ctx, db, owner.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		preparedOwner, err := authorizer.Prepare(ctx, ownerSubject, policy.ActionRead, rbac.ResourceChat.Type)
+		require.NoError(t, err)
+		ownerRows, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{}, preparedOwner)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(ownerRows), 5)
+
+		// secondMember has no chats and should see 0.
+		secondSubject, _, err := httpmw.UserRBACSubject(ctx, db, secondMember.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		preparedSecond, err := authorizer.Prepare(ctx, secondSubject, policy.ActionRead, rbac.ResourceChat.Type)
+		require.NoError(t, err)
+		secondRows, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{}, preparedSecond)
+		require.NoError(t, err)
+		require.Len(t, secondRows, 0)
+
+		// Org admin should NOT see other users' chats when they are
+		// in a different org than the chat owner.
+		orgs, err := db.GetOrganizations(ctx, database.GetOrganizationsParams{})
+		require.NoError(t, err)
+		require.NotEmpty(t, orgs)
+		orgAdmin := dbgen.User(t, db, database.User{})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			UserID:         orgAdmin.ID,
+			OrganizationID: orgs[0].ID,
+			Roles:          []string{rbac.RoleOrgAdmin()},
+		})
+		orgAdminSubject, _, err := httpmw.UserRBACSubject(ctx, db, orgAdmin.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		preparedOrgAdmin, err := authorizer.Prepare(ctx, orgAdminSubject, policy.ActionRead, rbac.ResourceChat.Type)
+		require.NoError(t, err)
+		orgAdminRows, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{}, preparedOrgAdmin)
+		require.NoError(t, err)
+		require.Len(t, orgAdminRows, 0, "org admin with no chats should see 0 chats")
+
+		// Org admin in SAME org should see all chats in that org.
+		sameOrgAdmin := dbgen.User(t, db, database.User{})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			UserID:         sameOrgAdmin.ID,
+			OrganizationID: org.ID,
+			Roles:          []string{rbac.RoleOrgAdmin()},
+		})
+		sameOrgAdminSubject, _, err := httpmw.UserRBACSubject(ctx, db, sameOrgAdmin.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		preparedSameOrgAdmin, err := authorizer.Prepare(ctx, sameOrgAdminSubject, policy.ActionRead, rbac.ResourceChat.Type)
+		require.NoError(t, err)
+		sameOrgAdminRows, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{}, preparedSameOrgAdmin)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(sameOrgAdminRows), 5, "same-org admin should see all chats in their org")
+
+		// OwnerID filter: member queries their own chats.
+		memberFilterSelf, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{
+			OwnerID: member.ID,
+		}, preparedMember)
+		require.NoError(t, err)
+		require.Len(t, memberFilterSelf, 2)
+
+		// OwnerID filter: member queries owner's chats → sees 0.
+		memberFilterOwner, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{
+			OwnerID: owner.ID,
+		}, preparedMember)
+		require.NoError(t, err)
+		require.Len(t, memberFilterOwner, 0)
+	})
+
+	t.Run("dbauthz", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		authzdb := dbauthz.New(db, authorizer, slogtest.Make(t, &slogtest.Options{}), coderdtest.AccessControlStorePointer())
+
+		// As member: should see only own 2 chats.
+		memberSubject, _, err := httpmw.UserRBACSubject(ctx, authzdb, member.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		memberCtx := dbauthz.As(ctx, memberSubject)
+		memberRows, err := authzdb.GetChats(memberCtx, database.GetChatsParams{})
+		require.NoError(t, err)
+		require.Len(t, memberRows, 2)
+		for _, row := range memberRows {
+			require.Equal(t, member.ID, row.Chat.OwnerID, "member should only see own chats")
+		}
+
+		// As owner: should see at least the 5 pre-created chats.
+		ownerSubject, _, err := httpmw.UserRBACSubject(ctx, authzdb, owner.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		ownerCtx := dbauthz.As(ctx, ownerSubject)
+		ownerRows, err := authzdb.GetChats(ownerCtx, database.GetChatsParams{})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(ownerRows), 5)
+
+		// As secondMember: should see 0 chats.
+		secondSubject, _, err := httpmw.UserRBACSubject(ctx, authzdb, secondMember.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		secondCtx := dbauthz.As(ctx, secondSubject)
+		secondRows, err := authzdb.GetChats(secondCtx, database.GetChatsParams{})
+		require.NoError(t, err)
+		require.Len(t, secondRows, 0)
+	})
+
+	t.Run("pagination", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		// Use a dedicated user for pagination to avoid interference
+		// with the other parallel subtests.
+		paginationUser := dbgen.User(t, db, database.User{
+			RBACRoles: pq.StringArray{rbac.RoleAgentsAccess().String()},
+		})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: paginationUser.ID, OrganizationID: org.ID})
+		for i := range 7 {
+			_, err := db.InsertChat(ctx, database.InsertChatParams{
+				OrganizationID:    org.ID,
+				Status:            database.ChatStatusWaiting,
+				OwnerID:           paginationUser.ID,
+				LastModelConfigID: modelCfg.ID,
+				Title:             fmt.Sprintf("pagination chat %d", i+1),
+			})
+			require.NoError(t, err)
+		}
+
+		pagUserSubject, _, err := httpmw.UserRBACSubject(ctx, db, paginationUser.ID, rbac.ExpandableScope(rbac.ScopeAll))
+		require.NoError(t, err)
+		preparedMember, err := authorizer.Prepare(ctx, pagUserSubject, policy.ActionRead, rbac.ResourceChat.Type)
+		require.NoError(t, err)
+
+		// Fetch first page with limit=2.
+		page1, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{
+			LimitOpt: 2,
+		}, preparedMember)
+		require.NoError(t, err)
+		require.Len(t, page1, 2)
+		for _, row := range page1 {
+			require.Equal(t, paginationUser.ID, row.Chat.OwnerID, "paginated results must belong to pagination user")
+		}
+
+		// Fetch remaining pages and collect all chat IDs.
+		allIDs := make(map[uuid.UUID]struct{})
+		for _, row := range page1 {
+			allIDs[row.Chat.ID] = struct{}{}
+		}
+		offset := int32(2)
+		for {
+			page, err := db.GetAuthorizedChats(ctx, database.GetChatsParams{
+				LimitOpt:  2,
+				OffsetOpt: offset,
+			}, preparedMember)
+			require.NoError(t, err)
+			for _, row := range page {
+				require.Equal(t, paginationUser.ID, row.Chat.OwnerID, "paginated results must belong to pagination user")
+				allIDs[row.Chat.ID] = struct{}{}
+			}
+			if len(page) < 2 {
+				break
+			}
+			offset += int32(len(page)) //nolint:gosec // Test code, pagination values are small.
+		}
+
+		// All 7 member chats should be accounted for with no leakage.
+		require.Len(t, allIDs, 7, "pagination should return all member chats exactly once")
+	})
+}
+
 func TestInsertWorkspaceAgentLogs(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -1427,12 +1687,12 @@ func TestDefaultProxy(t *testing.T) {
 	require.NoError(t, err, "get def proxy")
 
 	require.Equal(t, defProxy.DisplayName, "Default")
-	require.Equal(t, defProxy.IconUrl, "/emojis/1f3e1.png")
+	require.Equal(t, defProxy.IconURL, "/emojis/1f3e1.png")
 
 	// Set the proxy values
 	args := database.UpsertDefaultProxyParams{
 		DisplayName: "displayname",
-		IconUrl:     "/icon.png",
+		IconURL:     "/icon.png",
 	}
 	err = db.UpsertDefaultProxy(ctx, args)
 	require.NoError(t, err, "insert def proxy")
@@ -1440,12 +1700,12 @@ func TestDefaultProxy(t *testing.T) {
 	defProxy, err = db.GetDefaultProxyConfig(ctx)
 	require.NoError(t, err, "get def proxy")
 	require.Equal(t, defProxy.DisplayName, args.DisplayName)
-	require.Equal(t, defProxy.IconUrl, args.IconUrl)
+	require.Equal(t, defProxy.IconURL, args.IconURL)
 
 	// Upsert values
 	args = database.UpsertDefaultProxyParams{
 		DisplayName: "newdisplayname",
-		IconUrl:     "/newicon.png",
+		IconURL:     "/newicon.png",
 	}
 	err = db.UpsertDefaultProxy(ctx, args)
 	require.NoError(t, err, "upsert def proxy")
@@ -1453,7 +1713,7 @@ func TestDefaultProxy(t *testing.T) {
 	defProxy, err = db.GetDefaultProxyConfig(ctx)
 	require.NoError(t, err, "get def proxy")
 	require.Equal(t, defProxy.DisplayName, args.DisplayName)
-	require.Equal(t, defProxy.IconUrl, args.IconUrl)
+	require.Equal(t, defProxy.IconURL, args.IconURL)
 
 	// Ensure other site configs are the same
 	found, err := db.GetDeploymentID(ctx)
@@ -1643,6 +1903,53 @@ func TestAcquireProvisionerJob(t *testing.T) {
 			require.NoError(t, err, "mark job %d/%d as complete", idx+1, numJobs)
 		}
 	})
+
+	t.Run("SkipsCanceledPendingJobs", func(t *testing.T) {
+		t.Parallel()
+		var (
+			db, _ = dbtestutil.NewDB(t)
+			ctx   = testutil.Context(t, testutil.WaitMedium)
+			org   = dbgen.Organization(t, db, database.Organization{})
+			now   = dbtime.Now()
+		)
+
+		// Insert a pending job (started_at is NULL).
+		job, err := db.InsertProvisionerJob(ctx, database.InsertProvisionerJobParams{
+			ID:             uuid.New(),
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			InitiatorID:    uuid.New(),
+			OrganizationID: org.ID,
+			Provisioner:    database.ProvisionerTypeEcho,
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			StorageMethod:  database.ProvisionerStorageMethodFile,
+			FileID:         uuid.New(),
+			Input:          json.RawMessage(`{}`),
+			Tags:           database.StringMap{},
+			TraceMetadata:  pqtype.NullRawMessage{},
+		})
+		require.NoError(t, err)
+
+		// Cancel it while still pending. In production (workspacebuilds.go), canceling
+		// a pending build sets completed_at but leaves started_at NULL since no
+		// provisioner ever started the job.
+		err = db.UpdateProvisionerJobWithCancelByID(ctx, database.UpdateProvisionerJobWithCancelByIDParams{
+			ID:          job.ID,
+			CanceledAt:  sql.NullTime{Time: now, Valid: true},
+			CompletedAt: sql.NullTime{Time: now, Valid: true},
+		})
+		require.NoError(t, err)
+
+		// AcquireProvisionerJob should skip this job since it's already completed.
+		_, err = db.AcquireProvisionerJob(ctx, database.AcquireProvisionerJobParams{
+			OrganizationID:  org.ID,
+			StartedAt:       sql.NullTime{Time: now, Valid: true},
+			WorkerID:        uuid.NullUUID{UUID: uuid.New(), Valid: true},
+			Types:           []database.ProvisionerType{database.ProvisionerTypeEcho},
+			ProvisionerTags: json.RawMessage(`{}`),
+		})
+		require.ErrorIs(t, err, sql.ErrNoRows)
+	})
 }
 
 func TestUserLastSeenFilter(t *testing.T) {
@@ -1804,6 +2111,84 @@ func TestUpdateSystemUser(t *testing.T) {
 	// Then: the attempt is rejected by a postgres trigger.
 	// require.ErrorContains(t, err, "Cannot modify or delete system users")
 	require.NoError(t, err)
+}
+
+func TestInsertUserServiceAccountConstraints(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+
+	// Happy path: should succeed.
+	t.Run("ServiceAccountWithEmptyEmailAndLoginNone", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		user, err := db.InsertUser(ctx, database.InsertUserParams{
+			Email:            "",
+			LoginType:        database.LoginTypeNone,
+			ID:               uuid.New(),
+			Username:         "sa-ok",
+			RBACRoles:        []string{},
+			IsServiceAccount: true,
+		})
+		require.NoError(t, err)
+		require.True(t, user.IsServiceAccount)
+		require.Empty(t, user.Email)
+	})
+
+	// Service account with a non-empty email should be rejected
+	// by the users_email_not_empty constraint.
+	t.Run("ServiceAccountWithNonEmptyEmail", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		_, err := db.InsertUser(ctx, database.InsertUserParams{
+			Email:            "sa@coder.com",
+			LoginType:        database.LoginTypeNone,
+			ID:               uuid.New(),
+			Username:         "sa-with-email",
+			RBACRoles:        []string{},
+			IsServiceAccount: true,
+		})
+		require.Error(t, err)
+		require.True(t, database.IsCheckViolation(err, database.CheckUsersEmailNotEmpty))
+	})
+
+	// A non-service-account with empty email should be rejected
+	// by the users_email_not_empty constraint.
+	t.Run("RegularUserWithEmptyEmail", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		_, err := db.InsertUser(ctx, database.InsertUserParams{
+			Email:            "",
+			LoginType:        database.LoginTypePassword,
+			ID:               uuid.New(),
+			Username:         "regular-no-email",
+			RBACRoles:        []string{},
+			IsServiceAccount: false,
+		})
+		require.Error(t, err)
+		require.True(t, database.IsCheckViolation(err, database.CheckUsersEmailNotEmpty))
+	})
+
+	// Service account with login_type!=none should be rejected
+	// by the users_service_account_login_type constraint.
+	t.Run("ServiceAccountWithPasswordLoginType", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		_, err := db.InsertUser(ctx, database.InsertUserParams{
+			Email:            "",
+			LoginType:        database.LoginTypePassword,
+			ID:               uuid.New(),
+			Username:         "sa-with-password",
+			RBACRoles:        []string{},
+			IsServiceAccount: true,
+		})
+		require.Error(t, err)
+		require.True(t, database.IsCheckViolation(err, database.CheckUsersServiceAccountLoginType))
+	})
 }
 
 func TestUserChangeLoginType(t *testing.T) {
@@ -1973,8 +2358,8 @@ func TestWorkspaceQuotas(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		require.ElementsMatch(t, db2sdk.List(everyoneMembers, groupMemberIDs),
-			db2sdk.List([]database.OrganizationMember{memOne, memTwo}, orgMemberIDs))
+		require.ElementsMatch(t, slice.List(everyoneMembers, groupMemberIDs),
+			slice.List([]database.OrganizationMember{memOne, memTwo}, orgMemberIDs))
 
 		// Check the quota is correct.
 		allowance, err := db.GetQuotaAllowanceForUser(ctx, database.GetQuotaAllowanceForUserParams{
@@ -2155,7 +2540,7 @@ func TestReadCustomRoles(t *testing.T) {
 		{
 			Name: "AllRolesByLookup",
 			Params: database.CustomRolesParams{
-				LookupRoles: db2sdk.List(allRoles, roleToLookup),
+				LookupRoles: slice.List(allRoles, roleToLookup),
 			},
 			Match: func(role database.CustomRole) bool {
 				return true
@@ -2221,11 +2606,284 @@ func TestReadCustomRoles(t *testing.T) {
 				}
 			}
 
-			a := db2sdk.List(filtered, normalizedRoleName)
-			b := db2sdk.List(found, normalizedRoleName)
+			a := slice.List(filtered, normalizedRoleName)
+			b := slice.List(found, normalizedRoleName)
 			require.Equal(t, a, b)
 		})
 	}
+}
+
+func TestDeleteCustomRoleDoesNotDeleteSystemRole(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+	org := dbgen.Organization(t, db, database.Organization{})
+
+	ctx := testutil.Context(t, testutil.WaitShort)
+
+	systemRole, err := db.InsertCustomRole(ctx, database.InsertCustomRoleParams{
+		Name:        "test-system-role",
+		DisplayName: "",
+		OrganizationID: uuid.NullUUID{
+			UUID:  org.ID,
+			Valid: true,
+		},
+		SitePermissions:   database.CustomRolePermissions{},
+		OrgPermissions:    database.CustomRolePermissions{},
+		UserPermissions:   database.CustomRolePermissions{},
+		MemberPermissions: database.CustomRolePermissions{},
+		IsSystem:          true,
+	})
+	require.NoError(t, err)
+
+	nonSystemRole, err := db.InsertCustomRole(ctx, database.InsertCustomRoleParams{
+		Name:        "test-custom-role",
+		DisplayName: "",
+		OrganizationID: uuid.NullUUID{
+			UUID:  org.ID,
+			Valid: true,
+		},
+		SitePermissions:   database.CustomRolePermissions{},
+		OrgPermissions:    database.CustomRolePermissions{},
+		UserPermissions:   database.CustomRolePermissions{},
+		MemberPermissions: database.CustomRolePermissions{},
+		IsSystem:          false,
+	})
+	require.NoError(t, err)
+
+	err = db.DeleteCustomRole(ctx, database.DeleteCustomRoleParams{
+		Name: systemRole.Name,
+		OrganizationID: uuid.NullUUID{
+			UUID:  org.ID,
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	err = db.DeleteCustomRole(ctx, database.DeleteCustomRoleParams{
+		Name: nonSystemRole.Name,
+		OrganizationID: uuid.NullUUID{
+			UUID:  org.ID,
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	roles, err := db.CustomRoles(ctx, database.CustomRolesParams{
+		LookupRoles: []database.NameOrganizationPair{
+			{
+				Name:           systemRole.Name,
+				OrganizationID: org.ID,
+			},
+			{
+				Name:           nonSystemRole.Name,
+				OrganizationID: org.ID,
+			},
+		},
+		IncludeSystemRoles: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, roles, 1)
+	require.Equal(t, systemRole.Name, roles[0].Name)
+	require.True(t, roles[0].IsSystem)
+}
+
+func TestGetAuthorizationUserRolesImpliedOrgRole(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+	org := dbgen.Organization(t, db, database.Organization{})
+
+	regularUser := dbgen.User(t, db, database.User{})
+	saUser := dbgen.User(t, db, database.User{IsServiceAccount: true})
+
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{
+		OrganizationID: org.ID,
+		UserID:         regularUser.ID,
+	})
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{
+		OrganizationID: org.ID,
+		UserID:         saUser.ID,
+	})
+
+	ctx := testutil.Context(t, testutil.WaitShort)
+
+	wantMember := rbac.RoleOrgMember() + ":" + org.ID.String()
+	wantSA := rbac.RoleOrgServiceAccount() + ":" + org.ID.String()
+
+	// Regular users get the implied organization-member role.
+	regularRoles, err := db.GetAuthorizationUserRoles(ctx, regularUser.ID)
+	require.NoError(t, err)
+	require.Contains(t, regularRoles.Roles, wantMember)
+	require.NotContains(t, regularRoles.Roles, wantSA)
+
+	// Service accounts get the implied organization-service-account role.
+	saRoles, err := db.GetAuthorizationUserRoles(ctx, saUser.ID)
+	require.NoError(t, err)
+	require.Contains(t, saRoles.Roles, wantSA)
+	require.NotContains(t, saRoles.Roles, wantMember)
+}
+
+func TestUpdateOrganizationWorkspaceSharingSettings(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+	org := dbgen.Organization(t, db, database.Organization{})
+
+	ctx := testutil.Context(t, testutil.WaitShort)
+
+	updated, err := db.UpdateOrganizationWorkspaceSharingSettings(ctx, database.UpdateOrganizationWorkspaceSharingSettingsParams{
+		ID:                       org.ID,
+		ShareableWorkspaceOwners: database.ShareableWorkspaceOwnersNone,
+		UpdatedAt:                dbtime.Now(),
+	})
+	require.NoError(t, err)
+	require.Equal(t, database.ShareableWorkspaceOwnersNone, updated.ShareableWorkspaceOwners)
+
+	got, err := db.GetOrganizationByID(ctx, org.ID)
+	require.NoError(t, err)
+	require.Equal(t, database.ShareableWorkspaceOwnersNone, got.ShareableWorkspaceOwners)
+}
+
+func TestDeleteWorkspaceACLsByOrganization(t *testing.T) {
+	t.Parallel()
+
+	t.Run("DeletesAll", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		org1 := dbgen.Organization(t, db, database.Organization{})
+		org2 := dbgen.Organization(t, db, database.Organization{})
+
+		owner1 := dbgen.User(t, db, database.User{})
+		owner2 := dbgen.User(t, db, database.User{})
+		sharedUser := dbgen.User(t, db, database.User{})
+		sharedGroup := dbgen.Group(t, db, database.Group{
+			OrganizationID: org1.ID,
+		})
+
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			OrganizationID: org1.ID,
+			UserID:         owner1.ID,
+		})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			OrganizationID: org2.ID,
+			UserID:         owner2.ID,
+		})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			OrganizationID: org1.ID,
+			UserID:         sharedUser.ID,
+		})
+
+		ws1 := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        owner1.ID,
+			OrganizationID: org1.ID,
+			UserACL: database.WorkspaceACL{
+				sharedUser.ID.String(): {
+					Permissions: []policy.Action{policy.ActionRead},
+				},
+			},
+			GroupACL: database.WorkspaceACL{
+				sharedGroup.ID.String(): {
+					Permissions: []policy.Action{policy.ActionRead},
+				},
+			},
+		}).Do().Workspace
+
+		ws2 := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        owner2.ID,
+			OrganizationID: org2.ID,
+			UserACL: database.WorkspaceACL{
+				uuid.NewString(): {
+					Permissions: []policy.Action{policy.ActionRead},
+				},
+			},
+		}).Do().Workspace
+
+		ctx := testutil.Context(t, testutil.WaitShort)
+
+		err := db.DeleteWorkspaceACLsByOrganization(ctx, database.DeleteWorkspaceACLsByOrganizationParams{
+			OrganizationID:         org1.ID,
+			ExcludeServiceAccounts: false,
+		})
+		require.NoError(t, err)
+
+		got1, err := db.GetWorkspaceByID(ctx, ws1.ID)
+		require.NoError(t, err)
+		require.Empty(t, got1.UserACL)
+		require.Empty(t, got1.GroupACL)
+
+		got2, err := db.GetWorkspaceByID(ctx, ws2.ID)
+		require.NoError(t, err)
+		require.NotEmpty(t, got2.UserACL)
+	})
+
+	t.Run("ExcludesServiceAccounts", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		org := dbgen.Organization(t, db, database.Organization{})
+
+		regularUser := dbgen.User(t, db, database.User{})
+		saUser := dbgen.User(t, db, database.User{IsServiceAccount: true})
+		sharedUser := dbgen.User(t, db, database.User{})
+
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			OrganizationID: org.ID,
+			UserID:         regularUser.ID,
+		})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			OrganizationID: org.ID,
+			UserID:         saUser.ID,
+		})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{
+			OrganizationID: org.ID,
+			UserID:         sharedUser.ID,
+		})
+
+		regularWS := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        regularUser.ID,
+			OrganizationID: org.ID,
+			UserACL: database.WorkspaceACL{
+				sharedUser.ID.String(): {
+					Permissions: []policy.Action{policy.ActionRead},
+				},
+			},
+		}).Do().Workspace
+
+		saWS := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+			OwnerID:        saUser.ID,
+			OrganizationID: org.ID,
+			UserACL: database.WorkspaceACL{
+				sharedUser.ID.String(): {
+					Permissions: []policy.Action{policy.ActionRead},
+				},
+			},
+		}).Do().Workspace
+
+		ctx := testutil.Context(t, testutil.WaitShort)
+
+		err := db.DeleteWorkspaceACLsByOrganization(ctx, database.DeleteWorkspaceACLsByOrganizationParams{
+			OrganizationID:         org.ID,
+			ExcludeServiceAccounts: true,
+		})
+		require.NoError(t, err)
+
+		// Regular user workspace ACLs should be cleared.
+		gotRegular, err := db.GetWorkspaceByID(ctx, regularWS.ID)
+		require.NoError(t, err)
+		require.Empty(t, gotRegular.UserACL)
+
+		// Service account workspace ACLs should be preserved.
+		gotSA, err := db.GetWorkspaceByID(ctx, saWS.ID)
+		require.NoError(t, err)
+		require.Equal(t, database.WorkspaceACL{
+			sharedUser.ID.String(): {
+				Permissions: []policy.Action{policy.ActionRead},
+			},
+		}, gotSA.UserACL)
+	})
 }
 
 func TestAuthorizedAuditLogs(t *testing.T) {
@@ -2932,9 +3590,11 @@ func connectionOnlyIDs[T database.ConnectionLog | database.GetConnectionLogsOffs
 	return ids
 }
 
-func TestUpsertConnectionLog(t *testing.T) {
+func TestBatchUpsertConnectionLogs(t *testing.T) {
 	t.Parallel()
+
 	createWorkspace := func(t *testing.T, db database.Store) database.WorkspaceTable {
+		t.Helper()
 		u := dbgen.User(t, db, database.User{})
 		o := dbgen.Organization(t, db, database.Organization{})
 		tpl := dbgen.Template(t, db, database.Template{
@@ -2950,253 +3610,536 @@ func TestUpsertConnectionLog(t *testing.T) {
 		})
 	}
 
+	// zeroTime is the sentinel value that the SQL treats as "no
+	// connect/disconnect time provided".
+	zeroTime := time.Time{}
+
+	defaultIP := pqtype.Inet{
+		IPNet: net.IPNet{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Mask: net.IPv4Mask(255, 255, 255, 255),
+		},
+		Valid: true,
+	}
+
+	t.Run("SingleConnect", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		connID := uuid.New()
+		connectTime := dbtime.Now()
+
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{connectTime},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{0},
+			CodeValid:        []bool{false},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{""},
+			DisconnectTime:   []time.Time{zeroTime},
+		})
+		require.NoError(t, err)
+
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.True(t, connectTime.Equal(rows[0].ConnectionLog.ConnectTime))
+		require.False(t, rows[0].ConnectionLog.DisconnectTime.Valid,
+			"disconnect_time should be NULL for a connect-only event")
+	})
+
 	t.Run("ConnectThenDisconnect", func(t *testing.T) {
 		t.Parallel()
 		db, _ := dbtestutil.NewDB(t)
 		ctx := context.Background()
-
 		ws := createWorkspace(t, db)
-
-		connectionID := uuid.New()
-		agentName := "test-agent"
-
-		// 1. Insert a 'connect' event.
+		connID := uuid.New()
 		connectTime := dbtime.Now()
-		connectParams := database.UpsertConnectionLogParams{
-			ID:               uuid.New(),
-			Time:             connectTime,
-			OrganizationID:   ws.OrganizationID,
-			WorkspaceOwnerID: ws.OwnerID,
-			WorkspaceID:      ws.ID,
-			WorkspaceName:    ws.Name,
-			AgentName:        agentName,
-			Type:             database.ConnectionTypeSsh,
-			ConnectionID:     uuid.NullUUID{UUID: connectionID, Valid: true},
-			ConnectionStatus: database.ConnectionStatusConnected,
-			Ip: pqtype.Inet{
-				IPNet: net.IPNet{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Mask: net.IPv4Mask(255, 255, 255, 255),
-				},
-				Valid: true,
-			},
-		}
 
-		log1, err := db.UpsertConnectionLog(ctx, connectParams)
+		// Insert connect.
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{connectTime},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{0},
+			CodeValid:        []bool{false},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{""},
+			DisconnectTime:   []time.Time{zeroTime},
+		})
 		require.NoError(t, err)
-		require.Equal(t, connectParams.ID, log1.ID)
-		require.False(t, log1.DisconnectTime.Valid, "DisconnectTime should not be set on connect")
 
-		// Check that one row exists.
+		// Insert disconnect for same connection.
+		disconnectTime := connectTime.Add(time.Second)
+		err = db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{zeroTime},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{1},
+			CodeValid:        []bool{true},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{"test disconnect"},
+			DisconnectTime:   []time.Time{disconnectTime},
+		})
+		require.NoError(t, err)
+
 		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
 		require.NoError(t, err)
 		require.Len(t, rows, 1)
-
-		// 2. Insert a 'disconnected' event for the same connection.
-		disconnectTime := connectTime.Add(time.Second)
-		disconnectParams := database.UpsertConnectionLogParams{
-			ConnectionID:     uuid.NullUUID{UUID: connectionID, Valid: true},
-			WorkspaceID:      ws.ID,
-			AgentName:        agentName,
-			ConnectionStatus: database.ConnectionStatusDisconnected,
-
-			// Updated to:
-			Time:             disconnectTime,
-			DisconnectReason: sql.NullString{String: "test disconnect", Valid: true},
-			Code:             sql.NullInt32{Int32: 1, Valid: true},
-
-			// Ignored
-			ID:               uuid.New(),
-			OrganizationID:   ws.OrganizationID,
-			WorkspaceOwnerID: ws.OwnerID,
-			WorkspaceName:    ws.Name,
-			Type:             database.ConnectionTypeSsh,
-			Ip: pqtype.Inet{
-				IPNet: net.IPNet{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Mask: net.IPv4Mask(255, 255, 255, 254),
-				},
-				Valid: true,
-			},
-		}
-
-		log2, err := db.UpsertConnectionLog(ctx, disconnectParams)
-		require.NoError(t, err)
-
-		// Updated
-		require.Equal(t, log1.ID, log2.ID)
-		require.True(t, log2.DisconnectTime.Valid)
-		require.True(t, disconnectTime.Equal(log2.DisconnectTime.Time))
-		require.Equal(t, disconnectParams.DisconnectReason.String, log2.DisconnectReason.String)
-
-		rows, err = db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{})
-		require.NoError(t, err)
-		require.Len(t, rows, 1)
+		row := rows[0].ConnectionLog
+		require.True(t, connectTime.Equal(row.ConnectTime))
+		require.True(t, row.DisconnectTime.Valid)
+		require.True(t, disconnectTime.Equal(row.DisconnectTime.Time))
+		require.Equal(t, "test disconnect", row.DisconnectReason.String)
+		require.Equal(t, int32(1), row.Code.Int32)
 	})
 
-	t.Run("ConnectDoesNotUpdate", func(t *testing.T) {
+	t.Run("DuplicateConnectIsNoOp", func(t *testing.T) {
 		t.Parallel()
 		db, _ := dbtestutil.NewDB(t)
 		ctx := context.Background()
-
 		ws := createWorkspace(t, db)
-
-		connectionID := uuid.New()
-		agentName := "test-agent"
-
-		// 1. Insert a 'connect' event.
+		connID := uuid.New()
 		connectTime := dbtime.Now()
-		connectParams := database.UpsertConnectionLogParams{
-			ID:               uuid.New(),
-			Time:             connectTime,
-			OrganizationID:   ws.OrganizationID,
-			WorkspaceOwnerID: ws.OwnerID,
-			WorkspaceID:      ws.ID,
-			WorkspaceName:    ws.Name,
-			AgentName:        agentName,
-			Type:             database.ConnectionTypeSsh,
-			ConnectionID:     uuid.NullUUID{UUID: connectionID, Valid: true},
-			ConnectionStatus: database.ConnectionStatusConnected,
-			Ip: pqtype.Inet{
-				IPNet: net.IPNet{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Mask: net.IPv4Mask(255, 255, 255, 255),
-				},
-				Valid: true,
-			},
+
+		mkParams := func(ct time.Time, ip pqtype.Inet) database.BatchUpsertConnectionLogsParams {
+			return database.BatchUpsertConnectionLogsParams{
+				ID:               []uuid.UUID{uuid.New()},
+				ConnectTime:      []time.Time{ct},
+				OrganizationID:   []uuid.UUID{ws.OrganizationID},
+				WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+				WorkspaceID:      []uuid.UUID{ws.ID},
+				WorkspaceName:    []string{ws.Name},
+				AgentName:        []string{"agent"},
+				Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+				Code:             []int32{0},
+				CodeValid:        []bool{false},
+				Ip:               []pqtype.Inet{ip},
+				UserAgent:        []string{""},
+				UserID:           []uuid.UUID{uuid.Nil},
+				SlugOrPort:       []string{""},
+				ConnectionID:     []uuid.UUID{connID},
+				DisconnectReason: []string{""},
+				DisconnectTime:   []time.Time{zeroTime},
+			}
 		}
 
-		log, err := db.UpsertConnectionLog(ctx, connectParams)
+		err := db.BatchUpsertConnectionLogs(ctx, mkParams(connectTime, defaultIP))
 		require.NoError(t, err)
 
-		// 2. Insert another 'connect' event for the same connection.
-		connectTime2 := connectTime.Add(time.Second)
-		connectParams2 := database.UpsertConnectionLogParams{
-			ConnectionID:     uuid.NullUUID{UUID: connectionID, Valid: true},
-			WorkspaceID:      ws.ID,
-			AgentName:        agentName,
-			ConnectionStatus: database.ConnectionStatusConnected,
+		rows1, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows1, 1)
 
-			// Ignored
-			ID:               uuid.New(),
-			Time:             connectTime2,
-			OrganizationID:   ws.OrganizationID,
-			WorkspaceOwnerID: ws.OwnerID,
-			WorkspaceName:    ws.Name,
-			Type:             database.ConnectionTypeSsh,
-			Code:             sql.NullInt32{Int32: 0, Valid: false},
-			Ip: pqtype.Inet{
-				IPNet: net.IPNet{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Mask: net.IPv4Mask(255, 255, 255, 254),
-				},
-				Valid: true,
+		// Second connect with later time and different IP.
+		otherIP := pqtype.Inet{
+			IPNet: net.IPNet{
+				IP:   net.IPv4(10, 0, 0, 1),
+				Mask: net.IPv4Mask(255, 255, 255, 255),
 			},
+			Valid: true,
 		}
-
-		origLog, err := db.UpsertConnectionLog(ctx, connectParams2)
+		err = db.BatchUpsertConnectionLogs(ctx, mkParams(connectTime.Add(time.Second), otherIP))
 		require.NoError(t, err)
-		require.Equal(t, log, origLog, "connect update should be a no-op")
 
-		// Check that still only one row exists.
-		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{})
+		rows2, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
 		require.NoError(t, err)
-		require.Len(t, rows, 1)
-		require.Equal(t, log, rows[0].ConnectionLog)
+		require.Len(t, rows2, 1)
+
+		// The LEAST logic should pick the earlier connect_time; IP and
+		// other fields are not updated on conflict.
+		require.True(t, connectTime.Equal(rows2[0].ConnectionLog.ConnectTime),
+			"connect_time should remain the original (earlier) value")
 	})
 
-	t.Run("DisconnectThenConnect", func(t *testing.T) {
+	t.Run("OrderIndependentConnectTime", func(t *testing.T) {
 		t.Parallel()
-
 		db, _ := dbtestutil.NewDB(t)
 		ctx := context.Background()
-
 		ws := createWorkspace(t, db)
-
-		connectionID := uuid.New()
-		agentName := "test-agent"
-
-		// Insert just a 'disconect' event
+		connID := uuid.New()
 		disconnectTime := dbtime.Now()
-		disconnectParams := database.UpsertConnectionLogParams{
-			ID:               uuid.New(),
-			Time:             disconnectTime,
-			OrganizationID:   ws.OrganizationID,
-			WorkspaceOwnerID: ws.OwnerID,
-			WorkspaceID:      ws.ID,
-			WorkspaceName:    ws.Name,
-			AgentName:        agentName,
-			Type:             database.ConnectionTypeSsh,
-			ConnectionID:     uuid.NullUUID{UUID: connectionID, Valid: true},
-			ConnectionStatus: database.ConnectionStatusDisconnected,
-			DisconnectReason: sql.NullString{String: "server shutting down", Valid: true},
-			Ip: pqtype.Inet{
-				IPNet: net.IPNet{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Mask: net.IPv4Mask(255, 255, 255, 255),
-				},
-				Valid: true,
-			},
+		connectTime := disconnectTime.Add(-5 * time.Second)
+
+		// Disconnect arrives first.
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{disconnectTime},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{0},
+			CodeValid:        []bool{true},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{"bye"},
+			DisconnectTime:   []time.Time{disconnectTime},
+		})
+		require.NoError(t, err)
+
+		// Connect arrives second with the real (earlier) connect_time.
+		err = db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{connectTime},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{0},
+			CodeValid:        []bool{false},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{""},
+			DisconnectTime:   []time.Time{zeroTime},
+		})
+		require.NoError(t, err)
+
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.True(t, connectTime.Equal(rows[0].ConnectionLog.ConnectTime),
+			"LEAST should pick the earlier connect_time")
+	})
+
+	t.Run("DisconnectFieldsAreWriteOnce", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		connID := uuid.New()
+		disconnectTime := dbtime.Now()
+
+		mkDisconnect := func(reason string, code int32) database.BatchUpsertConnectionLogsParams {
+			return database.BatchUpsertConnectionLogsParams{
+				ID:               []uuid.UUID{uuid.New()},
+				ConnectTime:      []time.Time{disconnectTime},
+				OrganizationID:   []uuid.UUID{ws.OrganizationID},
+				WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+				WorkspaceID:      []uuid.UUID{ws.ID},
+				WorkspaceName:    []string{ws.Name},
+				AgentName:        []string{"agent"},
+				Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+				Code:             []int32{code},
+				CodeValid:        []bool{true},
+				Ip:               []pqtype.Inet{defaultIP},
+				UserAgent:        []string{""},
+				UserID:           []uuid.UUID{uuid.Nil},
+				SlugOrPort:       []string{""},
+				ConnectionID:     []uuid.UUID{connID},
+				DisconnectReason: []string{reason},
+				DisconnectTime:   []time.Time{disconnectTime},
+			}
 		}
 
-		_, err := db.UpsertConnectionLog(ctx, disconnectParams)
+		err := db.BatchUpsertConnectionLogs(ctx, mkDisconnect("first reason", 1))
 		require.NoError(t, err)
 
-		firstRows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{})
+		// Second disconnect with different reason and code.
+		err = db.BatchUpsertConnectionLogs(ctx, mkDisconnect("second reason", 2))
 		require.NoError(t, err)
-		require.Len(t, firstRows, 1)
 
-		// We expect the connection event to be marked as closed with the start
-		// and close time being the same.
-		require.True(t, firstRows[0].ConnectionLog.DisconnectTime.Valid)
-		require.Equal(t, disconnectTime, firstRows[0].ConnectionLog.DisconnectTime.Time.UTC())
-		require.Equal(t, firstRows[0].ConnectionLog.ConnectTime.UTC(), firstRows[0].ConnectionLog.DisconnectTime.Time.UTC())
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		row := rows[0].ConnectionLog
+		require.Equal(t, "first reason", row.DisconnectReason.String,
+			"disconnect_reason should not be overwritten")
+		require.Equal(t, int32(1), row.Code.Int32,
+			"code should not be overwritten")
+	})
 
-		// Now insert a 'connect' event for the same connection.
-		// This should be a no op
-		connectTime := disconnectTime.Add(time.Second)
-		connectParams := database.UpsertConnectionLogParams{
-			ID:               uuid.New(),
-			Time:             connectTime,
-			OrganizationID:   ws.OrganizationID,
-			WorkspaceOwnerID: ws.OwnerID,
-			WorkspaceID:      ws.ID,
-			WorkspaceName:    ws.Name,
-			AgentName:        agentName,
-			Type:             database.ConnectionTypeSsh,
-			ConnectionID:     uuid.NullUUID{UUID: connectionID, Valid: true},
-			ConnectionStatus: database.ConnectionStatusConnected,
-			DisconnectReason: sql.NullString{String: "reconnected", Valid: true},
-			Code:             sql.NullInt32{Int32: 0, Valid: false},
-			Ip: pqtype.Inet{
-				IPNet: net.IPNet{
-					IP:   net.IPv4(127, 0, 0, 1),
-					Mask: net.IPv4Mask(255, 255, 255, 255),
-				},
-				Valid: true,
-			},
+	t.Run("ConnectAfterDisconnectIsNoOp", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		connID := uuid.New()
+		disconnectTime := dbtime.Now()
+
+		// Insert disconnect first.
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{disconnectTime},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{42},
+			CodeValid:        []bool{true},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{"server shutdown"},
+			DisconnectTime:   []time.Time{disconnectTime},
+		})
+		require.NoError(t, err)
+
+		rows1, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows1, 1)
+		require.True(t, rows1[0].ConnectionLog.DisconnectTime.Valid)
+		require.Equal(t, "server shutdown", rows1[0].ConnectionLog.DisconnectReason.String)
+		require.Equal(t, int32(42), rows1[0].ConnectionLog.Code.Int32)
+
+		// Insert connect for same connection_id.
+		err = db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{disconnectTime.Add(time.Second)},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{0},
+			CodeValid:        []bool{false},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{""},
+			DisconnectTime:   []time.Time{zeroTime},
+		})
+		require.NoError(t, err)
+
+		rows2, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows2, 1)
+		row := rows2[0].ConnectionLog
+		require.True(t, row.DisconnectTime.Valid,
+			"disconnect_time should not be cleared by a later connect")
+		require.Equal(t, "server shutdown", row.DisconnectReason.String,
+			"disconnect_reason should not be cleared")
+		require.Equal(t, int32(42), row.Code.Int32,
+			"code should not be cleared")
+	})
+
+	t.Run("CodeZeroPreserved", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		connID := uuid.New()
+		now := dbtime.Now()
+
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{now},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{0},
+			CodeValid:        []bool{true},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{"normal"},
+			DisconnectTime:   []time.Time{now},
+		})
+		require.NoError(t, err)
+
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.True(t, rows[0].ConnectionLog.Code.Valid, "code should be non-NULL")
+		require.Equal(t, int32(0), rows[0].ConnectionLog.Code.Int32,
+			"code=0 should be preserved, not treated as NULL")
+	})
+
+	t.Run("CodeNullWhenInvalid", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		connID := uuid.New()
+		now := dbtime.Now()
+
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               []uuid.UUID{uuid.New()},
+			ConnectTime:      []time.Time{now},
+			OrganizationID:   []uuid.UUID{ws.OrganizationID},
+			WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+			WorkspaceID:      []uuid.UUID{ws.ID},
+			WorkspaceName:    []string{ws.Name},
+			AgentName:        []string{"agent"},
+			Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+			Code:             []int32{99},
+			CodeValid:        []bool{false},
+			Ip:               []pqtype.Inet{defaultIP},
+			UserAgent:        []string{""},
+			UserID:           []uuid.UUID{uuid.Nil},
+			SlugOrPort:       []string{""},
+			ConnectionID:     []uuid.UUID{connID},
+			DisconnectReason: []string{""},
+			DisconnectTime:   []time.Time{zeroTime},
+		})
+		require.NoError(t, err)
+
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		require.False(t, rows[0].ConnectionLog.Code.Valid,
+			"code should be NULL when code_valid is false")
+	})
+
+	t.Run("NullConnectionIDEvents", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		now := dbtime.Now()
+
+		// Insert two web events with NULL connection_id (uuid.Nil →
+		// NULL via NULLIF) for the same workspace/agent.
+		for i := range 2 {
+			err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+				ID:               []uuid.UUID{uuid.New()},
+				ConnectTime:      []time.Time{now.Add(time.Duration(i) * time.Second)},
+				OrganizationID:   []uuid.UUID{ws.OrganizationID},
+				WorkspaceOwnerID: []uuid.UUID{ws.OwnerID},
+				WorkspaceID:      []uuid.UUID{ws.ID},
+				WorkspaceName:    []string{ws.Name},
+				AgentName:        []string{"agent"},
+				Type:             []database.ConnectionType{database.ConnectionTypeSsh},
+				Code:             []int32{200},
+				CodeValid:        []bool{true},
+				Ip:               []pqtype.Inet{defaultIP},
+				UserAgent:        []string{"Mozilla/5.0"},
+				UserID:           []uuid.UUID{uuid.Nil},
+				SlugOrPort:       []string{"web-terminal"},
+				ConnectionID:     []uuid.UUID{uuid.Nil},
+				DisconnectReason: []string{""},
+				DisconnectTime:   []time.Time{zeroTime},
+			})
+			require.NoError(t, err)
 		}
 
-		_, err = db.UpsertConnectionLog(ctx, connectParams)
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
 		require.NoError(t, err)
+		require.Len(t, rows, 2,
+			"NULL connection_id rows should not conflict with each other")
+	})
 
-		secondRows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{})
-		require.NoError(t, err)
-		require.Len(t, secondRows, 1)
-		require.Equal(t, firstRows, secondRows)
+	t.Run("MultipleIndependentConnections", func(t *testing.T) {
+		t.Parallel()
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		ws := createWorkspace(t, db)
+		now := dbtime.Now()
 
-		// Upsert a disconnection, which should also be a no op
-		disconnectParams.DisconnectReason = sql.NullString{
-			String: "updated close reason",
-			Valid:  true,
+		n := 5
+		ids := make([]uuid.UUID, n)
+		connectTimes := make([]time.Time, n)
+		orgIDs := make([]uuid.UUID, n)
+		ownerIDs := make([]uuid.UUID, n)
+		wsIDs := make([]uuid.UUID, n)
+		wsNames := make([]string, n)
+		agentNames := make([]string, n)
+		types := make([]database.ConnectionType, n)
+		codes := make([]int32, n)
+		codeValids := make([]bool, n)
+		ips := make([]pqtype.Inet, n)
+		userAgents := make([]string, n)
+		userIDs := make([]uuid.UUID, n)
+		slugOrPorts := make([]string, n)
+		connIDs := make([]uuid.UUID, n)
+		disconnectReasons := make([]string, n)
+		disconnectTimes := make([]time.Time, n)
+
+		for i := range n {
+			ids[i] = uuid.New()
+			connectTimes[i] = now.Add(time.Duration(i) * time.Second)
+			orgIDs[i] = ws.OrganizationID
+			ownerIDs[i] = ws.OwnerID
+			wsIDs[i] = ws.ID
+			wsNames[i] = ws.Name
+			agentNames[i] = "agent"
+			types[i] = database.ConnectionTypeSsh
+			codes[i] = 0
+			codeValids[i] = false
+			ips[i] = defaultIP
+			userAgents[i] = ""
+			userIDs[i] = uuid.Nil
+			slugOrPorts[i] = ""
+			connIDs[i] = uuid.New()
+			disconnectReasons[i] = ""
+			disconnectTimes[i] = zeroTime
 		}
-		_, err = db.UpsertConnectionLog(ctx, disconnectParams)
+
+		err := db.BatchUpsertConnectionLogs(ctx, database.BatchUpsertConnectionLogsParams{
+			ID:               ids,
+			ConnectTime:      connectTimes,
+			OrganizationID:   orgIDs,
+			WorkspaceOwnerID: ownerIDs,
+			WorkspaceID:      wsIDs,
+			WorkspaceName:    wsNames,
+			AgentName:        agentNames,
+			Type:             types,
+			Code:             codes,
+			CodeValid:        codeValids,
+			Ip:               ips,
+			UserAgent:        userAgents,
+			UserID:           userIDs,
+			SlugOrPort:       slugOrPorts,
+			ConnectionID:     connIDs,
+			DisconnectReason: disconnectReasons,
+			DisconnectTime:   disconnectTimes,
+		})
 		require.NoError(t, err)
-		thirdRows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{})
+
+		rows, err := db.GetConnectionLogsOffset(ctx, database.GetConnectionLogsOffsetParams{LimitOpt: 10})
 		require.NoError(t, err)
-		require.Len(t, secondRows, 1)
-		// The close reason shouldn't be updated
-		require.Equal(t, secondRows, thirdRows)
+		require.Len(t, rows, n, "each unique connection_id should produce its own row")
 	})
 }
 
@@ -3655,6 +4598,37 @@ func TestGetProvisionerJobsByIDsWithQueuePosition(t *testing.T) {
 			queueSizes:     nil, // TODO(yevhenii): should it be empty array instead?
 			queuePositions: nil,
 		},
+		// Many daemons with identical tags should produce same results as one.
+		{
+			name: "duplicate-daemons-same-tags",
+			jobTags: []database.StringMap{
+				{"a": "1"},
+				{"a": "1", "b": "2"},
+			},
+			daemonTags: []database.StringMap{
+				{"a": "1", "b": "2"},
+				{"a": "1", "b": "2"},
+				{"a": "1", "b": "2"},
+			},
+			queueSizes:     []int64{2, 2},
+			queuePositions: []int64{1, 2},
+		},
+		// Jobs that don't match any queried job's daemon should still
+		// have correct queue positions.
+		{
+			name: "irrelevant-daemons-filtered",
+			jobTags: []database.StringMap{
+				{"a": "1"},
+				{"x": "9"},
+			},
+			daemonTags: []database.StringMap{
+				{"a": "1"},
+				{"x": "9"},
+			},
+			queueSizes:     []int64{1},
+			queuePositions: []int64{1},
+			skipJobIDs:     map[int]struct{}{1: {}},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -3742,9 +4716,6 @@ func TestGetProvisionerJobsByIDsWithQueuePosition(t *testing.T) {
 
 func TestGetProvisionerJobsByIDsWithQueuePosition_MixedStatuses(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.SkipNow()
-	}
 
 	db, _ := dbtestutil.NewDB(t)
 	now := dbtime.Now()
@@ -3983,6 +4954,51 @@ func TestGetProvisionerJobsByIDsWithQueuePosition_OrderValidation(t *testing.T) 
 	assert.EqualValues(t, []int64{1, 2, 3, 4, 5, 6}, queuePositions, "expected queue positions to be set correctly")
 }
 
+func TestGetProvisionerJobsByIDsWithQueuePosition_DuplicateDaemons(t *testing.T) {
+	t.Parallel()
+	db, _ := dbtestutil.NewDB(t)
+	now := dbtime.Now()
+	ctx := testutil.Context(t, testutil.WaitShort)
+
+	// Create 3 pending jobs with the same tags.
+	jobs := make([]database.ProvisionerJob, 3)
+	for i := range jobs {
+		jobs[i] = dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			CreatedAt: now.Add(-time.Duration(3-i) * time.Minute),
+			Tags:      database.StringMap{"scope": "organization", "owner": ""},
+		})
+	}
+
+	// Create 50 daemons with identical tags (simulates scale).
+	for i := range 50 {
+		dbgen.ProvisionerDaemon(t, db, database.ProvisionerDaemon{
+			Name:         fmt.Sprintf("daemon_%d", i),
+			Provisioners: []database.ProvisionerType{database.ProvisionerTypeEcho},
+			Tags:         database.StringMap{"scope": "organization", "owner": ""},
+		})
+	}
+
+	jobIDs := make([]uuid.UUID, len(jobs))
+	for i, j := range jobs {
+		jobIDs[i] = j.ID
+	}
+
+	results, err := db.GetProvisionerJobsByIDsWithQueuePosition(ctx,
+		database.GetProvisionerJobsByIDsWithQueuePositionParams{
+			IDs:             jobIDs,
+			StaleIntervalMS: provisionerdserver.StaleInterval.Milliseconds(),
+		})
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+
+	// All daemons have identical tags, so queue should be same as
+	// if there were just one daemon.
+	for i, r := range results {
+		assert.Equal(t, int64(3), r.QueueSize, "job %d queue size", i)
+		assert.Equal(t, int64(i+1), r.QueuePosition, "job %d queue position", i)
+	}
+}
+
 func TestGroupRemovalTrigger(t *testing.T) {
 	t.Parallel()
 
@@ -4050,7 +5066,7 @@ func TestGroupRemovalTrigger(t *testing.T) {
 	require.ElementsMatch(t, []uuid.UUID{
 		orgA.ID, orgB.ID, // Everyone groups
 		groupA1.ID, groupA2.ID, groupB1.ID, groupB2.ID, // Org groups
-	}, db2sdk.List(userGroups, onlyGroupIDs))
+	}, slice.List(userGroups, onlyGroupIDs))
 
 	// Remove the user from org A
 	err = db.DeleteOrganizationMember(ctx, database.DeleteOrganizationMemberParams{
@@ -4067,7 +5083,7 @@ func TestGroupRemovalTrigger(t *testing.T) {
 	require.ElementsMatch(t, []uuid.UUID{
 		orgB.ID,                // Everyone group
 		groupB1.ID, groupB2.ID, // Org groups
-	}, db2sdk.List(userGroups, onlyGroupIDs))
+	}, slice.List(userGroups, onlyGroupIDs))
 
 	// Verify extra user is unchanged
 	extraUserGroups, err := db.GetGroups(ctx, database.GetGroupsParams{
@@ -4077,19 +5093,25 @@ func TestGroupRemovalTrigger(t *testing.T) {
 	require.ElementsMatch(t, []uuid.UUID{
 		orgA.ID, orgB.ID, // Everyone groups
 		groupA1.ID, groupA2.ID, groupB1.ID, groupB2.ID, // Org groups
-	}, db2sdk.List(extraUserGroups, onlyGroupIDs))
+	}, slice.List(extraUserGroups, onlyGroupIDs))
 }
 
 func TestGetUserStatusCounts(t *testing.T) {
 	t.Parallel()
-	t.Skip("https://github.com/coder/internal/issues/464")
 
-	if !dbtestutil.WillUsePostgres() {
-		t.SkipNow()
+	type testCase struct {
+		timezone    string
+		location    *time.Location
+		reportFrom  time.Time
+		reportUntil time.Time
 	}
+	testCases := []testCase{}
 
+	// GetUserStatusCounts is sensitive to DST transitions, because it generates timestamps exactly
+	// one day apart from one another, and specific days can have varying lengths depending on the timezone.
+	// Therefore, we test with a variety of timezones.
 	timezones := []string{
-		"Canada/Newfoundland",
+		"America/St_Johns",
 		"Africa/Johannesburg",
 		"America/New_York",
 		"Europe/London",
@@ -4097,18 +5119,39 @@ func TestGetUserStatusCounts(t *testing.T) {
 		"Australia/Sydney",
 	}
 
+	// assemble test cases
 	for _, tz := range timezones {
-		t.Run(tz, func(t *testing.T) {
+		location, err := time.LoadLocation(tz)
+		if err != nil {
+			t.Fatalf("failed to load location: %v", err)
+		}
+
+		// Testing based on the current system date will flake due to DST transitions.
+		// Instead, we test with a fixed range of dates that is large enough to span multiple DST transitions.
+		startOfTestDateRange := time.Date(2025, 1, 1, 0, 0, 0, 0, location)
+		endOfTestDateRange := time.Date(2026, 1, 1, 0, 0, 0, 0, location)
+		// To keep the number of test cases manageable given the large date range,
+		// we test with a suitable large interval. This interval is also the length of each report.
+		// this ensures we have full coverage of the date range.
+		testDateRangeInterval := 60
+
+		for reportFrom := startOfTestDateRange; !reportFrom.After(endOfTestDateRange); reportFrom = reportFrom.AddDate(0, 0, testDateRangeInterval) {
+			testCases = append(testCases, testCase{
+				timezone:    tz,
+				location:    location,
+				reportFrom:  dbtime.Time(reportFrom),
+				reportUntil: dbtime.Time(reportFrom.AddDate(0, 0, testDateRangeInterval)),
+			})
+		}
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%s/%s", tc.timezone, tc.reportUntil.Format("2006-01-02T15:04:05Z")), func(t *testing.T) {
 			t.Parallel()
 
-			location, err := time.LoadLocation(tz)
-			if err != nil {
-				t.Fatalf("failed to load location: %v", err)
-			}
-			today := dbtime.Now().In(location)
-			createdAt := today.Add(-5 * 24 * time.Hour)
-			firstTransitionTime := createdAt.Add(2 * 24 * time.Hour)
-			secondTransitionTime := firstTransitionTime.Add(2 * 24 * time.Hour)
+			userCreatedAt := tc.reportUntil.AddDate(0, 0, -60)
+			firstStatusChange := userCreatedAt.AddDate(0, 0, 29)
+			secondStatusChange := firstStatusChange.AddDate(0, 0, 29)
 
 			t.Run("No Users", func(t *testing.T) {
 				t.Parallel()
@@ -4116,8 +5159,9 @@ func TestGetUserStatusCounts(t *testing.T) {
 				ctx := testutil.Context(t, testutil.WaitShort)
 
 				counts, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-					StartTime: createdAt,
-					EndTime:   today,
+					Tz:        tc.timezone,
+					StartTime: tc.reportFrom,
+					EndTime:   tc.reportUntil,
 				})
 				require.NoError(t, err)
 				require.Empty(t, counts, "should return no results when there are no users")
@@ -4126,7 +5170,7 @@ func TestGetUserStatusCounts(t *testing.T) {
 			t.Run("One User/Creation Only", func(t *testing.T) {
 				t.Parallel()
 
-				testCases := []struct {
+				subTestCases := []struct {
 					name   string
 					status database.UserStatus
 				}{
@@ -4144,42 +5188,56 @@ func TestGetUserStatusCounts(t *testing.T) {
 					},
 				}
 
-				for _, tc := range testCases {
-					t.Run(tc.name, func(t *testing.T) {
+				for _, stc := range subTestCases {
+					t.Run(stc.name, func(t *testing.T) {
 						t.Parallel()
 						db, _ := dbtestutil.NewDB(t)
 						ctx := testutil.Context(t, testutil.WaitShort)
 
-						// Create a user that's been in the specified status for the past 30 days
 						dbgen.User(t, db, database.User{
-							Status:    tc.status,
-							CreatedAt: createdAt,
-							UpdatedAt: createdAt,
+							Status:    stc.status,
+							CreatedAt: userCreatedAt,
+							UpdatedAt: userCreatedAt,
 						})
 
+						startTime := dbtime.StartOfDay(userCreatedAt)
+						endTime := dbtime.StartOfDay(tc.reportUntil)
 						userStatusChanges, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-							StartTime: dbtime.StartOfDay(createdAt),
-							EndTime:   dbtime.StartOfDay(today),
+							Tz:        tc.timezone,
+							StartTime: startTime,
+							EndTime:   endTime,
 						})
 						require.NoError(t, err)
 
-						numDays := int(dbtime.StartOfDay(today).Sub(dbtime.StartOfDay(createdAt)).Hours() / 24)
-						require.Len(t, userStatusChanges, numDays+1, "should have 1 entry per day between the start and end time, including the end time")
+						numDays := 0
+						for d := startTime; !d.After(endTime); d = d.AddDate(0, 0, 1) {
+							numDays++
+						}
+						assert.Len(
+							t,
+							userStatusChanges,
+							numDays,
+							"should have 1 entry per day between the start and end time, including the end time",
+						)
 
 						for i, row := range userStatusChanges {
-							require.Equal(t, tc.status, row.Status, "should have the correct status")
-							require.True(
+							require.Equal(t, stc.status, row.Status, "should have the correct status")
+
+							rowDate := row.Date.In(tc.location)
+							expectedDate := dbtime.StartOfDay(userCreatedAt).AddDate(0, 0, i)
+							assert.True(
 								t,
-								row.Date.In(location).Equal(dbtime.StartOfDay(createdAt).AddDate(0, 0, i)),
+								rowDate.Equal(expectedDate),
 								"expected date %s, but got %s for row %n",
-								dbtime.StartOfDay(createdAt).AddDate(0, 0, i),
-								row.Date.In(location).String(),
+								expectedDate.String(),
+								rowDate.String(),
 								i,
 							)
-							if row.Date.Before(createdAt) {
-								require.Equal(t, int64(0), row.Count, "should have 0 users before creation")
+
+							if row.Date.Before(userCreatedAt) {
+								assert.Equal(t, int64(0), row.Count, "should have 0 users before creation")
 							} else {
-								require.Equal(t, int64(1), row.Count, "should have 1 user after creation")
+								assert.Equal(t, int64(1), row.Count, "should have 1 user after creation")
 							}
 						}
 					})
@@ -4189,7 +5247,7 @@ func TestGetUserStatusCounts(t *testing.T) {
 			t.Run("One User/One Transition", func(t *testing.T) {
 				t.Parallel()
 
-				testCases := []struct {
+				subTestCases := []struct {
 					name           string
 					initialStatus  database.UserStatus
 					targetStatus   database.UserStatus
@@ -4200,15 +5258,15 @@ func TestGetUserStatusCounts(t *testing.T) {
 						initialStatus: database.UserStatusActive,
 						targetStatus:  database.UserStatusDormant,
 						expectedCounts: map[time.Time]map[database.UserStatus]int64{
-							createdAt: {
+							userCreatedAt: {
 								database.UserStatusActive:  1,
 								database.UserStatusDormant: 0,
 							},
-							firstTransitionTime: {
+							firstStatusChange: {
 								database.UserStatusDormant: 1,
 								database.UserStatusActive:  0,
 							},
-							today: {
+							tc.reportUntil: {
 								database.UserStatusDormant: 1,
 								database.UserStatusActive:  0,
 							},
@@ -4219,15 +5277,15 @@ func TestGetUserStatusCounts(t *testing.T) {
 						initialStatus: database.UserStatusActive,
 						targetStatus:  database.UserStatusSuspended,
 						expectedCounts: map[time.Time]map[database.UserStatus]int64{
-							createdAt: {
+							userCreatedAt: {
 								database.UserStatusActive:    1,
 								database.UserStatusSuspended: 0,
 							},
-							firstTransitionTime: {
+							firstStatusChange: {
 								database.UserStatusSuspended: 1,
 								database.UserStatusActive:    0,
 							},
-							today: {
+							tc.reportUntil: {
 								database.UserStatusSuspended: 1,
 								database.UserStatusActive:    0,
 							},
@@ -4238,15 +5296,15 @@ func TestGetUserStatusCounts(t *testing.T) {
 						initialStatus: database.UserStatusDormant,
 						targetStatus:  database.UserStatusActive,
 						expectedCounts: map[time.Time]map[database.UserStatus]int64{
-							createdAt: {
+							userCreatedAt: {
 								database.UserStatusDormant: 1,
 								database.UserStatusActive:  0,
 							},
-							firstTransitionTime: {
+							firstStatusChange: {
 								database.UserStatusActive:  1,
 								database.UserStatusDormant: 0,
 							},
-							today: {
+							tc.reportUntil: {
 								database.UserStatusActive:  1,
 								database.UserStatusDormant: 0,
 							},
@@ -4257,15 +5315,15 @@ func TestGetUserStatusCounts(t *testing.T) {
 						initialStatus: database.UserStatusDormant,
 						targetStatus:  database.UserStatusSuspended,
 						expectedCounts: map[time.Time]map[database.UserStatus]int64{
-							createdAt: {
+							userCreatedAt: {
 								database.UserStatusDormant:   1,
 								database.UserStatusSuspended: 0,
 							},
-							firstTransitionTime: {
+							firstStatusChange: {
 								database.UserStatusSuspended: 1,
 								database.UserStatusDormant:   0,
 							},
-							today: {
+							tc.reportUntil: {
 								database.UserStatusSuspended: 1,
 								database.UserStatusDormant:   0,
 							},
@@ -4276,15 +5334,15 @@ func TestGetUserStatusCounts(t *testing.T) {
 						initialStatus: database.UserStatusSuspended,
 						targetStatus:  database.UserStatusActive,
 						expectedCounts: map[time.Time]map[database.UserStatus]int64{
-							createdAt: {
+							userCreatedAt: {
 								database.UserStatusSuspended: 1,
 								database.UserStatusActive:    0,
 							},
-							firstTransitionTime: {
+							firstStatusChange: {
 								database.UserStatusActive:    1,
 								database.UserStatusSuspended: 0,
 							},
-							today: {
+							tc.reportUntil: {
 								database.UserStatusActive:    1,
 								database.UserStatusSuspended: 0,
 							},
@@ -4295,15 +5353,15 @@ func TestGetUserStatusCounts(t *testing.T) {
 						initialStatus: database.UserStatusSuspended,
 						targetStatus:  database.UserStatusDormant,
 						expectedCounts: map[time.Time]map[database.UserStatus]int64{
-							createdAt: {
+							userCreatedAt: {
 								database.UserStatusSuspended: 1,
 								database.UserStatusDormant:   0,
 							},
-							firstTransitionTime: {
+							firstStatusChange: {
 								database.UserStatusDormant:   1,
 								database.UserStatusSuspended: 0,
 							},
-							today: {
+							tc.reportUntil: {
 								database.UserStatusDormant:   1,
 								database.UserStatusSuspended: 0,
 							},
@@ -4311,60 +5369,60 @@ func TestGetUserStatusCounts(t *testing.T) {
 					},
 				}
 
-				for _, tc := range testCases {
-					t.Run(tc.name, func(t *testing.T) {
+				for _, stc := range subTestCases {
+					t.Run(stc.name, func(t *testing.T) {
 						t.Parallel()
 						db, _ := dbtestutil.NewDB(t)
 						ctx := testutil.Context(t, testutil.WaitShort)
 
-						// Create a user that starts with initial status
 						user := dbgen.User(t, db, database.User{
-							Status:    tc.initialStatus,
-							CreatedAt: createdAt,
-							UpdatedAt: createdAt,
+							Status:    stc.initialStatus,
+							CreatedAt: userCreatedAt,
+							UpdatedAt: userCreatedAt,
 						})
 
-						// After 2 days, change status to target status
 						user, err := db.UpdateUserStatus(ctx, database.UpdateUserStatusParams{
 							ID:        user.ID,
-							Status:    tc.targetStatus,
-							UpdatedAt: firstTransitionTime,
+							Status:    stc.targetStatus,
+							UpdatedAt: firstStatusChange,
 						})
 						require.NoError(t, err)
 
-						// Query for the last 5 days
 						userStatusChanges, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-							StartTime: dbtime.StartOfDay(createdAt),
-							EndTime:   dbtime.StartOfDay(today),
+							Tz:        tc.timezone,
+							StartTime: dbtime.StartOfDay(userCreatedAt),
+							EndTime:   dbtime.StartOfDay(tc.reportUntil),
 						})
 						require.NoError(t, err)
 
 						for i, row := range userStatusChanges {
+							rowDate := row.Date.In(tc.location)
+							expectedDate := dbtime.StartOfDay(userCreatedAt).AddDate(0, 0, i/2)
 							require.True(
 								t,
-								row.Date.In(location).Equal(dbtime.StartOfDay(createdAt).AddDate(0, 0, i/2)),
+								rowDate.Equal(expectedDate),
 								"expected date %s, but got %s for row %n",
-								dbtime.StartOfDay(createdAt).AddDate(0, 0, i/2),
-								row.Date.In(location).String(),
+								expectedDate.String(),
+								rowDate.String(),
 								i,
 							)
 							switch {
-							case row.Date.Before(createdAt):
+							case row.Date.Before(userCreatedAt):
 								require.Equal(t, int64(0), row.Count)
-							case row.Date.Before(firstTransitionTime):
-								if row.Status == tc.initialStatus {
+							case row.Date.Before(firstStatusChange):
+								if row.Status == stc.initialStatus {
 									require.Equal(t, int64(1), row.Count)
-								} else if row.Status == tc.targetStatus {
+								} else if row.Status == stc.targetStatus {
 									require.Equal(t, int64(0), row.Count)
 								}
-							case !row.Date.After(today):
-								if row.Status == tc.initialStatus {
+							case !row.Date.After(tc.reportUntil):
+								if row.Status == stc.initialStatus {
 									require.Equal(t, int64(0), row.Count)
-								} else if row.Status == tc.targetStatus {
+								} else if row.Status == stc.targetStatus {
 									require.Equal(t, int64(1), row.Count)
 								}
 							default:
-								t.Errorf("date %q beyond expected range end %q", row.Date, today)
+								t.Errorf("date %q beyond expected range end %q", row.Date, tc.reportUntil)
 							}
 						}
 					})
@@ -4385,7 +5443,7 @@ func TestGetUserStatusCounts(t *testing.T) {
 					user2Transition transition
 				}
 
-				testCases := []testCase{
+				subTestCases := []testCase{
 					{
 						name: "Active->Dormant and Dormant->Suspended",
 						user1Transition: transition{
@@ -4443,49 +5501,48 @@ func TestGetUserStatusCounts(t *testing.T) {
 					},
 				}
 
-				for _, tc := range testCases {
-					t.Run(tc.name, func(t *testing.T) {
+				for _, stc := range subTestCases {
+					t.Run(stc.name, func(t *testing.T) {
 						t.Parallel()
 
 						db, _ := dbtestutil.NewDB(t)
 						ctx := testutil.Context(t, testutil.WaitShort)
 
 						user1 := dbgen.User(t, db, database.User{
-							Status:    tc.user1Transition.from,
-							CreatedAt: createdAt,
-							UpdatedAt: createdAt,
+							Status:    stc.user1Transition.from,
+							CreatedAt: userCreatedAt,
+							UpdatedAt: userCreatedAt,
 						})
 						user2 := dbgen.User(t, db, database.User{
-							Status:    tc.user2Transition.from,
-							CreatedAt: createdAt,
-							UpdatedAt: createdAt,
+							Status:    stc.user2Transition.from,
+							CreatedAt: userCreatedAt,
+							UpdatedAt: userCreatedAt,
 						})
 
-						// First transition at 2 days
 						user1, err := db.UpdateUserStatus(ctx, database.UpdateUserStatusParams{
 							ID:        user1.ID,
-							Status:    tc.user1Transition.to,
-							UpdatedAt: firstTransitionTime,
+							Status:    stc.user1Transition.to,
+							UpdatedAt: firstStatusChange,
 						})
 						require.NoError(t, err)
 
-						// Second transition at 4 days
 						user2, err = db.UpdateUserStatus(ctx, database.UpdateUserStatusParams{
 							ID:        user2.ID,
-							Status:    tc.user2Transition.to,
-							UpdatedAt: secondTransitionTime,
+							Status:    stc.user2Transition.to,
+							UpdatedAt: secondStatusChange,
 						})
 						require.NoError(t, err)
 
 						userStatusChanges, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-							StartTime: dbtime.StartOfDay(createdAt),
-							EndTime:   dbtime.StartOfDay(today),
+							Tz:        tc.timezone,
+							StartTime: dbtime.StartOfDay(userCreatedAt),
+							EndTime:   dbtime.StartOfDay(tc.reportUntil),
 						})
 						require.NoError(t, err)
 						require.NotEmpty(t, userStatusChanges)
 						gotCounts := map[time.Time]map[database.UserStatus]int64{}
 						for _, row := range userStatusChanges {
-							dateInLocation := row.Date.In(location)
+							dateInLocation := row.Date.In(tc.location)
 							if gotCounts[dateInLocation] == nil {
 								gotCounts[dateInLocation] = map[database.UserStatus]int64{}
 							}
@@ -4493,30 +5550,30 @@ func TestGetUserStatusCounts(t *testing.T) {
 						}
 
 						expectedCounts := map[time.Time]map[database.UserStatus]int64{}
-						for d := dbtime.StartOfDay(createdAt); !d.After(dbtime.StartOfDay(today)); d = d.AddDate(0, 0, 1) {
+						for d := dbtime.StartOfDay(userCreatedAt); !d.After(dbtime.StartOfDay(tc.reportUntil)); d = d.AddDate(0, 0, 1) {
 							expectedCounts[d] = map[database.UserStatus]int64{}
 
 							// Default values
-							expectedCounts[d][tc.user1Transition.from] = 0
-							expectedCounts[d][tc.user1Transition.to] = 0
-							expectedCounts[d][tc.user2Transition.from] = 0
-							expectedCounts[d][tc.user2Transition.to] = 0
+							expectedCounts[d][stc.user1Transition.from] = 0
+							expectedCounts[d][stc.user1Transition.to] = 0
+							expectedCounts[d][stc.user2Transition.from] = 0
+							expectedCounts[d][stc.user2Transition.to] = 0
 
 							// Counted Values
 							switch {
-							case d.Before(createdAt):
+							case d.Before(userCreatedAt):
 								continue
-							case d.Before(firstTransitionTime):
-								expectedCounts[d][tc.user1Transition.from]++
-								expectedCounts[d][tc.user2Transition.from]++
-							case d.Before(secondTransitionTime):
-								expectedCounts[d][tc.user1Transition.to]++
-								expectedCounts[d][tc.user2Transition.from]++
-							case d.Before(today):
-								expectedCounts[d][tc.user1Transition.to]++
-								expectedCounts[d][tc.user2Transition.to]++
+							case d.Before(firstStatusChange):
+								expectedCounts[d][stc.user1Transition.from]++
+								expectedCounts[d][stc.user2Transition.from]++
+							case d.Before(secondStatusChange):
+								expectedCounts[d][stc.user1Transition.to]++
+								expectedCounts[d][stc.user2Transition.from]++
+							case !d.After(tc.reportUntil):
+								expectedCounts[d][stc.user1Transition.to]++
+								expectedCounts[d][stc.user2Transition.to]++
 							default:
-								t.Fatalf("date %q beyond expected range end %q", d, today)
+								t.Fatalf("date %q beyond expected range end %q", d, tc.reportUntil)
 							}
 						}
 
@@ -4532,23 +5589,24 @@ func TestGetUserStatusCounts(t *testing.T) {
 
 				_ = dbgen.User(t, db, database.User{
 					Status:    database.UserStatusActive,
-					CreatedAt: createdAt,
-					UpdatedAt: createdAt,
+					CreatedAt: userCreatedAt,
+					UpdatedAt: userCreatedAt,
 				})
 
 				userStatusChanges, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-					StartTime: dbtime.StartOfDay(createdAt.Add(time.Hour * 24)),
-					EndTime:   dbtime.StartOfDay(today),
+					Tz:        tc.timezone,
+					StartTime: dbtime.StartOfDay(userCreatedAt.Add(time.Hour * 24)),
+					EndTime:   dbtime.StartOfDay(tc.reportUntil),
 				})
 				require.NoError(t, err)
 
 				for i, row := range userStatusChanges {
 					require.True(
 						t,
-						row.Date.In(location).Equal(dbtime.StartOfDay(createdAt).AddDate(0, 0, 1+i)),
+						row.Date.In(tc.location).Equal(dbtime.StartOfDay(userCreatedAt).AddDate(0, 0, 1+i)),
 						"expected date %s, but got %s for row %n",
-						dbtime.StartOfDay(createdAt).AddDate(0, 0, 1+i),
-						row.Date.In(location).String(),
+						dbtime.StartOfDay(userCreatedAt).AddDate(0, 0, 1+i),
+						row.Date.In(tc.location).String(),
 						i,
 					)
 					require.Equal(t, database.UserStatusActive, row.Status)
@@ -4558,21 +5616,25 @@ func TestGetUserStatusCounts(t *testing.T) {
 
 			t.Run("User deleted before query range", func(t *testing.T) {
 				t.Parallel()
-				db, _ := dbtestutil.NewDB(t)
+				db, _, sqlDB := dbtestutil.NewDBWithSQLDB(t)
 				ctx := testutil.Context(t, testutil.WaitShort)
 
 				user := dbgen.User(t, db, database.User{
 					Status:    database.UserStatusActive,
-					CreatedAt: createdAt,
-					UpdatedAt: createdAt,
+					CreatedAt: userCreatedAt,
+					UpdatedAt: userCreatedAt,
 				})
 
-				err = db.UpdateUserDeletedByID(ctx, user.ID)
+				err := db.UpdateUserDeletedByID(ctx, user.ID)
+				require.NoError(t, err)
+
+				_, err = sqlDB.ExecContext(ctx, "UPDATE user_deleted SET deleted_at = $1 WHERE user_id = $2", tc.reportUntil, user.ID)
 				require.NoError(t, err)
 
 				userStatusChanges, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-					StartTime: today.Add(time.Hour * 24),
-					EndTime:   today.Add(time.Hour * 48),
+					Tz:        tc.timezone,
+					StartTime: tc.reportUntil.Add(time.Hour * 24),
+					EndTime:   tc.reportUntil.Add(time.Hour * 48),
 				})
 				require.NoError(t, err)
 				require.Empty(t, userStatusChanges)
@@ -4581,37 +5643,45 @@ func TestGetUserStatusCounts(t *testing.T) {
 			t.Run("User deleted during query range", func(t *testing.T) {
 				t.Parallel()
 
-				db, _ := dbtestutil.NewDB(t)
+				db, _, sqlDB := dbtestutil.NewDBWithSQLDB(t)
 				ctx := testutil.Context(t, testutil.WaitShort)
 
 				user := dbgen.User(t, db, database.User{
 					Status:    database.UserStatusActive,
-					CreatedAt: createdAt,
-					UpdatedAt: createdAt,
+					CreatedAt: userCreatedAt,
+					UpdatedAt: userCreatedAt,
 				})
 
 				err := db.UpdateUserDeletedByID(ctx, user.ID)
 				require.NoError(t, err)
 
+				_, err = sqlDB.ExecContext(ctx, "UPDATE user_deleted SET deleted_at = $1 WHERE user_id = $2", tc.reportUntil, user.ID)
+				require.NoError(t, err)
+
 				userStatusChanges, err := db.GetUserStatusCounts(ctx, database.GetUserStatusCountsParams{
-					StartTime: dbtime.StartOfDay(createdAt),
-					EndTime:   dbtime.StartOfDay(today.Add(time.Hour * 24)),
+					Tz:        tc.timezone,
+					StartTime: dbtime.StartOfDay(userCreatedAt),
+					EndTime:   dbtime.StartOfDay(tc.reportUntil.Add(time.Hour * 24)),
 				})
 				require.NoError(t, err)
 				for i, row := range userStatusChanges {
-					require.True(
+					row.Date = row.Date.In(tc.location)
+					userStatusChanges[i] = row
+					target := dbtime.StartOfDay(userCreatedAt).AddDate(0, 0, i)
+					assert.True(
 						t,
-						row.Date.In(location).Equal(dbtime.StartOfDay(createdAt).AddDate(0, 0, i)),
+						row.Date.Equal(target),
 						"expected date %s, but got %s for row %n",
-						dbtime.StartOfDay(createdAt).AddDate(0, 0, i),
-						row.Date.In(location).String(),
+						target.String(),
+						row.Date.String(),
 						i,
 					)
 					require.Equal(t, database.UserStatusActive, row.Status)
 					switch {
-					case row.Date.Before(createdAt):
+					case row.Date.Before(userCreatedAt):
 						require.Equal(t, int64(0), row.Count)
-					case i == len(userStatusChanges)-1:
+					case !row.Date.Before(tc.reportUntil):
+						// On or after the deletion date, the user should not be counted.
 						require.Equal(t, int64(0), row.Count)
 					default:
 						require.Equal(t, int64(1), row.Count)
@@ -4624,10 +5694,6 @@ func TestGetUserStatusCounts(t *testing.T) {
 
 func TestOrganizationDeleteTrigger(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.SkipNow()
-	}
 
 	t.Run("WorkspaceExists", func(t *testing.T) {
 		t.Parallel()
@@ -4942,9 +6008,6 @@ func createPrebuiltWorkspace(
 
 func TestWorkspacePrebuildsView(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.SkipNow()
-	}
 
 	now := dbtime.Now()
 	orgID := uuid.New()
@@ -5046,9 +6109,6 @@ func TestWorkspacePrebuildsView(t *testing.T) {
 
 func TestGetPresetsBackoff(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.SkipNow()
-	}
 
 	now := dbtime.Now()
 	orgID := uuid.New()
@@ -5565,9 +6625,6 @@ func TestGetPresetsBackoff(t *testing.T) {
 
 func TestGetPresetsAtFailureLimit(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.SkipNow()
-	}
 
 	now := dbtime.Now()
 	hourBefore := now.Add(-time.Hour)
@@ -5871,10 +6928,6 @@ func TestGetPresetsAtFailureLimit(t *testing.T) {
 func TestWorkspaceAgentNameUniqueTrigger(t *testing.T) {
 	t.Parallel()
 
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("This test makes use of a database trigger not implemented in dbmem")
-	}
-
 	createWorkspaceWithAgent := func(t *testing.T, db database.Store, org database.Organization, agentName string) (database.WorkspaceBuild, database.WorkspaceResource, database.WorkspaceAgent) {
 		t.Helper()
 
@@ -6106,8 +7159,6 @@ func TestGetWorkspaceAgentsByParentID(t *testing.T) {
 	t.Run("NilParentDoesNotReturnAllParentAgents", func(t *testing.T) {
 		t.Parallel()
 
-		ctx := testutil.Context(t, testutil.WaitShort)
-
 		// Given: A workspace agent
 		db, _ := dbtestutil.NewDB(t)
 		org := dbgen.Organization(t, db, database.Organization{})
@@ -6122,12 +7173,64 @@ func TestGetWorkspaceAgentsByParentID(t *testing.T) {
 			ResourceID: resource.ID,
 		})
 
+		ctx := testutil.Context(t, testutil.WaitShort)
+
 		// When: We attempt to select agents with a null parent id
 		agents, err := db.GetWorkspaceAgentsByParentID(ctx, uuid.Nil)
 		require.NoError(t, err)
 
 		// Then: We expect to see no agents.
 		require.Len(t, agents, 0)
+	})
+}
+
+func TestGetWorkspaceAgentByInstanceID(t *testing.T) {
+	t.Parallel()
+
+	// Context: https://github.com/coder/coder/pull/22196
+	t.Run("DoesNotReturnSubAgents", func(t *testing.T) {
+		t.Parallel()
+
+		// Given: A parent workspace agent with an AuthInstanceID and a
+		// sub-agent that shares the same AuthInstanceID.
+		db, _ := dbtestutil.NewDB(t)
+		org := dbgen.Organization(t, db, database.Organization{})
+		job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeTemplateVersionImport,
+			OrganizationID: org.ID,
+		})
+		resource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID: job.ID,
+		})
+
+		authInstanceID := fmt.Sprintf("instance-%s-%d", t.Name(), time.Now().UnixNano())
+		parentAgent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: resource.ID,
+			AuthInstanceID: sql.NullString{
+				String: authInstanceID,
+				Valid:  true,
+			},
+		})
+		// Create a sub-agent with the same AuthInstanceID (simulating
+		// the old behavior before the fix).
+		_ = dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ParentID:   uuid.NullUUID{UUID: parentAgent.ID, Valid: true},
+			ResourceID: resource.ID,
+			AuthInstanceID: sql.NullString{
+				String: authInstanceID,
+				Valid:  true,
+			},
+		})
+
+		ctx := testutil.Context(t, testutil.WaitShort)
+
+		// When: We look up the agent by instance ID.
+		agent, err := db.GetWorkspaceAgentByInstanceID(ctx, authInstanceID)
+		require.NoError(t, err)
+
+		// Then: The result must be the parent agent, not the sub-agent.
+		assert.Equal(t, parentAgent.ID, agent.ID, "instance ID lookup should return the parent agent, not a sub-agent")
+		assert.False(t, agent.ParentID.Valid, "returned agent should not have a parent (should be the parent itself)")
 	})
 }
 
@@ -6140,10 +7243,6 @@ func requireUsersMatch(t testing.TB, expected []database.User, found []database.
 // GetRunningPrebuiltWorkspaces query.
 func TestGetRunningPrebuiltWorkspaces(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("Test requires PostgreSQL for complex queries")
-	}
 
 	ctx := testutil.Context(t, testutil.WaitLong)
 	db, _ := dbtestutil.NewDB(t)
@@ -6264,13 +7363,7 @@ func TestUserSecretsCRUDOperations(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, secretID, createdSecret.ID)
 
-		// 2. READ by ID
-		readSecret, err := db.GetUserSecret(ctx, createdSecret.ID)
-		require.NoError(t, err)
-		assert.Equal(t, createdSecret.ID, readSecret.ID)
-		assert.Equal(t, "workflow-secret", readSecret.Name)
-
-		// 3. READ by UserID and Name
+		// 2. READ by UserID and Name
 		readByNameParams := database.GetUserSecretByUserIDAndNameParams{
 			UserID: testUser.ID,
 			Name:   "workflow-secret",
@@ -6278,33 +7371,43 @@ func TestUserSecretsCRUDOperations(t *testing.T) {
 		readByNameSecret, err := db.GetUserSecretByUserIDAndName(ctx, readByNameParams)
 		require.NoError(t, err)
 		assert.Equal(t, createdSecret.ID, readByNameSecret.ID)
+		assert.Equal(t, "workflow-secret", readByNameSecret.Name)
 
-		// 4. LIST
+		// 3. LIST (metadata only)
 		secrets, err := db.ListUserSecrets(ctx, testUser.ID)
 		require.NoError(t, err)
 		require.Len(t, secrets, 1)
 		assert.Equal(t, createdSecret.ID, secrets[0].ID)
 
-		// 5. UPDATE
-		updateParams := database.UpdateUserSecretParams{
-			ID:          createdSecret.ID,
-			Description: "Updated workflow description",
-			Value:       "updated-workflow-value",
-			EnvName:     "UPDATED_WORKFLOW_ENV",
-			FilePath:    "/updated/workflow/path",
+		// 4. LIST with values
+		secretsWithValues, err := db.ListUserSecretsWithValues(ctx, testUser.ID)
+		require.NoError(t, err)
+		require.Len(t, secretsWithValues, 1)
+		assert.Equal(t, "workflow-value", secretsWithValues[0].Value)
+
+		// 5. UPDATE (partial - only description)
+		updateParams := database.UpdateUserSecretByUserIDAndNameParams{
+			UserID:            testUser.ID,
+			Name:              "workflow-secret",
+			UpdateDescription: true,
+			Description:       "Updated workflow description",
 		}
 
-		updatedSecret, err := db.UpdateUserSecret(ctx, updateParams)
+		updatedSecret, err := db.UpdateUserSecretByUserIDAndName(ctx, updateParams)
 		require.NoError(t, err)
 		assert.Equal(t, "Updated workflow description", updatedSecret.Description)
-		assert.Equal(t, "updated-workflow-value", updatedSecret.Value)
+		assert.Equal(t, "workflow-value", updatedSecret.Value) // Value unchanged
+		assert.Equal(t, "WORKFLOW_ENV", updatedSecret.EnvName) // EnvName unchanged
 
 		// 6. DELETE
-		err = db.DeleteUserSecret(ctx, createdSecret.ID)
+		_, err = db.DeleteUserSecretByUserIDAndName(ctx, database.DeleteUserSecretByUserIDAndNameParams{
+			UserID: testUser.ID,
+			Name:   "workflow-secret",
+		})
 		require.NoError(t, err)
 
 		// Verify deletion
-		_, err = db.GetUserSecret(ctx, createdSecret.ID)
+		_, err = db.GetUserSecretByUserIDAndName(ctx, readByNameParams)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no rows in result set")
 
@@ -6374,9 +7477,13 @@ func TestUserSecretsCRUDOperations(t *testing.T) {
 		})
 
 		// Verify both secrets exist
-		_, err = db.GetUserSecret(ctx, secret1.ID)
+		_, err = db.GetUserSecretByUserIDAndName(ctx, database.GetUserSecretByUserIDAndNameParams{
+			UserID: testUser.ID, Name: secret1.Name,
+		})
 		require.NoError(t, err)
-		_, err = db.GetUserSecret(ctx, secret2.ID)
+		_, err = db.GetUserSecretByUserIDAndName(ctx, database.GetUserSecretByUserIDAndNameParams{
+			UserID: testUser.ID, Name: secret2.Name,
+		})
 		require.NoError(t, err)
 	})
 }
@@ -6399,14 +7506,14 @@ func TestUserSecretsAuthorization(t *testing.T) {
 	org := dbgen.Organization(t, db, database.Organization{})
 
 	// Create secrets for users
-	user1Secret := dbgen.UserSecret(t, db, database.UserSecret{
+	_ = dbgen.UserSecret(t, db, database.UserSecret{
 		UserID:      user1.ID,
 		Name:        "user1-secret",
 		Description: "User 1's secret",
 		Value:       "user1-value",
 	})
 
-	user2Secret := dbgen.UserSecret(t, db, database.UserSecret{
+	_ = dbgen.UserSecret(t, db, database.UserSecret{
 		UserID:      user2.ID,
 		Name:        "user2-secret",
 		Description: "User 2's secret",
@@ -6416,7 +7523,8 @@ func TestUserSecretsAuthorization(t *testing.T) {
 	testCases := []struct {
 		name           string
 		subject        rbac.Subject
-		secretID       uuid.UUID
+		lookupUserID   uuid.UUID
+		lookupName     string
 		expectedAccess bool
 	}{
 		{
@@ -6426,7 +7534,8 @@ func TestUserSecretsAuthorization(t *testing.T) {
 				Roles: rbac.RoleIdentifiers{rbac.RoleMember()},
 				Scope: rbac.ScopeAll,
 			},
-			secretID:       user1Secret.ID,
+			lookupUserID:   user1.ID,
+			lookupName:     "user1-secret",
 			expectedAccess: true,
 		},
 		{
@@ -6436,7 +7545,8 @@ func TestUserSecretsAuthorization(t *testing.T) {
 				Roles: rbac.RoleIdentifiers{rbac.RoleMember()},
 				Scope: rbac.ScopeAll,
 			},
-			secretID:       user2Secret.ID,
+			lookupUserID:   user2.ID,
+			lookupName:     "user2-secret",
 			expectedAccess: false,
 		},
 		{
@@ -6446,7 +7556,8 @@ func TestUserSecretsAuthorization(t *testing.T) {
 				Roles: rbac.RoleIdentifiers{rbac.RoleOwner()},
 				Scope: rbac.ScopeAll,
 			},
-			secretID:       user1Secret.ID,
+			lookupUserID:   user1.ID,
+			lookupName:     "user1-secret",
 			expectedAccess: false,
 		},
 		{
@@ -6456,21 +7567,23 @@ func TestUserSecretsAuthorization(t *testing.T) {
 				Roles: rbac.RoleIdentifiers{rbac.ScopedRoleOrgAdmin(org.ID)},
 				Scope: rbac.ScopeAll,
 			},
-			secretID:       user1Secret.ID,
+			lookupUserID:   user1.ID,
+			lookupName:     "user1-secret",
 			expectedAccess: false,
 		},
 	}
 
 	for _, tc := range testCases {
-		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.Context(t, testutil.WaitMedium)
 
 			authCtx := dbauthz.As(ctx, tc.subject)
 
-			// Test GetUserSecret
-			_, err := authDB.GetUserSecret(authCtx, tc.secretID)
+			_, err := authDB.GetUserSecretByUserIDAndName(authCtx, database.GetUserSecretByUserIDAndNameParams{
+				UserID: tc.lookupUserID,
+				Name:   tc.lookupName,
+			})
 
 			if tc.expectedAccess {
 				require.NoError(t, err, "expected access to be granted")
@@ -6581,6 +7694,65 @@ func TestWorkspaceBuildDeadlineConstraint(t *testing.T) {
 	}
 }
 
+func TestWorkspaceACLObjectConstraint(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+	org := dbgen.Organization(t, db, database.Organization{})
+	user := dbgen.User(t, db, database.User{})
+	template := dbgen.Template(t, db, database.Template{
+		CreatedBy:      user.ID,
+		OrganizationID: org.ID,
+	})
+	workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+		OwnerID:    user.ID,
+		TemplateID: template.ID,
+		Deleted:    false,
+	})
+
+	t.Run("GroupACLNull", func(t *testing.T) {
+		t.Parallel()
+
+		var nilACL database.WorkspaceACL
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		err := db.UpdateWorkspaceACLByID(ctx, database.UpdateWorkspaceACLByIDParams{
+			ID:       workspace.ID,
+			GroupACL: nilACL,
+			UserACL:  database.WorkspaceACL{},
+		})
+		require.Error(t, err)
+		require.True(t, database.IsCheckViolation(err, database.CheckGroupAclIsObject))
+	})
+
+	t.Run("UserACLNull", func(t *testing.T) {
+		t.Parallel()
+
+		var nilACL database.WorkspaceACL
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		err := db.UpdateWorkspaceACLByID(ctx, database.UpdateWorkspaceACLByIDParams{
+			ID:       workspace.ID,
+			GroupACL: database.WorkspaceACL{},
+			UserACL:  nilACL,
+		})
+		require.Error(t, err)
+		require.True(t, database.IsCheckViolation(err, database.CheckUserAclIsObject))
+	})
+
+	t.Run("ValidEmptyObjects", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		err := db.UpdateWorkspaceACLByID(ctx, database.UpdateWorkspaceACLByIDParams{
+			ID:       workspace.ID,
+			GroupACL: database.WorkspaceACL{},
+			UserACL:  database.WorkspaceACL{},
+		})
+		require.NoError(t, err)
+	})
+}
+
 // TestGetLatestWorkspaceBuildsByWorkspaceIDs populates the database with
 // workspaces and builds. It then tests that
 // GetLatestWorkspaceBuildsByWorkspaceIDs returns the latest build for some
@@ -6650,6 +7822,735 @@ func TestGetLatestWorkspaceBuildsByWorkspaceIDs(t *testing.T) {
 		require.Truef(t, ok, "unexpected workspace build for workspace id %s", b.WorkspaceID)
 		require.Equalf(t, expB.ID, b.ID, "unexpected workspace build id for workspace id %s", b.WorkspaceID)
 		require.Equal(t, expB.BuildNumber, b.BuildNumber, "unexpected build number")
+	}
+}
+
+func TestTasksWithStatusView(t *testing.T) {
+	t.Parallel()
+
+	createProvisionerJob := func(t *testing.T, db database.Store, org database.Organization, user database.User, buildStatus database.ProvisionerJobStatus) database.ProvisionerJob {
+		t.Helper()
+
+		var jobParams database.ProvisionerJob
+
+		switch buildStatus {
+		case database.ProvisionerJobStatusPending:
+			jobParams = database.ProvisionerJob{
+				OrganizationID: org.ID,
+				Type:           database.ProvisionerJobTypeWorkspaceBuild,
+				InitiatorID:    user.ID,
+			}
+		case database.ProvisionerJobStatusRunning:
+			jobParams = database.ProvisionerJob{
+				OrganizationID: org.ID,
+				Type:           database.ProvisionerJobTypeWorkspaceBuild,
+				InitiatorID:    user.ID,
+				StartedAt:      sql.NullTime{Valid: true, Time: dbtime.Now()},
+			}
+		case database.ProvisionerJobStatusFailed:
+			jobParams = database.ProvisionerJob{
+				OrganizationID: org.ID,
+				Type:           database.ProvisionerJobTypeWorkspaceBuild,
+				InitiatorID:    user.ID,
+				StartedAt:      sql.NullTime{Valid: true, Time: dbtime.Now()},
+				CompletedAt:    sql.NullTime{Valid: true, Time: dbtime.Now()},
+				Error:          sql.NullString{Valid: true, String: "job failed"},
+			}
+		case database.ProvisionerJobStatusSucceeded:
+			jobParams = database.ProvisionerJob{
+				OrganizationID: org.ID,
+				Type:           database.ProvisionerJobTypeWorkspaceBuild,
+				InitiatorID:    user.ID,
+				StartedAt:      sql.NullTime{Valid: true, Time: dbtime.Now()},
+				CompletedAt:    sql.NullTime{Valid: true, Time: dbtime.Now()},
+			}
+		case database.ProvisionerJobStatusCanceling:
+			jobParams = database.ProvisionerJob{
+				OrganizationID: org.ID,
+				Type:           database.ProvisionerJobTypeWorkspaceBuild,
+				InitiatorID:    user.ID,
+				StartedAt:      sql.NullTime{Valid: true, Time: dbtime.Now()},
+				CanceledAt:     sql.NullTime{Valid: true, Time: dbtime.Now()},
+			}
+		case database.ProvisionerJobStatusCanceled:
+			jobParams = database.ProvisionerJob{
+				OrganizationID: org.ID,
+				Type:           database.ProvisionerJobTypeWorkspaceBuild,
+				InitiatorID:    user.ID,
+				StartedAt:      sql.NullTime{Valid: true, Time: dbtime.Now()},
+				CompletedAt:    sql.NullTime{Valid: true, Time: dbtime.Now()},
+				CanceledAt:     sql.NullTime{Valid: true, Time: dbtime.Now()},
+			}
+		default:
+			t.Errorf("invalid build status: %v", buildStatus)
+		}
+
+		return dbgen.ProvisionerJob(t, db, nil, jobParams)
+	}
+
+	createTask := func(
+		ctx context.Context,
+		t *testing.T,
+		db database.Store,
+		org database.Organization,
+		user database.User,
+		buildStatus database.ProvisionerJobStatus,
+		buildTransition database.WorkspaceTransition,
+		agentState database.WorkspaceAgentLifecycleState,
+		appHealths []database.WorkspaceAppHealth,
+	) database.Task {
+		t.Helper()
+
+		template := dbgen.Template(t, db, database.Template{
+			OrganizationID: org.ID,
+			CreatedBy:      user.ID,
+		})
+		templateVersion := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+			TemplateID:     uuid.NullUUID{UUID: template.ID, Valid: true},
+			OrganizationID: org.ID,
+			CreatedBy:      user.ID,
+		})
+
+		if buildStatus == "" {
+			return dbgen.Task(t, db, database.TaskTable{
+				OrganizationID:    org.ID,
+				OwnerID:           user.ID,
+				Name:              "test-task",
+				TemplateVersionID: templateVersion.ID,
+				Prompt:            "Test prompt",
+			})
+		}
+
+		job := createProvisionerJob(t, db, org, user, buildStatus)
+
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OrganizationID: org.ID,
+			TemplateID:     template.ID,
+			OwnerID:        user.ID,
+		})
+		workspaceID := uuid.NullUUID{Valid: true, UUID: workspace.ID}
+
+		task := dbgen.Task(t, db, database.TaskTable{
+			OrganizationID:    org.ID,
+			OwnerID:           user.ID,
+			Name:              "test-task",
+			WorkspaceID:       workspaceID,
+			TemplateVersionID: templateVersion.ID,
+			Prompt:            "Test prompt",
+		})
+
+		workspaceBuild := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: templateVersion.ID,
+			BuildNumber:       1,
+			Transition:        buildTransition,
+			InitiatorID:       user.ID,
+			JobID:             job.ID,
+		})
+		workspaceBuildNumber := workspaceBuild.BuildNumber
+
+		_, err := db.UpsertTaskWorkspaceApp(ctx, database.UpsertTaskWorkspaceAppParams{
+			TaskID:               task.ID,
+			WorkspaceBuildNumber: workspaceBuildNumber,
+		})
+		require.NoError(t, err)
+
+		resource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID: job.ID,
+		})
+
+		if agentState != "" {
+			agent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+				ResourceID: resource.ID,
+			})
+			workspaceAgentID := agent.ID
+
+			_, err := db.UpsertTaskWorkspaceApp(ctx, database.UpsertTaskWorkspaceAppParams{
+				TaskID:               task.ID,
+				WorkspaceBuildNumber: workspaceBuildNumber,
+				WorkspaceAgentID:     uuid.NullUUID{UUID: workspaceAgentID, Valid: true},
+			})
+			require.NoError(t, err)
+
+			err = db.UpdateWorkspaceAgentLifecycleStateByID(ctx, database.UpdateWorkspaceAgentLifecycleStateByIDParams{
+				ID:             agent.ID,
+				LifecycleState: agentState,
+			})
+			require.NoError(t, err)
+
+			for i, health := range appHealths {
+				app := dbgen.WorkspaceApp(t, db, database.WorkspaceApp{
+					AgentID:     workspaceAgentID,
+					Slug:        fmt.Sprintf("test-app-%d", i),
+					DisplayName: fmt.Sprintf("Test App %d", i+1),
+					Health:      health,
+				})
+				if i == 0 {
+					// Assume the first app is the tasks app.
+					_, err := db.UpsertTaskWorkspaceApp(ctx, database.UpsertTaskWorkspaceAppParams{
+						TaskID:               task.ID,
+						WorkspaceBuildNumber: workspaceBuildNumber,
+						WorkspaceAgentID:     uuid.NullUUID{UUID: workspaceAgentID, Valid: true},
+						WorkspaceAppID:       uuid.NullUUID{UUID: app.ID, Valid: true},
+					})
+					require.NoError(t, err)
+				}
+			}
+		}
+
+		return task
+	}
+
+	tests := []struct {
+		name                      string
+		buildStatus               database.ProvisionerJobStatus
+		buildTransition           database.WorkspaceTransition
+		agentState                database.WorkspaceAgentLifecycleState
+		appHealths                []database.WorkspaceAppHealth
+		expectedStatus            database.TaskStatus
+		description               string
+		expectBuildNumberValid    bool
+		expectBuildNumber         int32
+		expectWorkspaceAgentValid bool
+		expectWorkspaceAppValid   bool
+	}{
+		{
+			name:                      "NoWorkspace",
+			expectedStatus:            "pending",
+			description:               "Task with no workspace assigned",
+			expectBuildNumberValid:    false,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "FailedBuild",
+			buildStatus:               database.ProvisionerJobStatusFailed,
+			buildTransition:           database.WorkspaceTransitionStart,
+			expectedStatus:            database.TaskStatusError,
+			description:               "Latest workspace build failed",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "CancelingBuild",
+			buildStatus:               database.ProvisionerJobStatusCanceling,
+			buildTransition:           database.WorkspaceTransitionStart,
+			expectedStatus:            database.TaskStatusError,
+			description:               "Latest workspace build is canceling",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "CanceledBuild",
+			buildStatus:               database.ProvisionerJobStatusCanceled,
+			buildTransition:           database.WorkspaceTransitionStart,
+			expectedStatus:            database.TaskStatusError,
+			description:               "Latest workspace build was canceled",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "StoppedWorkspace",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStop,
+			expectedStatus:            database.TaskStatusPaused,
+			description:               "Workspace is stopped",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "DeletedWorkspace",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionDelete,
+			expectedStatus:            database.TaskStatusPaused,
+			description:               "Workspace is deleted",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "PendingStart",
+			buildStatus:               database.ProvisionerJobStatusPending,
+			buildTransition:           database.WorkspaceTransitionStart,
+			expectedStatus:            database.TaskStatusPending,
+			description:               "Workspace build pending (not yet picked up by provisioner)",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "RunningStart",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			expectedStatus:            database.TaskStatusInitializing,
+			description:               "Workspace build is starting (running)",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: false,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "StartingAgent",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateStarting,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthInitializing},
+			expectedStatus:            database.TaskStatusInitializing,
+			description:               "Workspace is running but agent is starting",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "CreatedAgent",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateCreated,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthInitializing},
+			expectedStatus:            database.TaskStatusInitializing,
+			description:               "Workspace is running but agent is created",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "ReadyAgentInitializingApp",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthInitializing},
+			expectedStatus:            database.TaskStatusInitializing,
+			description:               "Agent is ready but app is initializing",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "ReadyAgentHealthyApp",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthHealthy},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Agent is ready and app is healthy",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "ReadyAgentDisabledApp",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthDisabled},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Agent is ready and app health checking is disabled",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "ReadyAgentUnhealthyApp",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthUnhealthy},
+			expectedStatus:            database.TaskStatusError,
+			description:               "Agent is ready but app is unhealthy",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "AgentStartTimeout",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateStartTimeout,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthHealthy},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Agent start timed out but app is healthy, defer to app",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "AgentStartError",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateStartError,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthHealthy},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Agent start failed but app is healthy, defer to app",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "AgentShuttingDown",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateShuttingDown,
+			expectedStatus:            database.TaskStatusUnknown,
+			description:               "Agent is shutting down",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "AgentOff",
+			buildStatus:               database.ProvisionerJobStatusSucceeded,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateOff,
+			expectedStatus:            database.TaskStatusUnknown,
+			description:               "Agent is off",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   false,
+		},
+		{
+			name:                      "RunningJobReadyAgentHealthyApp",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthHealthy},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Running job with ready agent and healthy app should be active",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "RunningJobReadyAgentInitializingApp",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthInitializing},
+			expectedStatus:            database.TaskStatusInitializing,
+			description:               "Running job with ready agent but initializing app should be initializing",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "RunningJobReadyAgentUnhealthyApp",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthUnhealthy},
+			expectedStatus:            database.TaskStatusError,
+			description:               "Running job with ready agent but unhealthy app should be error",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "RunningJobConnectingAgent",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateStarting,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthInitializing},
+			expectedStatus:            database.TaskStatusInitializing,
+			description:               "Running job with connecting agent should be initializing",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "RunningJobReadyAgentDisabledApp",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthDisabled},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Running job with ready agent and disabled app health checking should be active",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+		{
+			name:                      "RunningJobReadyAgentHealthyTaskAppUnhealthyOtherAppIsOK",
+			buildStatus:               database.ProvisionerJobStatusRunning,
+			buildTransition:           database.WorkspaceTransitionStart,
+			agentState:                database.WorkspaceAgentLifecycleStateReady,
+			appHealths:                []database.WorkspaceAppHealth{database.WorkspaceAppHealthHealthy, database.WorkspaceAppHealthUnhealthy},
+			expectedStatus:            database.TaskStatusActive,
+			description:               "Running job with ready agent and multiple healthy apps should be active",
+			expectBuildNumberValid:    true,
+			expectBuildNumber:         1,
+			expectWorkspaceAgentValid: true,
+			expectWorkspaceAppValid:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			db, _ := dbtestutil.NewDB(t)
+			ctx := testutil.Context(t, testutil.WaitLong)
+
+			org := dbgen.Organization(t, db, database.Organization{})
+			user := dbgen.User(t, db, database.User{})
+
+			task := createTask(ctx, t, db, org, user, tt.buildStatus, tt.buildTransition, tt.agentState, tt.appHealths)
+
+			got, err := db.GetTaskByID(ctx, task.ID)
+			require.NoError(t, err)
+
+			t.Logf("Task status debug: %s", got.StatusDebug)
+
+			require.Equal(t, tt.expectedStatus, got.Status)
+
+			require.Equal(t, tt.expectBuildNumberValid, got.WorkspaceBuildNumber.Valid)
+			if tt.expectBuildNumberValid {
+				require.Equal(t, tt.expectBuildNumber, got.WorkspaceBuildNumber.Int32)
+			}
+
+			require.Equal(t, tt.expectWorkspaceAgentValid, got.WorkspaceAgentID.Valid)
+			if tt.expectWorkspaceAgentValid {
+				require.NotEqual(t, uuid.Nil, got.WorkspaceAgentID.UUID)
+			}
+
+			require.Equal(t, tt.expectWorkspaceAppValid, got.WorkspaceAppID.Valid)
+			if tt.expectWorkspaceAppValid {
+				require.NotEqual(t, uuid.Nil, got.WorkspaceAppID.UUID)
+			}
+		})
+	}
+}
+
+func TestGetTaskByWorkspaceID(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		setupTask func(t *testing.T, db database.Store, org database.Organization, user database.User, templateVersion database.TemplateVersion, workspace database.WorkspaceTable)
+		wantErr   bool
+	}{
+		{
+			name:    "task doesn't exist",
+			wantErr: true,
+		},
+		{
+			name: "task with no workspace id",
+			setupTask: func(t *testing.T, db database.Store, org database.Organization, user database.User, templateVersion database.TemplateVersion, workspace database.WorkspaceTable) {
+				dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:    org.ID,
+					OwnerID:           user.ID,
+					Name:              "test-task",
+					TemplateVersionID: templateVersion.ID,
+					Prompt:            "Test prompt",
+				})
+			},
+			wantErr: true,
+		},
+		{
+			name: "task with workspace id",
+			setupTask: func(t *testing.T, db database.Store, org database.Organization, user database.User, templateVersion database.TemplateVersion, workspace database.WorkspaceTable) {
+				workspaceID := uuid.NullUUID{Valid: true, UUID: workspace.ID}
+				dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:    org.ID,
+					OwnerID:           user.ID,
+					Name:              "test-task",
+					WorkspaceID:       workspaceID,
+					TemplateVersionID: templateVersion.ID,
+					Prompt:            "Test prompt",
+				})
+			},
+			wantErr: false,
+		},
+	}
+
+	db, _ := dbtestutil.NewDB(t)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			org := dbgen.Organization(t, db, database.Organization{})
+			user := dbgen.User(t, db, database.User{})
+			template := dbgen.Template(t, db, database.Template{
+				OrganizationID: org.ID,
+				CreatedBy:      user.ID,
+			})
+			templateVersion := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+				OrganizationID: org.ID,
+				TemplateID:     uuid.NullUUID{Valid: true, UUID: template.ID},
+				CreatedBy:      user.ID,
+			})
+			workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+				OrganizationID: org.ID,
+				OwnerID:        user.ID,
+				TemplateID:     template.ID,
+			})
+
+			if tt.setupTask != nil {
+				tt.setupTask(t, db, org, user, templateVersion, workspace)
+			}
+
+			ctx := testutil.Context(t, testutil.WaitLong)
+
+			task, err := db.GetTaskByWorkspaceID(ctx, workspace.ID)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.False(t, task.WorkspaceBuildNumber.Valid)
+				require.False(t, task.WorkspaceAgentID.Valid)
+				require.False(t, task.WorkspaceAppID.Valid)
+			}
+		})
+	}
+}
+
+func TestDeleteTaskDeletesTaskSnapshot(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	org := dbgen.Organization(t, db, database.Organization{})
+	user := dbgen.User(t, db, database.User{})
+	template := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		CreatedBy:      user.ID,
+	})
+	templateVersion := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		TemplateID:     uuid.NullUUID{UUID: template.ID, Valid: true},
+		OrganizationID: org.ID,
+		CreatedBy:      user.ID,
+	})
+	task := dbgen.Task(t, db, database.TaskTable{
+		OrganizationID:    org.ID,
+		OwnerID:           user.ID,
+		TemplateVersionID: templateVersion.ID,
+		Prompt:            "Test prompt",
+	})
+
+	err := db.UpsertTaskSnapshot(ctx, database.UpsertTaskSnapshotParams{
+		TaskID:               task.ID,
+		LogSnapshot:          json.RawMessage(`{"messages":[]}`),
+		LogSnapshotCreatedAt: dbtime.Now(),
+	})
+	require.NoError(t, err)
+
+	_, err = db.DeleteTask(ctx, database.DeleteTaskParams{
+		ID:        task.ID,
+		DeletedAt: dbtime.Now(),
+	})
+	require.NoError(t, err)
+
+	_, err = db.GetTaskSnapshot(ctx, task.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+}
+
+func TestTaskNameUniqueness(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+
+	org := dbgen.Organization(t, db, database.Organization{})
+	user1 := dbgen.User(t, db, database.User{})
+	user2 := dbgen.User(t, db, database.User{})
+	template := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		CreatedBy:      user1.ID,
+	})
+	tv := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		TemplateID:     uuid.NullUUID{UUID: template.ID, Valid: true},
+		OrganizationID: org.ID,
+		CreatedBy:      user1.ID,
+	})
+
+	taskName := "my-task"
+
+	// Create initial task for user1.
+	task1 := dbgen.Task(t, db, database.TaskTable{
+		OrganizationID:    org.ID,
+		OwnerID:           user1.ID,
+		Name:              taskName,
+		TemplateVersionID: tv.ID,
+		Prompt:            "Test prompt",
+	})
+	require.NotEqual(t, uuid.Nil, task1.ID)
+
+	tests := []struct {
+		name     string
+		ownerID  uuid.UUID
+		taskName string
+		wantErr  bool
+	}{
+		{
+			name:     "duplicate task name same user",
+			ownerID:  user1.ID,
+			taskName: taskName,
+			wantErr:  true,
+		},
+		{
+			name:     "duplicate task name different case same user",
+			ownerID:  user1.ID,
+			taskName: "MY-TASK",
+			wantErr:  true,
+		},
+		{
+			name:     "same task name different user",
+			ownerID:  user2.ID,
+			taskName: taskName,
+			wantErr:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := testutil.Context(t, testutil.WaitShort)
+
+			taskID := uuid.New()
+			task, err := db.InsertTask(ctx, database.InsertTaskParams{
+				ID:                 taskID,
+				OrganizationID:     org.ID,
+				OwnerID:            tt.ownerID,
+				Name:               tt.taskName,
+				TemplateVersionID:  tv.ID,
+				TemplateParameters: json.RawMessage("{}"),
+				Prompt:             "Test prompt",
+				CreatedAt:          dbtime.Now(),
+			})
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.NotEqual(t, uuid.Nil, task.ID)
+				require.NotEqual(t, task1.ID, task.ID)
+				require.Equal(t, taskID, task.ID)
+			}
+		})
 	}
 }
 
@@ -6748,6 +8649,80 @@ func TestUsageEventsTrigger(t *testing.T) {
 		require.WithinDuration(t, time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC), rows[1].Day, time.Second)
 	})
 
+	t.Run("HeartbeatAISeats", func(t *testing.T) {
+		t.Parallel()
+
+		ctx := testutil.Context(t, testutil.WaitLong)
+		db, _, sqlDB := dbtestutil.NewDBWithSQLDB(t)
+
+		// Insert a heartbeat event.
+		err := db.InsertUsageEvent(ctx, database.InsertUsageEventParams{
+			ID:        "hb-1",
+			EventType: "hb_ai_seats_v1",
+			EventData: []byte(`{"count": 10}`),
+			CreatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		})
+		require.NoError(t, err)
+
+		rows := getDailyRows(ctx, sqlDB)
+		require.Len(t, rows, 1)
+		require.Equal(t, "hb_ai_seats_v1", rows[0].EventType)
+		require.JSONEq(t, `{"count": 10}`, string(rows[0].UsageData))
+
+		// Insert a higher count on the same day — should take the max.
+		err = db.InsertUsageEvent(ctx, database.InsertUsageEventParams{
+			ID:        "hb-2",
+			EventType: "hb_ai_seats_v1",
+			EventData: []byte(`{"count": 50}`),
+			CreatedAt: time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC),
+		})
+		require.NoError(t, err)
+
+		rows = getDailyRows(ctx, sqlDB)
+		require.Len(t, rows, 1)
+		require.JSONEq(t, `{"count": 50}`, string(rows[0].UsageData))
+
+		// Insert a lower count on the same day — should keep the max (50).
+		err = db.InsertUsageEvent(ctx, database.InsertUsageEventParams{
+			ID:        "hb-3",
+			EventType: "hb_ai_seats_v1",
+			EventData: []byte(`{"count": 25}`),
+			CreatedAt: time.Date(2025, 1, 1, 18, 0, 0, 0, time.UTC),
+		})
+		require.NoError(t, err)
+
+		rows = getDailyRows(ctx, sqlDB)
+		require.Len(t, rows, 1)
+		require.JSONEq(t, `{"count": 50}`, string(rows[0].UsageData))
+
+		// Insert on a different day.
+		err = db.InsertUsageEvent(ctx, database.InsertUsageEventParams{
+			ID:        "hb-4",
+			EventType: "hb_ai_seats_v1",
+			EventData: []byte(`{"count": 5}`),
+			CreatedAt: time.Date(2025, 1, 2, 0, 0, 0, 0, time.UTC),
+		})
+		require.NoError(t, err)
+
+		rows = getDailyRows(ctx, sqlDB)
+		require.Len(t, rows, 2)
+		require.JSONEq(t, `{"count": 50}`, string(rows[0].UsageData))
+		require.JSONEq(t, `{"count": 5}`, string(rows[1].UsageData))
+
+		// Also insert a dc_managed_agents_v1 on the same first day to
+		// verify different event types get separate daily rows.
+		err = db.InsertUsageEvent(ctx, database.InsertUsageEventParams{
+			ID:        "dc-1",
+			EventType: "dc_managed_agents_v1",
+			EventData: []byte(`{"count": 7}`),
+			CreatedAt: time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
+		})
+		require.NoError(t, err)
+
+		rows = getDailyRows(ctx, sqlDB)
+		require.Len(t, rows, 3)
+	})
+
 	t.Run("UnknownEventType", func(t *testing.T) {
 		t.Parallel()
 
@@ -6779,4 +8754,3627 @@ func TestUsageEventsTrigger(t *testing.T) {
 		rows := getDailyRows(ctx, sqlDB)
 		require.Len(t, rows, 0)
 	})
+}
+
+func TestListTasks(t *testing.T) {
+	t.Parallel()
+
+	db, ps := dbtestutil.NewDB(t)
+
+	// Given: two organizations and two users, one of which is a member of both
+	org1 := dbgen.Organization(t, db, database.Organization{})
+	org2 := dbgen.Organization(t, db, database.Organization{})
+	user1 := dbgen.User(t, db, database.User{})
+	user2 := dbgen.User(t, db, database.User{})
+	_ = dbgen.OrganizationMember(t, db, database.OrganizationMember{
+		OrganizationID: org1.ID,
+		UserID:         user1.ID,
+	})
+	_ = dbgen.OrganizationMember(t, db, database.OrganizationMember{
+		OrganizationID: org2.ID,
+		UserID:         user2.ID,
+	})
+
+	// Given: a template with an active version
+	tv := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		CreatedBy:      user1.ID,
+		OrganizationID: org1.ID,
+	})
+	tpl := dbgen.Template(t, db, database.Template{
+		CreatedBy:       user1.ID,
+		OrganizationID:  org1.ID,
+		ActiveVersionID: tv.ID,
+	})
+
+	// Helper function to create a task
+	createTask := func(orgID, ownerID uuid.UUID) database.Task {
+		ws := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OrganizationID: orgID,
+			OwnerID:        ownerID,
+			TemplateID:     tpl.ID,
+		})
+		pj := dbgen.ProvisionerJob(t, db, ps, database.ProvisionerJob{})
+		sidebarAppID := uuid.New()
+		wb := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			JobID:             pj.ID,
+			TemplateVersionID: tv.ID,
+			WorkspaceID:       ws.ID,
+		})
+		wr := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID: pj.ID,
+		})
+		agt := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: wr.ID,
+		})
+		wa := dbgen.WorkspaceApp(t, db, database.WorkspaceApp{
+			ID:      sidebarAppID,
+			AgentID: agt.ID,
+		})
+		tsk := dbgen.Task(t, db, database.TaskTable{
+			OrganizationID:    orgID,
+			OwnerID:           ownerID,
+			Prompt:            testutil.GetRandomName(t),
+			TemplateVersionID: tv.ID,
+			WorkspaceID:       uuid.NullUUID{UUID: ws.ID, Valid: true},
+		})
+		_ = dbgen.TaskWorkspaceApp(t, db, database.TaskWorkspaceApp{
+			TaskID:               tsk.ID,
+			WorkspaceBuildNumber: wb.BuildNumber,
+			WorkspaceAgentID:     uuid.NullUUID{Valid: true, UUID: agt.ID},
+			WorkspaceAppID:       uuid.NullUUID{Valid: true, UUID: wa.ID},
+		})
+		t.Logf("task_id:%s owner_id:%s org_id:%s", tsk.ID, ownerID, orgID)
+		return tsk
+	}
+
+	// Given: user1 has one task, user2 has one task, user3 has two tasks (one in each org)
+	task1 := createTask(org1.ID, user1.ID)
+	task2 := createTask(org1.ID, user2.ID)
+	task3 := createTask(org2.ID, user2.ID)
+
+	// Then: run various filters and assert expected results
+	for _, tc := range []struct {
+		name      string
+		filter    database.ListTasksParams
+		expectIDs []uuid.UUID
+	}{
+		{
+			name: "no filter",
+			filter: database.ListTasksParams{
+				OwnerID:        uuid.Nil,
+				OrganizationID: uuid.Nil,
+			},
+			expectIDs: []uuid.UUID{task3.ID, task2.ID, task1.ID},
+		},
+		{
+			name: "filter by user ID",
+			filter: database.ListTasksParams{
+				OwnerID:        user1.ID,
+				OrganizationID: uuid.Nil,
+			},
+			expectIDs: []uuid.UUID{task1.ID},
+		},
+		{
+			name: "filter by organization ID",
+			filter: database.ListTasksParams{
+				OwnerID:        uuid.Nil,
+				OrganizationID: org1.ID,
+			},
+			expectIDs: []uuid.UUID{task2.ID, task1.ID},
+		},
+		{
+			name: "filter by user and organization ID",
+			filter: database.ListTasksParams{
+				OwnerID:        user2.ID,
+				OrganizationID: org2.ID,
+			},
+			expectIDs: []uuid.UUID{task3.ID},
+		},
+		{
+			name: "no results",
+			filter: database.ListTasksParams{
+				OwnerID:        user1.ID,
+				OrganizationID: org2.ID,
+			},
+			expectIDs: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := testutil.Context(t, testutil.WaitShort)
+			tasks, err := db.ListTasks(ctx, tc.filter)
+			require.NoError(t, err)
+			require.Len(t, tasks, len(tc.expectIDs))
+
+			for idx, eid := range tc.expectIDs {
+				task := tasks[idx]
+				assert.Equal(t, eid, task.ID, "task ID mismatch at index %d", idx)
+
+				require.True(t, task.WorkspaceBuildNumber.Valid)
+				require.Greater(t, task.WorkspaceBuildNumber.Int32, int32(0))
+				require.True(t, task.WorkspaceAgentID.Valid)
+				require.NotEqual(t, uuid.Nil, task.WorkspaceAgentID.UUID)
+				require.True(t, task.WorkspaceAppID.Valid)
+				require.NotEqual(t, uuid.Nil, task.WorkspaceAppID.UUID)
+			}
+		})
+	}
+}
+
+func TestUpdateTaskWorkspaceID(t *testing.T) {
+	t.Parallel()
+
+	db, _ := dbtestutil.NewDB(t)
+
+	// Create organization, users, template, and template version.
+	org := dbgen.Organization(t, db, database.Organization{})
+	user := dbgen.User(t, db, database.User{})
+	template := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		CreatedBy:      user.ID,
+	})
+	templateVersion := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		OrganizationID: org.ID,
+		TemplateID:     uuid.NullUUID{Valid: true, UUID: template.ID},
+		CreatedBy:      user.ID,
+	})
+
+	// Create another template for mismatch test.
+	template2 := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		CreatedBy:      user.ID,
+	})
+
+	tests := []struct {
+		name      string
+		setupTask func(t *testing.T) database.Task
+		setupWS   func(t *testing.T) database.WorkspaceTable
+		wantErr   bool
+		wantNoRow bool
+	}{
+		{
+			name: "successful update with matching template",
+			setupTask: func(t *testing.T) database.Task {
+				return dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:    org.ID,
+					OwnerID:           user.ID,
+					Name:              testutil.GetRandomName(t),
+					WorkspaceID:       uuid.NullUUID{},
+					TemplateVersionID: templateVersion.ID,
+					Prompt:            "Test prompt",
+				})
+			},
+			setupWS: func(t *testing.T) database.WorkspaceTable {
+				return dbgen.Workspace(t, db, database.WorkspaceTable{
+					OrganizationID: org.ID,
+					OwnerID:        user.ID,
+					TemplateID:     template.ID,
+				})
+			},
+			wantErr:   false,
+			wantNoRow: false,
+		},
+		{
+			name: "task already has workspace_id",
+			setupTask: func(t *testing.T) database.Task {
+				existingWS := dbgen.Workspace(t, db, database.WorkspaceTable{
+					OrganizationID: org.ID,
+					OwnerID:        user.ID,
+					TemplateID:     template.ID,
+				})
+				return dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:    org.ID,
+					OwnerID:           user.ID,
+					Name:              testutil.GetRandomName(t),
+					WorkspaceID:       uuid.NullUUID{Valid: true, UUID: existingWS.ID},
+					TemplateVersionID: templateVersion.ID,
+					Prompt:            "Test prompt",
+				})
+			},
+			setupWS: func(t *testing.T) database.WorkspaceTable {
+				return dbgen.Workspace(t, db, database.WorkspaceTable{
+					OrganizationID: org.ID,
+					OwnerID:        user.ID,
+					TemplateID:     template.ID,
+				})
+			},
+			wantErr:   false,
+			wantNoRow: true, // No row should be returned because WHERE condition fails.
+		},
+		{
+			name: "template mismatch between task and workspace",
+			setupTask: func(t *testing.T) database.Task {
+				return dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:    org.ID,
+					OwnerID:           user.ID,
+					Name:              testutil.GetRandomName(t),
+					WorkspaceID:       uuid.NullUUID{}, // NULL workspace_id
+					TemplateVersionID: templateVersion.ID,
+					Prompt:            "Test prompt",
+				})
+			},
+			setupWS: func(t *testing.T) database.WorkspaceTable {
+				return dbgen.Workspace(t, db, database.WorkspaceTable{
+					OrganizationID: org.ID,
+					OwnerID:        user.ID,
+					TemplateID:     template2.ID, // Different template, JOIN will fail.
+				})
+			},
+			wantErr:   false,
+			wantNoRow: true, // No row should be returned because JOIN condition fails.
+		},
+		{
+			name: "task does not exist",
+			setupTask: func(t *testing.T) database.Task {
+				return database.Task{
+					ID: uuid.New(), // Non-existent task ID.
+				}
+			},
+			setupWS: func(t *testing.T) database.WorkspaceTable {
+				return dbgen.Workspace(t, db, database.WorkspaceTable{
+					OrganizationID: org.ID,
+					OwnerID:        user.ID,
+					TemplateID:     template.ID,
+				})
+			},
+			wantErr:   false,
+			wantNoRow: true,
+		},
+		{
+			name: "workspace does not exist",
+			setupTask: func(t *testing.T) database.Task {
+				return dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:    org.ID,
+					OwnerID:           user.ID,
+					Name:              testutil.GetRandomName(t),
+					WorkspaceID:       uuid.NullUUID{},
+					TemplateVersionID: templateVersion.ID,
+					Prompt:            "Test prompt",
+				})
+			},
+			setupWS: func(t *testing.T) database.WorkspaceTable {
+				return database.WorkspaceTable{
+					ID: uuid.New(), // Non-existent workspace ID.
+				}
+			},
+			wantErr:   false,
+			wantNoRow: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := testutil.Context(t, testutil.WaitShort)
+
+			task := tt.setupTask(t)
+			workspace := tt.setupWS(t)
+
+			updatedTask, err := db.UpdateTaskWorkspaceID(ctx, database.UpdateTaskWorkspaceIDParams{
+				ID:          task.ID,
+				WorkspaceID: uuid.NullUUID{Valid: true, UUID: workspace.ID},
+			})
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+
+			if tt.wantNoRow {
+				require.ErrorIs(t, err, sql.ErrNoRows)
+				return
+			}
+
+			require.NoError(t, err)
+			require.Equal(t, task.ID, updatedTask.ID)
+			require.True(t, updatedTask.WorkspaceID.Valid)
+			require.Equal(t, workspace.ID, updatedTask.WorkspaceID.UUID)
+			require.Equal(t, task.OrganizationID, updatedTask.OrganizationID)
+			require.Equal(t, task.OwnerID, updatedTask.OwnerID)
+			require.Equal(t, task.Name, updatedTask.Name)
+			require.Equal(t, task.TemplateVersionID, updatedTask.TemplateVersionID)
+
+			// Verify the update persisted by fetching the task again.
+			fetchedTask, err := db.GetTaskByID(ctx, task.ID)
+			require.NoError(t, err)
+			require.True(t, fetchedTask.WorkspaceID.Valid)
+			require.Equal(t, workspace.ID, fetchedTask.WorkspaceID.UUID)
+		})
+	}
+}
+
+func TestUpdateAIBridgeInterceptionEnded(t *testing.T) {
+	t.Parallel()
+	db, _ := dbtestutil.NewDB(t)
+
+	t.Run("NonExistingInterception", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		got, err := db.UpdateAIBridgeInterceptionEnded(ctx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      uuid.New(),
+			EndedAt: time.Now(),
+		})
+		require.ErrorContains(t, err, "no rows in result set")
+		require.EqualValues(t, database.AIBridgeInterception{}, got)
+	})
+
+	t.Run("OK", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitLong)
+
+		user := dbgen.User(t, db, database.User{})
+		interceptions := []database.AIBridgeInterception{}
+
+		for _, uid := range []uuid.UUID{{1}, {2}, {3}} {
+			insertParams := database.InsertAIBridgeInterceptionParams{
+				ID:             uid,
+				InitiatorID:    user.ID,
+				Metadata:       json.RawMessage("{}"),
+				Client:         sql.NullString{String: "client", Valid: true},
+				CredentialKind: database.CredentialKindCentralized,
+			}
+
+			intc, err := db.InsertAIBridgeInterception(ctx, insertParams)
+			require.NoError(t, err)
+			require.Equal(t, uid, intc.ID)
+			require.False(t, intc.EndedAt.Valid)
+			require.True(t, intc.Client.Valid)
+			require.Equal(t, "client", intc.Client.String)
+			interceptions = append(interceptions, intc)
+		}
+
+		intc0 := interceptions[0]
+		endedAt := time.Now()
+		// Mark first interception as done
+		updated, err := db.UpdateAIBridgeInterceptionEnded(ctx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      intc0.ID,
+			EndedAt: endedAt,
+		})
+		require.NoError(t, err)
+		require.EqualValues(t, updated.ID, intc0.ID)
+		require.True(t, updated.EndedAt.Valid)
+		require.WithinDuration(t, endedAt, updated.EndedAt.Time, 5*time.Second)
+
+		// Updating first interception again should fail
+		updated, err = db.UpdateAIBridgeInterceptionEnded(ctx, database.UpdateAIBridgeInterceptionEndedParams{
+			ID:      intc0.ID,
+			EndedAt: endedAt.Add(time.Hour),
+		})
+		require.ErrorIs(t, err, sql.ErrNoRows)
+
+		// Other interceptions should not have ended_at set
+		for _, intc := range interceptions[1:] {
+			got, err := db.GetAIBridgeInterceptionByID(ctx, intc.ID)
+			require.NoError(t, err)
+			require.False(t, got.EndedAt.Valid)
+		}
+	})
+}
+
+func TestDeleteExpiredAPIKeys(t *testing.T) {
+	t.Parallel()
+	db, _ := dbtestutil.NewDB(t)
+
+	// Constant time for testing
+	now := time.Date(2025, 11, 20, 12, 0, 0, 0, time.UTC)
+	expiredBefore := now.Add(-time.Hour) // Anything before this is expired
+
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	user := dbgen.User(t, db, database.User{})
+
+	expiredTimes := []time.Time{
+		expiredBefore.Add(-time.Hour * 24 * 365),
+		expiredBefore.Add(-time.Hour * 24),
+		expiredBefore.Add(-time.Hour),
+		expiredBefore.Add(-time.Minute),
+		expiredBefore.Add(-time.Second),
+	}
+	for _, exp := range expiredTimes {
+		// Expired api keys
+		dbgen.APIKey(t, db, database.APIKey{UserID: user.ID, ExpiresAt: exp})
+	}
+
+	unexpiredTimes := []time.Time{
+		expiredBefore.Add(time.Hour * 24 * 365),
+		expiredBefore.Add(time.Hour * 24),
+		expiredBefore.Add(time.Hour),
+		expiredBefore.Add(time.Minute),
+		expiredBefore.Add(time.Second),
+	}
+	for _, unexp := range unexpiredTimes {
+		// Unexpired api keys
+		dbgen.APIKey(t, db, database.APIKey{UserID: user.ID, ExpiresAt: unexp})
+	}
+
+	// All keys are present before deletion
+	keys, err := db.GetAPIKeysByUserID(ctx, database.GetAPIKeysByUserIDParams{
+		LoginType:      user.LoginType,
+		UserID:         user.ID,
+		IncludeExpired: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, keys, len(expiredTimes)+len(unexpiredTimes))
+
+	// Delete expired keys
+	// First verify the limit works by deleting one at a time
+	deletedCount, err := db.DeleteExpiredAPIKeys(ctx, database.DeleteExpiredAPIKeysParams{
+		Before:     expiredBefore,
+		LimitCount: 1,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), deletedCount)
+
+	// Ensure it was deleted
+	remaining, err := db.GetAPIKeysByUserID(ctx, database.GetAPIKeysByUserIDParams{
+		LoginType:      user.LoginType,
+		UserID:         user.ID,
+		IncludeExpired: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, remaining, len(expiredTimes)+len(unexpiredTimes)-1)
+
+	// Delete the rest of the expired keys
+	deletedCount, err = db.DeleteExpiredAPIKeys(ctx, database.DeleteExpiredAPIKeysParams{
+		Before:     expiredBefore,
+		LimitCount: 100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(len(expiredTimes)-1), deletedCount)
+
+	// Ensure only unexpired keys remain
+	remaining, err = db.GetAPIKeysByUserID(ctx, database.GetAPIKeysByUserIDParams{
+		LoginType:      user.LoginType,
+		UserID:         user.ID,
+		IncludeExpired: true,
+	})
+	require.NoError(t, err)
+	require.Len(t, remaining, len(unexpiredTimes))
+}
+
+func TestGetAuthenticatedWorkspaceAgentAndBuildByAuthToken_ShutdownScripts(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	sqlDB := testSQLDB(t)
+	err := migrations.Up(sqlDB)
+	require.NoError(t, err)
+	db := database.New(sqlDB)
+
+	org := dbgen.Organization(t, db, database.Organization{})
+	owner := dbgen.User(t, db, database.User{})
+	tpl := dbgen.Template(t, db, database.Template{
+		OrganizationID: org.ID,
+		CreatedBy:      owner.ID,
+	})
+	ver := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+		TemplateID: uuid.NullUUID{
+			UUID:  tpl.ID,
+			Valid: true,
+		},
+		OrganizationID: tpl.OrganizationID,
+		CreatedBy:      owner.ID,
+	})
+
+	t.Run("DuringStopBuild", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        owner.ID,
+			OrganizationID: org.ID,
+			TemplateID:     tpl.ID,
+		})
+
+		// Create start build with succeeded job (already completed).
+		startJob := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &startJob)
+		startJob = dbgen.ProvisionerJob(t, db, nil, startJob)
+		startResource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		startBuild := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       1,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob.ID,
+		})
+		agent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource.ID,
+		})
+
+		// Create stop build (becomes latest).
+		stopJob := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+			JobStatus:      database.ProvisionerJobStatusRunning,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       2,
+			Transition:        database.WorkspaceTransitionStop,
+			InitiatorID:       owner.ID,
+			JobID:             stopJob.ID,
+		})
+
+		// Agent should still authenticate during stop build execution.
+		row, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent.AuthToken)
+		require.NoError(t, err, "agent should authenticate during stop build execution")
+		require.Equal(t, agent.ID, row.WorkspaceAgent.ID)
+		require.Equal(t, startBuild.ID, row.WorkspaceBuild.ID, "should return start build, not stop build")
+	})
+
+	t.Run("AfterStopJobCompletes", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        owner.ID,
+			OrganizationID: org.ID,
+			TemplateID:     tpl.ID,
+		})
+
+		// Create start build with completed job.
+		startJob := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &startJob)
+		startJob = dbgen.ProvisionerJob(t, db, nil, startJob)
+
+		startResource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       1,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob.ID,
+		})
+		agent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource.ID,
+		})
+
+		// Create stop build (becomes latest) with completed job.
+		stopJob := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &stopJob)
+		stopJob = dbgen.ProvisionerJob(t, db, nil, stopJob)
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       2,
+			Transition:        database.WorkspaceTransitionStop,
+			InitiatorID:       owner.ID,
+			JobID:             stopJob.ID,
+		})
+
+		// Agent should NOT authenticate after stop job completes.
+		_, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent.AuthToken)
+		require.ErrorIs(t, err, sql.ErrNoRows, "agent should not authenticate after stop job completes")
+	})
+
+	t.Run("FailedStartBuild", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        owner.ID,
+			OrganizationID: org.ID,
+			TemplateID:     tpl.ID,
+		})
+
+		// Create START build with FAILED job.
+		startJob := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusFailed, &startJob)
+		startJob = dbgen.ProvisionerJob(t, db, nil, startJob)
+		startResource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       1,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob.ID,
+		})
+		agent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource.ID,
+		})
+
+		// Create STOP build with running job.
+		stopJob := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+			JobStatus:      database.ProvisionerJobStatusRunning,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       2,
+			Transition:        database.WorkspaceTransitionStop,
+			InitiatorID:       owner.ID,
+			JobID:             stopJob.ID,
+		})
+
+		// Agent should NOT authenticate (start build failed).
+		_, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent.AuthToken)
+		require.ErrorIs(t, err, sql.ErrNoRows, "agent from failed start build should not authenticate")
+	})
+
+	t.Run("PendingStopBuild", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        owner.ID,
+			OrganizationID: org.ID,
+			TemplateID:     tpl.ID,
+		})
+
+		// Create start build with succeeded job.
+		startJob := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &startJob)
+		startJob = dbgen.ProvisionerJob(t, db, nil, startJob)
+		startResource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		startBuild := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       1,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob.ID,
+		})
+		agent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource.ID,
+		})
+
+		// Create stop build with pending job (not started yet).
+		stopJob := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusPending, &stopJob)
+		stopJob = dbgen.ProvisionerJob(t, db, nil, stopJob)
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       2,
+			Transition:        database.WorkspaceTransitionStop,
+			InitiatorID:       owner.ID,
+			JobID:             stopJob.ID,
+		})
+
+		// Agent should authenticate during pending stop build.
+		row, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent.AuthToken)
+		require.NoError(t, err, "agent should authenticate during pending stop build")
+		require.Equal(t, agent.ID, row.WorkspaceAgent.ID)
+		require.Equal(t, startBuild.ID, row.WorkspaceBuild.ID, "should return start build")
+	})
+
+	t.Run("MultipleStartStopCycles", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        owner.ID,
+			OrganizationID: org.ID,
+			TemplateID:     tpl.ID,
+		})
+
+		// Build 1: START (succeeded).
+		startJob1 := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &startJob1)
+		startJob1 = dbgen.ProvisionerJob(t, db, nil, startJob1)
+		startResource1 := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob1.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       1,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob1.ID,
+		})
+		agent1 := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource1.ID,
+		})
+
+		// Build 2: STOP (succeeded).
+		stopJob1 := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &stopJob1)
+		stopJob1 = dbgen.ProvisionerJob(t, db, nil, stopJob1)
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       2,
+			Transition:        database.WorkspaceTransitionStop,
+			InitiatorID:       owner.ID,
+			JobID:             stopJob1.ID,
+		})
+
+		// Build 3: START (succeeded).
+		startJob2 := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &startJob2)
+		startJob2 = dbgen.ProvisionerJob(t, db, nil, startJob2)
+		startResource2 := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob2.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		startBuild2 := dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       3,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob2.ID,
+		})
+		agent2 := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource2.ID,
+		})
+
+		// Build 4: STOP (running).
+		stopJob2 := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+			JobStatus:      database.ProvisionerJobStatusRunning,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       4,
+			Transition:        database.WorkspaceTransitionStop,
+			InitiatorID:       owner.ID,
+			JobID:             stopJob2.ID,
+		})
+
+		// Agent from build 3 should authenticate.
+		row, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent2.AuthToken)
+		require.NoError(t, err, "agent from most recent start should authenticate during stop")
+		require.Equal(t, agent2.ID, row.WorkspaceAgent.ID)
+		require.Equal(t, startBuild2.ID, row.WorkspaceBuild.ID)
+
+		// Agent from build 1 should NOT authenticate.
+		_, err = db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent1.AuthToken)
+		require.ErrorIs(t, err, sql.ErrNoRows, "agent from old cycle should not authenticate")
+	})
+
+	t.Run("WrongTransitionType", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		workspace := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OwnerID:        owner.ID,
+			OrganizationID: org.ID,
+			TemplateID:     tpl.ID,
+		})
+
+		// Create first start build.
+		startJob1 := database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+		}
+		setJobStatus(t, database.ProvisionerJobStatusSucceeded, &startJob1)
+		startJob1 = dbgen.ProvisionerJob(t, db, nil, startJob1)
+		startResource1 := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID:      startJob1.ID,
+			Transition: database.WorkspaceTransitionStart,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       1,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob1.ID,
+		})
+		agent1 := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID: startResource1.ID,
+		})
+
+		// Create another START build as latest (not STOP).
+		startJob2 := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+			InitiatorID:    owner.ID,
+			OrganizationID: org.ID,
+			JobStatus:      database.ProvisionerJobStatusRunning,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       workspace.ID,
+			TemplateVersionID: ver.ID,
+			BuildNumber:       2,
+			Transition:        database.WorkspaceTransitionStart,
+			InitiatorID:       owner.ID,
+			JobID:             startJob2.ID,
+		})
+
+		// Agent from build 1 should NOT authenticate (latest is not STOP).
+		_, err := db.GetAuthenticatedWorkspaceAgentAndBuildByAuthToken(ctx, agent1.AuthToken)
+		require.ErrorIs(t, err, sql.ErrNoRows, "agent should not authenticate when latest build is not STOP")
+	})
+}
+
+// Our `InsertWorkspaceAgentDevcontainers` query should ideally be `[]uuid.NullUUID` but unfortunately
+// sqlc infers it as `[]uuid.UUID`. To ensure we don't insert a `uuid.Nil`, the query inserts NULL when
+// passed with `uuid.Nil`. This test ensures we keep this behavior without regression.
+func TestInsertWorkspaceAgentDevcontainers(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name          string
+		validSubagent []bool
+	}{
+		{"BothValid", []bool{true, true}},
+		{"FirstValidSecondInvalid", []bool{true, false}},
+		{"FirstInvalidSecondValid", []bool{false, true}},
+		{"BothInvalid", []bool{false, false}},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				db, _ = dbtestutil.NewDB(t)
+				org   = dbgen.Organization(t, db, database.Organization{})
+				job   = dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+					Type:           database.ProvisionerJobTypeTemplateVersionImport,
+					OrganizationID: org.ID,
+				})
+				resource = dbgen.WorkspaceResource(t, db, database.WorkspaceResource{JobID: job.ID})
+				agent    = dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{ResourceID: resource.ID})
+			)
+
+			ids := make([]uuid.UUID, len(tc.validSubagent))
+			names := make([]string, len(tc.validSubagent))
+			workspaceFolders := make([]string, len(tc.validSubagent))
+			configPaths := make([]string, len(tc.validSubagent))
+			subagentIDs := make([]uuid.UUID, len(tc.validSubagent))
+
+			for i, valid := range tc.validSubagent {
+				ids[i] = uuid.New()
+				names[i] = fmt.Sprintf("test-devcontainer-%d", i)
+				workspaceFolders[i] = fmt.Sprintf("/workspace%d", i)
+				configPaths[i] = fmt.Sprintf("/workspace%d/.devcontainer/devcontainer.json", i)
+
+				if valid {
+					subagentIDs[i] = dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+						ResourceID: resource.ID,
+						ParentID:   uuid.NullUUID{UUID: agent.ID, Valid: true},
+					}).ID
+				} else {
+					subagentIDs[i] = uuid.Nil
+				}
+			}
+
+			ctx := testutil.Context(t, testutil.WaitShort)
+
+			// Given: We insert multiple devcontainer records.
+			devcontainers, err := db.InsertWorkspaceAgentDevcontainers(ctx, database.InsertWorkspaceAgentDevcontainersParams{
+				WorkspaceAgentID: agent.ID,
+				CreatedAt:        dbtime.Now(),
+				ID:               ids,
+				Name:             names,
+				WorkspaceFolder:  workspaceFolders,
+				ConfigPath:       configPaths,
+				SubagentID:       subagentIDs,
+			})
+			require.NoError(t, err)
+			require.Len(t, devcontainers, len(tc.validSubagent))
+
+			// Then: Verify each devcontainer has the correct SubagentID validity.
+			// - When we pass `uuid.Nil`, we get a `uuid.NullUUID{Valid: false}`
+			// - When we pass a valid UUID, we get a `uuid.NullUUID{Valid: true}`
+			for i, valid := range tc.validSubagent {
+				require.Equal(t, valid, devcontainers[i].SubagentID.Valid, "devcontainer %d: subagent_id validity mismatch", i)
+				if valid {
+					require.Equal(t, subagentIDs[i], devcontainers[i].SubagentID.UUID, "devcontainer %d: subagent_id UUID mismatch", i)
+				}
+			}
+
+			// Perform the same check on data returned by
+			// `GetWorkspaceAgentDevcontainersByAgentID` to ensure the fix is at
+			// the data storage layer, instead of just at a query level.
+			fetched, err := db.GetWorkspaceAgentDevcontainersByAgentID(ctx, agent.ID)
+			require.NoError(t, err)
+			require.Len(t, fetched, len(tc.validSubagent))
+
+			// Sort fetched by name to ensure consistent ordering for comparison.
+			slices.SortFunc(fetched, func(a, b database.WorkspaceAgentDevcontainer) int {
+				return strings.Compare(a.Name, b.Name)
+			})
+
+			for i, valid := range tc.validSubagent {
+				require.Equal(t, valid, fetched[i].SubagentID.Valid, "fetched devcontainer %d: subagent_id validity mismatch", i)
+				if valid {
+					require.Equal(t, subagentIDs[i], fetched[i].SubagentID.UUID, "fetched devcontainer %d: subagent_id UUID mismatch", i)
+				}
+			}
+		})
+	}
+}
+
+func TestInsertChatMessages(t *testing.T) {
+	t.Parallel()
+
+	insertModelConfig := func(
+		t *testing.T,
+		store database.Store,
+		ctx context.Context,
+		userID uuid.UUID,
+		provider string,
+		model string,
+		displayName string,
+		isDefault bool,
+	) database.ChatModelConfig {
+		t.Helper()
+
+		modelConfig, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+			Provider:             provider,
+			Model:                model,
+			DisplayName:          displayName,
+			CreatedBy:            uuid.NullUUID{UUID: userID, Valid: true},
+			UpdatedBy:            uuid.NullUUID{UUID: userID, Valid: true},
+			Enabled:              true,
+			IsDefault:            isDefault,
+			ContextLimit:         128000,
+			CompressionThreshold: 80,
+			Options:              json.RawMessage(`{}`),
+		})
+		require.NoError(t, err)
+
+		return modelConfig
+	}
+
+	setupChat := func(t *testing.T) (database.Store, context.Context, database.User, database.Chat, string, database.ChatModelConfig) {
+		t.Helper()
+
+		store, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+
+		org := dbgen.Organization(t, store, database.Organization{})
+		user := dbgen.User(t, store, database.User{})
+		dbgen.OrganizationMember(t, store, database.OrganizationMember{UserID: user.ID, OrganizationID: org.ID})
+		provider := "openai"
+
+		_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+			Provider:             provider,
+			DisplayName:          "OpenAI",
+			APIKey:               "test-key",
+			Enabled:              true,
+			CentralApiKeyEnabled: true,
+		})
+		require.NoError(t, err)
+
+		modelConfigA := insertModelConfig(
+			t,
+			store,
+			ctx,
+			user.ID,
+			provider,
+			"test-model-a-"+uuid.NewString(),
+			"Test Model A",
+			true,
+		)
+
+		chat, err := store.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           user.ID,
+			LastModelConfigID: modelConfigA.ID,
+			Title:             "test-chat-" + uuid.NewString(),
+		})
+		require.NoError(t, err)
+
+		return store, ctx, user, chat, provider, modelConfigA
+	}
+
+	insertMessage := func(t *testing.T, store database.Store, ctx context.Context, chatID, userID, modelConfigID uuid.UUID, content string) {
+		t.Helper()
+
+		_, err := store.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+			ChatID:              chatID,
+			CreatedBy:           []uuid.UUID{userID},
+			ModelConfigID:       []uuid.UUID{modelConfigID},
+			Role:                []database.ChatMessageRole{database.ChatMessageRoleUser},
+			ContentVersion:      []int16{chatprompt.CurrentContentVersion},
+			Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth},
+			Content:             []string{fmt.Sprintf("%q", content)},
+			InputTokens:         []int64{0},
+			OutputTokens:        []int64{0},
+			TotalTokens:         []int64{0},
+			ReasoningTokens:     []int64{0},
+			CacheCreationTokens: []int64{0},
+			CacheReadTokens:     []int64{0},
+			ContextLimit:        []int64{0},
+			Compressed:          []bool{false},
+			TotalCostMicros:     []int64{0},
+			RuntimeMs:           []int64{0},
+		})
+		require.NoError(t, err)
+	}
+
+	t.Run("ModelSwitchUpdatesLastModelConfigID", func(t *testing.T) {
+		t.Parallel()
+
+		store, ctx, user, chat, provider, modelConfigA := setupChat(t)
+		modelConfigB := insertModelConfig(
+			t,
+			store,
+			ctx,
+			user.ID,
+			provider,
+			"test-model-b-"+uuid.NewString(),
+			"Test Model B",
+			false,
+		)
+
+		insertMessage(t, store, ctx, chat.ID, user.ID, modelConfigB.ID, "switch models")
+
+		gotChat, err := store.GetChatByID(ctx, chat.ID)
+		require.NoError(t, err)
+		require.Equal(t, modelConfigA.ID, chat.LastModelConfigID)
+		require.Equal(t, modelConfigB.ID, gotChat.LastModelConfigID)
+	})
+
+	t.Run("SameModelDoesNotBreakAnything", func(t *testing.T) {
+		t.Parallel()
+
+		store, ctx, user, chat, _, modelConfigA := setupChat(t)
+
+		insertMessage(t, store, ctx, chat.ID, user.ID, modelConfigA.ID, "same model")
+
+		gotChat, err := store.GetChatByID(ctx, chat.ID)
+		require.NoError(t, err)
+		require.Equal(t, modelConfigA.ID, gotChat.LastModelConfigID)
+	})
+
+	t.Run("BatchInsertMultipleMessages", func(t *testing.T) {
+		t.Parallel()
+
+		store, ctx, user, chat, _, modelConfigA := setupChat(t)
+
+		msgs, err := store.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+			ChatID:              chat.ID,
+			CreatedBy:           []uuid.UUID{user.ID, uuid.Nil, uuid.Nil},
+			ModelConfigID:       []uuid.UUID{modelConfigA.ID, modelConfigA.ID, modelConfigA.ID},
+			Role:                []database.ChatMessageRole{database.ChatMessageRoleUser, database.ChatMessageRoleAssistant, database.ChatMessageRoleTool},
+			ContentVersion:      []int16{chatprompt.CurrentContentVersion, chatprompt.CurrentContentVersion, chatprompt.CurrentContentVersion},
+			Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth, database.ChatMessageVisibilityBoth},
+			Content:             []string{`"hello"`, `"response"`, `"tool result"`},
+			InputTokens:         []int64{10, 0, 0},
+			OutputTokens:        []int64{0, 20, 0},
+			TotalTokens:         []int64{10, 20, 0},
+			ReasoningTokens:     []int64{0, 5, 0},
+			CacheCreationTokens: []int64{0, 0, 0},
+			CacheReadTokens:     []int64{0, 0, 0},
+			ContextLimit:        []int64{0, 0, 0},
+			Compressed:          []bool{false, false, false},
+			TotalCostMicros:     []int64{0, 100, 0},
+			RuntimeMs:           []int64{0, 500, 0},
+		})
+		require.NoError(t, err)
+		require.Len(t, msgs, 3)
+
+		// Verify ordering and roles.
+		require.Equal(t, database.ChatMessageRoleUser, msgs[0].Role)
+		require.Equal(t, database.ChatMessageRoleAssistant, msgs[1].Role)
+		require.Equal(t, database.ChatMessageRoleTool, msgs[2].Role)
+
+		// Verify IDs are sequential.
+		require.Less(t, msgs[0].ID, msgs[1].ID)
+		require.Less(t, msgs[1].ID, msgs[2].ID)
+
+		// Verify nullable fields: user message has CreatedBy set.
+		require.True(t, msgs[0].CreatedBy.Valid)
+		require.Equal(t, user.ID, msgs[0].CreatedBy.UUID)
+		// Assistant and tool messages have NULL CreatedBy.
+		require.False(t, msgs[1].CreatedBy.Valid)
+		require.False(t, msgs[2].CreatedBy.Valid)
+
+		// Verify token fields stored as NULL when zero.
+		require.True(t, msgs[0].InputTokens.Valid)
+		require.Equal(t, int64(10), msgs[0].InputTokens.Int64)
+		require.False(t, msgs[0].OutputTokens.Valid) // 0 → NULL
+		require.True(t, msgs[1].OutputTokens.Valid)
+		require.Equal(t, int64(20), msgs[1].OutputTokens.Int64)
+
+		// Verify cost: assistant has cost, others NULL.
+		require.True(t, msgs[1].TotalCostMicros.Valid)
+		require.Equal(t, int64(100), msgs[1].TotalCostMicros.Int64)
+		require.False(t, msgs[0].TotalCostMicros.Valid)
+		require.False(t, msgs[2].TotalCostMicros.Valid)
+
+		// Verify runtime_ms on assistant message.
+		require.True(t, msgs[1].RuntimeMs.Valid)
+		require.Equal(t, int64(500), msgs[1].RuntimeMs.Int64)
+		require.False(t, msgs[0].RuntimeMs.Valid)
+	})
+}
+
+func TestGetChatMessagesForPromptByChatID(t *testing.T) {
+	t.Parallel()
+
+	// This test exercises a complex CTE query for prompt
+	// reconstruction after compaction. It requires Postgres.
+	db, _ := dbtestutil.NewDB(t)
+	ctx := context.Background()
+
+	// Helper: create a chat model config (required FK for chats).
+	user := dbgen.User(t, db, database.User{})
+	org := dbgen.Organization(t, db, database.Organization{})
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: user.ID, OrganizationID: org.ID})
+
+	// A chat_providers row is required as a FK for model configs.
+	_, err := db.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             "openai",
+		DisplayName:          "OpenAI",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := db.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "openai",
+		Model:                "test-model",
+		DisplayName:          "Test Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	newChat := func(t *testing.T) database.Chat {
+		t.Helper()
+		chat, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           user.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             "test-chat-" + uuid.NewString(),
+		})
+		require.NoError(t, err)
+		return chat
+	}
+
+	insertMsg := func(
+		t *testing.T,
+		chatID uuid.UUID,
+		role database.ChatMessageRole,
+		vis database.ChatMessageVisibility,
+		compressed bool,
+		content string,
+	) database.ChatMessage {
+		t.Helper()
+		results, err := db.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+			ChatID:              chatID,
+			CreatedBy:           []uuid.UUID{uuid.Nil},
+			ModelConfigID:       []uuid.UUID{uuid.Nil},
+			Role:                []database.ChatMessageRole{role},
+			ContentVersion:      []int16{chatprompt.CurrentContentVersion},
+			Visibility:          []database.ChatMessageVisibility{vis},
+			Compressed:          []bool{compressed},
+			Content:             []string{`"` + content + `"`},
+			InputTokens:         []int64{0},
+			OutputTokens:        []int64{0},
+			TotalTokens:         []int64{0},
+			ReasoningTokens:     []int64{0},
+			CacheCreationTokens: []int64{0},
+			CacheReadTokens:     []int64{0},
+			ContextLimit:        []int64{0},
+			TotalCostMicros:     []int64{0},
+			RuntimeMs:           []int64{0},
+		})
+		require.NoError(t, err)
+		return results[0]
+	}
+
+	msgIDs := func(msgs []database.ChatMessage) []int64 {
+		ids := make([]int64, len(msgs))
+		for i, m := range msgs {
+			ids[i] = m.ID
+		}
+		return ids
+	}
+
+	t.Run("NoCompaction", func(t *testing.T) {
+		t.Parallel()
+		chat := newChat(t)
+
+		sys := insertMsg(t, chat.ID, database.ChatMessageRoleSystem, database.ChatMessageVisibilityModel, false, "system prompt")
+		usr := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityBoth, false, "hello")
+		ast := insertMsg(t, chat.ID, database.ChatMessageRoleAssistant, database.ChatMessageVisibilityBoth, false, "hi there")
+
+		got, err := db.GetChatMessagesForPromptByChatID(ctx, chat.ID)
+		require.NoError(t, err)
+		require.Equal(t, []int64{sys.ID, usr.ID, ast.ID}, msgIDs(got))
+	})
+
+	t.Run("UserOnlyVisibilityExcluded", func(t *testing.T) {
+		t.Parallel()
+		chat := newChat(t)
+
+		// Messages with visibility=user should NOT appear in the
+		// prompt (they are only for the UI).
+		insertMsg(t, chat.ID, database.ChatMessageRoleSystem, database.ChatMessageVisibilityModel, false, "system prompt")
+		insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityUser, false, "user-only msg")
+		usr := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityBoth, false, "hello")
+
+		got, err := db.GetChatMessagesForPromptByChatID(ctx, chat.ID)
+		require.NoError(t, err)
+		for _, m := range got {
+			require.NotEqual(t, database.ChatMessageVisibilityUser, m.Visibility,
+				"visibility=user messages should not appear in the prompt")
+		}
+		require.Contains(t, msgIDs(got), usr.ID)
+	})
+
+	t.Run("AfterCompaction", func(t *testing.T) {
+		t.Parallel()
+		chat := newChat(t)
+
+		// Pre-compaction conversation.
+		sys := insertMsg(t, chat.ID, database.ChatMessageRoleSystem, database.ChatMessageVisibilityModel, false, "system prompt")
+		preUser := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityBoth, false, "old question")
+		preAsst := insertMsg(t, chat.ID, database.ChatMessageRoleAssistant, database.ChatMessageVisibilityBoth, false, "old answer")
+
+		// Compaction messages:
+		// 1. Summary (role=user, visibility=model, compressed=true).
+		summary := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityModel, true, "compaction summary")
+		// 2. Compressed assistant tool-call (visibility=user).
+		insertMsg(t, chat.ID, database.ChatMessageRoleAssistant, database.ChatMessageVisibilityUser, true, "tool call")
+		// 3. Compressed tool result (visibility=both).
+		insertMsg(t, chat.ID, database.ChatMessageRoleTool, database.ChatMessageVisibilityBoth, true, "tool result")
+
+		// Post-compaction messages.
+		postUser := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityBoth, false, "new question")
+		postAsst := insertMsg(t, chat.ID, database.ChatMessageRoleAssistant, database.ChatMessageVisibilityBoth, false, "new answer")
+
+		got, err := db.GetChatMessagesForPromptByChatID(ctx, chat.ID)
+		require.NoError(t, err)
+
+		gotIDs := msgIDs(got)
+
+		// Must include: system prompt, summary, post-compaction.
+		require.Contains(t, gotIDs, sys.ID, "system prompt must be included")
+		require.Contains(t, gotIDs, summary.ID, "compaction summary must be included")
+		require.Contains(t, gotIDs, postUser.ID, "post-compaction user msg must be included")
+		require.Contains(t, gotIDs, postAsst.ID, "post-compaction assistant msg must be included")
+
+		// Must exclude: pre-compaction non-system messages.
+		require.NotContains(t, gotIDs, preUser.ID, "pre-compaction user msg must be excluded")
+		require.NotContains(t, gotIDs, preAsst.ID, "pre-compaction assistant msg must be excluded")
+
+		// Verify ordering.
+		require.Equal(t, []int64{sys.ID, summary.ID, postUser.ID, postAsst.ID}, gotIDs)
+	})
+
+	t.Run("AfterCompactionSummaryIsUserRole", func(t *testing.T) {
+		t.Parallel()
+		chat := newChat(t)
+
+		// After compaction the summary must appear as role=user so
+		// that LLM APIs (e.g. Anthropic) see at least one
+		// non-system message in the prompt.
+		insertMsg(t, chat.ID, database.ChatMessageRoleSystem, database.ChatMessageVisibilityModel, false, "system prompt")
+		summary := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityModel, true, "summary text")
+		newUsr := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityBoth, false, "new question")
+
+		got, err := db.GetChatMessagesForPromptByChatID(ctx, chat.ID)
+		require.NoError(t, err)
+
+		hasNonSystem := false
+		for _, m := range got {
+			if m.Role != "system" {
+				hasNonSystem = true
+				break
+			}
+		}
+		require.True(t, hasNonSystem,
+			"prompt must contain at least one non-system message after compaction")
+		require.Contains(t, msgIDs(got), summary.ID)
+		require.Contains(t, msgIDs(got), newUsr.ID)
+	})
+
+	t.Run("CompressedToolResultNotPickedAsSummary", func(t *testing.T) {
+		t.Parallel()
+		chat := newChat(t)
+
+		// The CTE uses visibility='model' (exact match). If it
+		// used IN ('model','both'), the compressed tool result
+		// (visibility=both) would be picked as the "summary"
+		// instead of the actual summary.
+		insertMsg(t, chat.ID, database.ChatMessageRoleSystem, database.ChatMessageVisibilityModel, false, "system prompt")
+		summary := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityModel, true, "real summary")
+		compressedTool := insertMsg(t, chat.ID, database.ChatMessageRoleTool, database.ChatMessageVisibilityBoth, true, "tool result")
+		postUser := insertMsg(t, chat.ID, database.ChatMessageRoleUser, database.ChatMessageVisibilityBoth, false, "follow-up")
+
+		got, err := db.GetChatMessagesForPromptByChatID(ctx, chat.ID)
+		require.NoError(t, err)
+
+		gotIDs := msgIDs(got)
+		require.Contains(t, gotIDs, summary.ID, "real summary must be included")
+		require.NotContains(t, gotIDs, compressedTool.ID,
+			"compressed tool result must not be included")
+		require.Contains(t, gotIDs, postUser.ID)
+	})
+}
+
+func TestGetWorkspaceBuildMetricsByResourceID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("OK", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+
+		org := dbgen.Organization(t, db, database.Organization{})
+		user := dbgen.User(t, db, database.User{})
+		tmpl := dbgen.Template(t, db, database.Template{
+			OrganizationID: org.ID,
+			CreatedBy:      user.ID,
+		})
+		tv := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+			OrganizationID: org.ID,
+			TemplateID:     uuid.NullUUID{UUID: tmpl.ID, Valid: true},
+			CreatedBy:      user.ID,
+		})
+		ws := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OrganizationID:   org.ID,
+			TemplateID:       tmpl.ID,
+			OwnerID:          user.ID,
+			AutomaticUpdates: database.AutomaticUpdatesNever,
+		})
+		job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			OrganizationID: org.ID,
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       ws.ID,
+			TemplateVersionID: tv.ID,
+			JobID:             job.ID,
+			InitiatorID:       user.ID,
+		})
+		resource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID: job.ID,
+		})
+
+		parentReadyAt := dbtime.Now()
+		parentStartedAt := parentReadyAt.Add(-time.Second)
+		_ = dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID:     resource.ID,
+			StartedAt:      sql.NullTime{Time: parentStartedAt, Valid: true},
+			ReadyAt:        sql.NullTime{Time: parentReadyAt, Valid: true},
+			LifecycleState: database.WorkspaceAgentLifecycleStateReady,
+		})
+
+		row, err := db.GetWorkspaceBuildMetricsByResourceID(ctx, resource.ID)
+		require.NoError(t, err)
+		require.True(t, row.AllAgentsReady)
+		require.True(t, parentReadyAt.Equal(row.LastAgentReadyAt))
+		require.Equal(t, "success", row.WorstStatus)
+	})
+
+	t.Run("SubAgentExcluded", func(t *testing.T) {
+		t.Parallel()
+
+		db, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+
+		org := dbgen.Organization(t, db, database.Organization{})
+		user := dbgen.User(t, db, database.User{})
+		tmpl := dbgen.Template(t, db, database.Template{
+			OrganizationID: org.ID,
+			CreatedBy:      user.ID,
+		})
+		tv := dbgen.TemplateVersion(t, db, database.TemplateVersion{
+			OrganizationID: org.ID,
+			TemplateID:     uuid.NullUUID{UUID: tmpl.ID, Valid: true},
+			CreatedBy:      user.ID,
+		})
+		ws := dbgen.Workspace(t, db, database.WorkspaceTable{
+			OrganizationID:   org.ID,
+			TemplateID:       tmpl.ID,
+			OwnerID:          user.ID,
+			AutomaticUpdates: database.AutomaticUpdatesNever,
+		})
+		job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
+			OrganizationID: org.ID,
+			Type:           database.ProvisionerJobTypeWorkspaceBuild,
+		})
+		_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
+			WorkspaceID:       ws.ID,
+			TemplateVersionID: tv.ID,
+			JobID:             job.ID,
+			InitiatorID:       user.ID,
+		})
+		resource := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
+			JobID: job.ID,
+		})
+
+		parentReadyAt := dbtime.Now()
+		parentStartedAt := parentReadyAt.Add(-time.Second)
+		parentAgent := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
+			ResourceID:     resource.ID,
+			StartedAt:      sql.NullTime{Time: parentStartedAt, Valid: true},
+			ReadyAt:        sql.NullTime{Time: parentReadyAt, Valid: true},
+			LifecycleState: database.WorkspaceAgentLifecycleStateReady,
+		})
+
+		// Sub-agent with ready_at 1 hour later should be excluded.
+		subAgentReadyAt := parentReadyAt.Add(time.Hour)
+		subAgentStartedAt := subAgentReadyAt.Add(-time.Second)
+		_ = dbgen.WorkspaceSubAgent(t, db, parentAgent, database.WorkspaceAgent{
+			StartedAt:      sql.NullTime{Time: subAgentStartedAt, Valid: true},
+			ReadyAt:        sql.NullTime{Time: subAgentReadyAt, Valid: true},
+			LifecycleState: database.WorkspaceAgentLifecycleStateReady,
+		})
+
+		row, err := db.GetWorkspaceBuildMetricsByResourceID(ctx, resource.ID)
+		require.NoError(t, err)
+		require.True(t, row.AllAgentsReady)
+		// LastAgentReadyAt should be the parent's, not the sub-agent's.
+		require.True(t, parentReadyAt.Equal(row.LastAgentReadyAt))
+		require.Equal(t, "success", row.WorstStatus)
+	})
+}
+
+// TestUpsertAISeats verifies 'UpsertAISeatState' only returns true when a new
+// row is inserted.
+func TestUpsertAISeats(t *testing.T) {
+	t.Parallel()
+
+	sqlDB := testSQLDB(t)
+	err := migrations.Up(sqlDB)
+	require.NoError(t, err)
+	db := database.New(sqlDB)
+	ctx := testutil.Context(t, testutil.WaitShort)
+
+	now := dbtime.Now()
+
+	user := dbgen.User(t, db, database.User{})
+	newRow, err := db.UpsertAISeatState(ctx, database.UpsertAISeatStateParams{
+		UserID:        user.ID,
+		FirstUsedAt:   now.Add(time.Hour * -24),
+		LastEventType: database.AiSeatUsageReasonTask,
+	})
+	require.NoError(t, err)
+	require.True(t, newRow)
+
+	alreadyExists, err := db.UpsertAISeatState(ctx, database.UpsertAISeatStateParams{
+		UserID:        user.ID,
+		FirstUsedAt:   now.Add(time.Hour * -23),
+		LastEventType: database.AiSeatUsageReasonTask,
+	})
+	require.NoError(t, err)
+	require.False(t, alreadyExists)
+
+	alreadyExists, err = db.UpsertAISeatState(ctx, database.UpsertAISeatStateParams{
+		UserID:        user.ID,
+		FirstUsedAt:   now,
+		LastEventType: database.AiSeatUsageReasonTask,
+	})
+	require.NoError(t, err)
+	require.False(t, alreadyExists)
+}
+
+func TestGetPRInsights(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	// setupChatInfra creates a fresh database with a user, chat provider,
+	// and model config. Returns the store, user ID, and model config ID.
+	setupChatInfra := func(t *testing.T) (database.Store, uuid.UUID, uuid.UUID, uuid.UUID) {
+		t.Helper()
+		store, _ := dbtestutil.NewDB(t)
+		ctx := context.Background()
+		org := dbgen.Organization(t, store, database.Organization{})
+		user := dbgen.User(t, store, database.User{})
+		dbgen.OrganizationMember(t, store, database.OrganizationMember{UserID: user.ID, OrganizationID: org.ID})
+
+		_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+			Provider:             "anthropic",
+			DisplayName:          "Anthropic",
+			APIKey:               "test-key",
+			Enabled:              true,
+			CentralApiKeyEnabled: true,
+		})
+		require.NoError(t, err)
+
+		mc, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+			Provider:             "anthropic",
+			Model:                "claude-4",
+			DisplayName:          "Claude 4",
+			CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+			UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+			Enabled:              true,
+			IsDefault:            true,
+			ContextLimit:         128000,
+			CompressionThreshold: 80,
+			Options:              json.RawMessage(`{}`),
+		})
+		require.NoError(t, err)
+
+		return store, user.ID, mc.ID, org.ID
+	}
+
+	createChat := func(t *testing.T, store database.Store, userID, mcID, orgID uuid.UUID, title string) database.Chat {
+		t.Helper()
+		chat, err := store.InsertChat(context.Background(), database.InsertChatParams{
+			OrganizationID:    orgID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           userID,
+			LastModelConfigID: mcID,
+			Title:             title,
+		})
+		require.NoError(t, err)
+		return chat
+	}
+
+	// insertCostMessage inserts a single assistant message with the
+	// given total_cost_micros value.
+	insertCostMessage := func(t *testing.T, store database.Store, chatID, userID, mcID uuid.UUID, costMicros int64) {
+		t.Helper()
+		_, err := store.InsertChatMessages(context.Background(), database.InsertChatMessagesParams{
+			ChatID:              chatID,
+			CreatedBy:           []uuid.UUID{userID},
+			ModelConfigID:       []uuid.UUID{mcID},
+			Role:                []database.ChatMessageRole{database.ChatMessageRoleAssistant},
+			Content:             []string{`[{"type":"text","text":"hello"}]`},
+			ContentVersion:      []int16{1},
+			Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth},
+			InputTokens:         []int64{0},
+			OutputTokens:        []int64{0},
+			TotalTokens:         []int64{0},
+			ReasoningTokens:     []int64{0},
+			CacheCreationTokens: []int64{0},
+			CacheReadTokens:     []int64{0},
+			ContextLimit:        []int64{0},
+			Compressed:          []bool{false},
+			TotalCostMicros:     []int64{costMicros},
+			RuntimeMs:           []int64{0},
+		})
+		require.NoError(t, err)
+	}
+
+	// linkPR associates a chat with a pull request via
+	// UpsertChatDiffStatus.
+	linkPR := func(t *testing.T, store database.Store, chatID uuid.UUID, prURL, state, title string, additions, deletions, changed int32) {
+		t.Helper()
+		now := time.Now()
+		_, err := store.UpsertChatDiffStatus(context.Background(), database.UpsertChatDiffStatusParams{
+			ChatID:           chatID,
+			Url:              sql.NullString{String: prURL, Valid: true},
+			PullRequestState: sql.NullString{String: state, Valid: true},
+			PullRequestTitle: title,
+			Additions:        additions,
+			Deletions:        deletions,
+			ChangedFiles:     changed,
+			RefreshedAt:      now,
+			StaleAt:          now.Add(time.Hour),
+		})
+		require.NoError(t, err)
+	}
+
+	startDate := time.Now().Add(-24 * time.Hour)
+	endDate := time.Now().Add(time.Hour)
+	noOwner := uuid.NullUUID{}
+
+	t.Run("MultipleChatsSamePR_CostSummed", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		chatA := createChat(t, store, userID, mcID, orgID, "chat-A")
+		insertCostMessage(t, store, chatA.ID, userID, mcID, 5_000_000) // $5
+
+		chatB := createChat(t, store, userID, mcID, orgID, "chat-B")
+		insertCostMessage(t, store, chatB.ID, userID, mcID, 3_000_000) // $3
+
+		prURL := "https://github.com/org/repo/pull/123"
+		linkPR(t, store, chatA.ID, prURL, "merged", "fix: something", 100, 20, 5)
+		linkPR(t, store, chatB.ID, prURL, "merged", "fix: something", 100, 20, 5)
+
+		// Both chats reference the same PR. The pr_costs CTE sums
+		// cost across all chats for the same PR URL, so the total
+		// should be $5 + $3 = $8. The PR itself is counted once.
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), summary.TotalPrsCreated)
+		assert.Equal(t, int64(8_000_000), summary.TotalCostMicros)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+		assert.Equal(t, int64(8_000_000), recent[0].CostMicros)
+	})
+
+	t.Run("DifferentPRs_NoDuplication", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		chatA := createChat(t, store, userID, mcID, orgID, "chat-A")
+		insertCostMessage(t, store, chatA.ID, userID, mcID, 5_000_000)
+		linkPR(t, store, chatA.ID, "https://github.com/org/repo/pull/1", "merged", "feat: A", 50, 10, 2)
+
+		chatB := createChat(t, store, userID, mcID, orgID, "chat-B")
+		insertCostMessage(t, store, chatB.ID, userID, mcID, 3_000_000)
+		linkPR(t, store, chatB.ID, "https://github.com/org/repo/pull/2", "open", "feat: B", 80, 30, 4)
+
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), summary.TotalPrsCreated)
+		assert.Equal(t, int64(8_000_000), summary.TotalCostMicros) // $5 + $3
+		assert.Equal(t, int64(1), summary.TotalPrsMerged)
+
+		// RecentPRs ordered by created_at DESC: chatB is newer.
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 2)
+		// Costs must not be mixed across different PRs.
+		assert.Equal(t, int64(3_000_000), recent[0].CostMicros) // PR 2 (newer)
+		assert.Equal(t, int64(5_000_000), recent[1].CostMicros) // PR 1 (older)
+	})
+
+	// createChildChat creates a chat with ParentChatID and RootChatID
+	// set, simulating a subagent/child chat in a tree.
+	createChildChat := func(t *testing.T, store database.Store, userID, mcID, orgID, parentID, rootID uuid.UUID, title string) database.Chat {
+		t.Helper()
+		chat, err := store.InsertChat(context.Background(), database.InsertChatParams{
+			OrganizationID:    orgID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           userID,
+			LastModelConfigID: mcID,
+			Title:             title,
+			ParentChatID:      uuid.NullUUID{UUID: parentID, Valid: true},
+			RootChatID:        uuid.NullUUID{UUID: rootID, Valid: true},
+		})
+		require.NoError(t, err)
+		return chat
+	}
+
+	t.Run("DuplicatePRUrl_CountedOnce", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		prURL := "https://github.com/org/repo/pull/99"
+		for i := 0; i < 3; i++ {
+			chat := createChat(t, store, userID, mcID, orgID, fmt.Sprintf("chat-%d", i))
+			insertCostMessage(t, store, chat.ID, userID, mcID, 1_000_000)
+			linkPR(t, store, chat.ID, prURL, "merged", "fix: same PR", 40, 10, 3)
+		}
+
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), summary.TotalPrsCreated)
+		assert.Equal(t, int64(1), summary.TotalPrsMerged)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+	})
+
+	t.Run("ChildChatCostsIncluded", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Parent chat with a $5 cost.
+		parent := createChat(t, store, userID, mcID, orgID, "parent-chat")
+		insertCostMessage(t, store, parent.ID, userID, mcID, 5_000_000)
+
+		// Two child chats (subagents) with $2 each. Only the parent
+		// has a chat_diff_statuses entry, but the children's costs
+		// should be included via the tree join.
+		child1 := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child-1")
+		insertCostMessage(t, store, child1.ID, userID, mcID, 2_000_000)
+
+		child2 := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child-2")
+		insertCostMessage(t, store, child2.ID, userID, mcID, 2_000_000)
+
+		prURL := "https://github.com/org/repo/pull/42"
+		linkPR(t, store, parent.ID, prURL, "merged", "feat: tree cost", 60, 15, 3)
+
+		// Summary should reflect $5 + $2 + $2 = $9 total.
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), summary.TotalPrsCreated)
+		assert.Equal(t, int64(1), summary.TotalPrsMerged)
+		assert.Equal(t, int64(9_000_000), summary.TotalCostMicros)
+
+		// RecentPRs should return 1 row with the full tree cost.
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+		assert.Equal(t, int64(9_000_000), recent[0].CostMicros)
+	})
+
+	t.Run("SiblingPRs_NoCrossContamination", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Parent chat with $10 orchestration cost.
+		parent := createChat(t, store, userID, mcID, orgID, "parent")
+		insertCostMessage(t, store, parent.ID, userID, mcID, 10_000_000)
+
+		// Child C1 ($5) creates PR1.
+		c1 := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child-1")
+		insertCostMessage(t, store, c1.ID, userID, mcID, 5_000_000)
+		linkPR(t, store, c1.ID, "https://github.com/org/repo/pull/10", "merged", "feat: PR1", 50, 10, 2)
+
+		// Child C2 ($3) creates PR2.
+		c2 := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child-2")
+		insertCostMessage(t, store, c2.ID, userID, mcID, 3_000_000)
+		linkPR(t, store, c2.ID, "https://github.com/org/repo/pull/11", "open", "feat: PR2", 30, 5, 1)
+
+		// With direct-branch attribution:
+		//   PR1 cost = C1's own cost = $5 (parent NOT included — only children of C1)
+		//   PR2 cost = C2's own cost = $3
+		//   Total = $8 (no double-counting of parent or siblings)
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), summary.TotalPrsCreated)
+		assert.Equal(t, int64(8_000_000), summary.TotalCostMicros)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 2)
+		// PR2 (newer) = $3, PR1 (older) = $5.
+		assert.Equal(t, int64(3_000_000), recent[0].CostMicros)
+		assert.Equal(t, int64(5_000_000), recent[1].CostMicros)
+	})
+
+	t.Run("ParentAndChildDifferentPRs_NoCrossContamination", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Parent P ($10) creates PR1.
+		parent := createChat(t, store, userID, mcID, orgID, "parent")
+		insertCostMessage(t, store, parent.ID, userID, mcID, 10_000_000)
+		linkPR(t, store, parent.ID, "https://github.com/org/repo/pull/20", "merged", "feat: parent PR", 80, 20, 4)
+
+		// Child C1 ($5) has its own PR2. Because C1 has its own
+		// chat_diff_statuses entry, its cost should NOT be included
+		// under PR1 — it belongs to PR2 only.
+		c1 := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child-1")
+		insertCostMessage(t, store, c1.ID, userID, mcID, 5_000_000)
+		linkPR(t, store, c1.ID, "https://github.com/org/repo/pull/21", "open", "feat: child PR", 30, 5, 1)
+
+		// Child C2 ($2) has NO cds entry — pure subagent.
+		// Its cost should be included under PR1 (the parent's PR).
+		c2 := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child-2")
+		insertCostMessage(t, store, c2.ID, userID, mcID, 2_000_000)
+
+		// PR1 cost = parent ($10) + C2 ($2) = $12 (C1 excluded)
+		// PR2 cost = C1 ($5)
+		// Total = $17 (actual spend: $10 + $5 + $2 = $17)
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), summary.TotalPrsCreated)
+		assert.Equal(t, int64(17_000_000), summary.TotalCostMicros)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 2)
+		// PR2/C1 (newer) = $5, PR1/parent (older) = $12.
+		assert.Equal(t, int64(5_000_000), recent[0].CostMicros)
+		assert.Equal(t, int64(12_000_000), recent[1].CostMicros)
+	})
+
+	t.Run("EmptyURLNotCollapsed", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Two chats with empty-string URLs should be treated as
+		// separate PRs (NULLIF converts '' to NULL, falling back
+		// to c.id::text).
+		chatX := createChat(t, store, userID, mcID, orgID, "chat-X")
+		insertCostMessage(t, store, chatX.ID, userID, mcID, 4_000_000)
+		linkPR(t, store, chatX.ID, "", "open", "draft: X", 10, 2, 1)
+
+		chatY := createChat(t, store, userID, mcID, orgID, "chat-Y")
+		insertCostMessage(t, store, chatY.ID, userID, mcID, 6_000_000)
+		linkPR(t, store, chatY.ID, "", "merged", "draft: Y", 20, 5, 2)
+
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(2), summary.TotalPrsCreated)
+		assert.Equal(t, int64(10_000_000), summary.TotalCostMicros)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 2)
+	})
+
+	t.Run("ParentAndChildSameURL_DedupedWithCombinedCost", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Parent P ($10) links to a PR.
+		parent := createChat(t, store, userID, mcID, orgID, "parent")
+		insertCostMessage(t, store, parent.ID, userID, mcID, 10_000_000)
+
+		// Child C ($5) also links to the same PR URL.
+		child := createChildChat(t, store, userID, mcID, orgID, parent.ID, parent.ID, "child")
+		insertCostMessage(t, store, child.ID, userID, mcID, 5_000_000)
+
+		prURL := "https://github.com/org/repo/pull/50"
+		linkPR(t, store, parent.ID, prURL, "merged", "feat: shared PR", 70, 15, 3)
+		linkPR(t, store, child.ID, prURL, "merged", "feat: shared PR", 70, 15, 3)
+
+		// Both parent and child have cds entries for the same URL.
+		// The PR should be counted once with combined cost $10 + $5 = $15.
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), summary.TotalPrsCreated)
+		assert.Equal(t, int64(15_000_000), summary.TotalCostMicros)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+		assert.Equal(t, int64(15_000_000), recent[0].CostMicros)
+	})
+
+	t.Run("ZeroCostChat_StillCounted", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// A chat linked to a PR but with NO chat_messages at all.
+		// The PR should still appear with zero cost.
+		chat := createChat(t, store, userID, mcID, orgID, "zero-cost-chat")
+		linkPR(t, store, chat.ID, "https://github.com/org/repo/pull/60", "open", "feat: no messages", 25, 5, 2)
+
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), summary.TotalPrsCreated)
+		assert.Equal(t, int64(0), summary.TotalCostMicros)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+		assert.Equal(t, int64(0), recent[0].CostMicros)
+	})
+
+	t.Run("BlankDisplayNameFallsBackToModel", func(t *testing.T) {
+		t.Parallel()
+		store, userID, _, orgID := setupChatInfra(t)
+
+		const modelName = "claude-4.1"
+		emptyDisplayModel, err := store.InsertChatModelConfig(context.Background(), database.InsertChatModelConfigParams{
+			Provider:             "anthropic",
+			Model:                modelName,
+			DisplayName:          "",
+			CreatedBy:            uuid.NullUUID{UUID: userID, Valid: true},
+			UpdatedBy:            uuid.NullUUID{UUID: userID, Valid: true},
+			Enabled:              true,
+			IsDefault:            false,
+			ContextLimit:         128000,
+			CompressionThreshold: 80,
+			Options:              json.RawMessage(`{}`),
+		})
+		require.NoError(t, err)
+
+		chat := createChat(t, store, userID, emptyDisplayModel.ID, orgID, "chat-empty-display-name")
+		insertCostMessage(t, store, chat.ID, userID, emptyDisplayModel.ID, 1_000_000)
+		linkPR(t, store, chat.ID, "https://github.com/org/repo/pull/72", "merged", "fix: blank display name", 10, 2, 1)
+
+		byModel, err := store.GetPRInsightsPerModel(context.Background(), database.GetPRInsightsPerModelParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, byModel, 1)
+		assert.Equal(t, modelName, byModel[0].DisplayName)
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		require.Len(t, recent, 1)
+		assert.Equal(t, modelName, recent[0].ModelDisplayName)
+	})
+
+	t.Run("MergedCostMicros_OnlyCountsMerged", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Merged PR with $5 cost.
+		chatMerged := createChat(t, store, userID, mcID, orgID, "chat-merged")
+		insertCostMessage(t, store, chatMerged.ID, userID, mcID, 5_000_000)
+		linkPR(t, store, chatMerged.ID, "https://github.com/org/repo/pull/70", "merged", "fix: merged", 40, 10, 2)
+
+		// Open PR with $3 cost.
+		chatOpen := createChat(t, store, userID, mcID, orgID, "chat-open")
+		insertCostMessage(t, store, chatOpen.ID, userID, mcID, 3_000_000)
+		linkPR(t, store, chatOpen.ID, "https://github.com/org/repo/pull/71", "open", "feat: open", 20, 5, 1)
+
+		// TotalCostMicros includes both ($5 + $3 = $8), but
+		// MergedCostMicros only includes the merged PR ($5).
+		summary, err := store.GetPRInsightsSummary(context.Background(), database.GetPRInsightsSummaryParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, int64(8_000_000), summary.TotalCostMicros)
+		assert.Equal(t, int64(5_000_000), summary.MergedCostMicros)
+	})
+
+	t.Run("AllPRsReturnedWithSafetyCap", func(t *testing.T) {
+		t.Parallel()
+		store, userID, mcID, orgID := setupChatInfra(t)
+
+		// Create 25 distinct PRs — more than the old LIMIT 20 — and
+		// verify all are returned.
+		const prCount = 25
+		for i := range prCount {
+			chat := createChat(t, store, userID, mcID, orgID, fmt.Sprintf("chat-%d", i))
+			insertCostMessage(t, store, chat.ID, userID, mcID, 1_000_000)
+			linkPR(t, store, chat.ID,
+				fmt.Sprintf("https://github.com/org/repo/pull/%d", 100+i),
+				"merged", fmt.Sprintf("fix: pr-%d", i), 10, 2, 1)
+		}
+
+		recent, err := store.GetPRInsightsPullRequests(context.Background(), database.GetPRInsightsPullRequestsParams{
+			StartDate: startDate,
+			EndDate:   endDate,
+			OwnerID:   noOwner,
+		})
+		require.NoError(t, err)
+		assert.Len(t, recent, prCount, "all PRs within the date range should be returned")
+	})
+}
+
+func TestChatPinOrderQueries(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	setup := func(t *testing.T) (context.Context, database.Store, uuid.UUID, uuid.UUID, uuid.UUID) {
+		t.Helper()
+
+		db, _ := dbtestutil.NewDB(t)
+		org := dbgen.Organization(t, db, database.Organization{})
+		owner := dbgen.User(t, db, database.User{})
+		dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: owner.ID, OrganizationID: org.ID})
+
+		// Use background context for fixture setup so the
+		// timed test context doesn't tick during DB init.
+		bg := context.Background()
+		_, err := db.InsertChatProvider(bg, database.InsertChatProviderParams{
+			Provider:             "openai",
+			DisplayName:          "OpenAI",
+			APIKey:               "test-key",
+			Enabled:              true,
+			CentralApiKeyEnabled: true,
+		})
+		require.NoError(t, err)
+
+		modelCfg, err := db.InsertChatModelConfig(bg, database.InsertChatModelConfigParams{
+			Provider:             "openai",
+			Model:                "test-model",
+			DisplayName:          "Test Model",
+			CreatedBy:            uuid.NullUUID{UUID: owner.ID, Valid: true},
+			UpdatedBy:            uuid.NullUUID{UUID: owner.ID, Valid: true},
+			Enabled:              true,
+			IsDefault:            true,
+			ContextLimit:         128000,
+			CompressionThreshold: 80,
+			Options:              json.RawMessage(`{}`),
+		})
+		require.NoError(t, err)
+
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		return ctx, db, owner.ID, modelCfg.ID, org.ID
+	}
+
+	createChat := func(t *testing.T, ctx context.Context, db database.Store, ownerID, modelCfgID, orgID uuid.UUID, title string) database.Chat {
+		t.Helper()
+
+		chat, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    orgID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           ownerID,
+			LastModelConfigID: modelCfgID,
+			Title:             title,
+		})
+		require.NoError(t, err)
+		return chat
+	}
+
+	requirePinOrders := func(t *testing.T, ctx context.Context, db database.Store, want map[uuid.UUID]int32) {
+		t.Helper()
+
+		for chatID, wantPinOrder := range want {
+			chat, err := db.GetChatByID(ctx, chatID)
+			require.NoError(t, err)
+			require.EqualValues(t, wantPinOrder, chat.PinOrder)
+		}
+	}
+
+	t.Run("PinChatByIDAppendsWithinOwner", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, db, ownerID, modelCfgID, orgID := setup(t)
+		first := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "first")
+		second := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "second")
+		third := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "third")
+
+		otherOwner := dbgen.User(t, db, database.User{})
+		other := createChat(t, ctx, db, otherOwner.ID, modelCfgID, orgID, "other-owner")
+
+		require.NoError(t, db.PinChatByID(ctx, other.ID))
+		require.NoError(t, db.PinChatByID(ctx, first.ID))
+		require.NoError(t, db.PinChatByID(ctx, second.ID))
+		require.NoError(t, db.PinChatByID(ctx, third.ID))
+
+		requirePinOrders(t, ctx, db, map[uuid.UUID]int32{
+			first.ID:  1,
+			second.ID: 2,
+			third.ID:  3,
+			other.ID:  1,
+		})
+	})
+
+	t.Run("UpdateChatPinOrderShiftsNeighborsAndClamps", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, db, ownerID, modelCfgID, orgID := setup(t)
+		first := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "first")
+		second := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "second")
+		third := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "third")
+
+		for _, chat := range []database.Chat{first, second, third} {
+			require.NoError(t, db.PinChatByID(ctx, chat.ID))
+		}
+
+		require.NoError(t, db.UpdateChatPinOrder(ctx, database.UpdateChatPinOrderParams{
+			ID:       third.ID,
+			PinOrder: 1,
+		}))
+		requirePinOrders(t, ctx, db, map[uuid.UUID]int32{
+			first.ID:  2,
+			second.ID: 3,
+			third.ID:  1,
+		})
+
+		require.NoError(t, db.UpdateChatPinOrder(ctx, database.UpdateChatPinOrderParams{
+			ID:       third.ID,
+			PinOrder: 99,
+		}))
+		requirePinOrders(t, ctx, db, map[uuid.UUID]int32{
+			first.ID:  1,
+			second.ID: 2,
+			third.ID:  3,
+		})
+	})
+
+	t.Run("UnpinChatByIDCompactsPinnedChats", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, db, ownerID, modelCfgID, orgID := setup(t)
+		first := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "first")
+		second := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "second")
+		third := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "third")
+
+		for _, chat := range []database.Chat{first, second, third} {
+			require.NoError(t, db.PinChatByID(ctx, chat.ID))
+		}
+
+		require.NoError(t, db.UnpinChatByID(ctx, second.ID))
+		requirePinOrders(t, ctx, db, map[uuid.UUID]int32{
+			first.ID:  1,
+			second.ID: 0,
+			third.ID:  2,
+		})
+	})
+
+	t.Run("ArchiveClearsPinAndExcludesFromRanking", func(t *testing.T) {
+		t.Parallel()
+
+		ctx, db, ownerID, modelCfgID, orgID := setup(t)
+		first := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "first")
+		second := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "second")
+		third := createChat(t, ctx, db, ownerID, modelCfgID, orgID, "third")
+
+		for _, chat := range []database.Chat{first, second, third} {
+			require.NoError(t, db.PinChatByID(ctx, chat.ID))
+		}
+
+		// Archive the middle pin.
+		_, err := db.ArchiveChatByID(ctx, second.ID)
+		require.NoError(t, err)
+
+		// Archived chat should have pin_order cleared. Remaining
+		// pins keep their original positions; the next mutation
+		// compacts via ROW_NUMBER().
+		requirePinOrders(t, ctx, db, map[uuid.UUID]int32{
+			first.ID:  1,
+			second.ID: 0,
+			third.ID:  3,
+		})
+
+		// Reorder among remaining active pins — archived chat
+		// should not interfere with position calculation.
+		require.NoError(t, db.UpdateChatPinOrder(ctx, database.UpdateChatPinOrderParams{
+			ID:       third.ID,
+			PinOrder: 1,
+		}))
+		// After reorder, ROW_NUMBER() compacts the sequence.
+		requirePinOrders(t, ctx, db, map[uuid.UUID]int32{
+			first.ID:  2,
+			second.ID: 0,
+			third.ID:  1,
+		})
+	})
+}
+
+func TestChatLabels(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	sqlDB := testSQLDB(t)
+	err := migrations.Up(sqlDB)
+	require.NoError(t, err)
+	db := database.New(sqlDB)
+
+	ctx := testutil.Context(t, testutil.WaitMedium)
+	owner := dbgen.User(t, db, database.User{})
+	org := dbgen.Organization(t, db, database.Organization{})
+	dbgen.OrganizationMember(t, db, database.OrganizationMember{UserID: owner.ID, OrganizationID: org.ID})
+
+	_, err = db.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             "openai",
+		DisplayName:          "OpenAI",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := db.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "openai",
+		Model:                "test-model",
+		DisplayName:          "Test Model",
+		CreatedBy:            uuid.NullUUID{UUID: owner.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: owner.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	t.Run("CreateWithLabels", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		labels := database.StringMap{"github.repo": "coder/coder", "env": "prod"}
+		labelsJSON, err := json.Marshal(labels)
+		require.NoError(t, err)
+
+		chat, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           owner.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             "labeled-chat",
+			Labels: pqtype.NullRawMessage{
+				RawMessage: labelsJSON,
+				Valid:      true,
+			},
+		})
+		require.NoError(t, err)
+		require.Equal(t, database.StringMap{"github.repo": "coder/coder", "env": "prod"}, chat.Labels)
+
+		// Read back and verify.
+		fetched, err := db.GetChatByID(ctx, chat.ID)
+		require.NoError(t, err)
+		require.Equal(t, chat.Labels, fetched.Labels)
+	})
+
+	t.Run("CreateWithoutLabels", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		chat, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           owner.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             "no-labels-chat",
+		})
+		require.NoError(t, err)
+		// Default should be an empty map, not nil.
+		require.NotNil(t, chat.Labels)
+		require.Empty(t, chat.Labels)
+	})
+
+	t.Run("UpdateLabels", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		chat, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           owner.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             "update-labels-chat",
+		})
+		require.NoError(t, err)
+		require.Empty(t, chat.Labels)
+
+		// Set labels.
+		newLabels, err := json.Marshal(database.StringMap{"team": "backend"})
+		require.NoError(t, err)
+		updated, err := db.UpdateChatLabelsByID(ctx, database.UpdateChatLabelsByIDParams{
+			ID:     chat.ID,
+			Labels: newLabels,
+		})
+		require.NoError(t, err)
+		require.Equal(t, database.StringMap{"team": "backend"}, updated.Labels)
+
+		// Title should be unchanged.
+		require.Equal(t, "update-labels-chat", updated.Title)
+
+		// Clear labels by setting empty object.
+		emptyLabels, err := json.Marshal(database.StringMap{})
+		require.NoError(t, err)
+		cleared, err := db.UpdateChatLabelsByID(ctx, database.UpdateChatLabelsByIDParams{
+			ID:     chat.ID,
+			Labels: emptyLabels,
+		})
+		require.NoError(t, err)
+		require.Empty(t, cleared.Labels)
+	})
+
+	t.Run("UpdateTitleDoesNotAffectLabels", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		labels := database.StringMap{"pr": "1234"}
+		labelsJSON, err := json.Marshal(labels)
+		require.NoError(t, err)
+
+		chat, err := db.InsertChat(ctx, database.InsertChatParams{
+			OrganizationID:    org.ID,
+			Status:            database.ChatStatusWaiting,
+			OwnerID:           owner.ID,
+			LastModelConfigID: modelCfg.ID,
+			Title:             "original-title",
+			Labels: pqtype.NullRawMessage{
+				RawMessage: labelsJSON,
+				Valid:      true,
+			},
+		})
+		require.NoError(t, err)
+
+		// Update title only — labels must survive.
+		updated, err := db.UpdateChatByID(ctx, database.UpdateChatByIDParams{
+			ID:    chat.ID,
+			Title: "new-title",
+		})
+		require.NoError(t, err)
+		require.Equal(t, "new-title", updated.Title)
+		require.Equal(t, database.StringMap{"pr": "1234"}, updated.Labels)
+	})
+
+	t.Run("FilterByLabels", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		// Create three chats with different labels.
+		for _, tc := range []struct {
+			title  string
+			labels database.StringMap
+		}{
+			{"filter-a", database.StringMap{"env": "prod", "team": "backend"}},
+			{"filter-b", database.StringMap{"env": "prod", "team": "frontend"}},
+			{"filter-c", database.StringMap{"env": "staging"}},
+		} {
+			labelsJSON, err := json.Marshal(tc.labels)
+			require.NoError(t, err)
+			_, err = db.InsertChat(ctx, database.InsertChatParams{
+				OrganizationID:    org.ID,
+				Status:            database.ChatStatusWaiting,
+				OwnerID:           owner.ID,
+				LastModelConfigID: modelCfg.ID, Title: tc.title,
+				Labels: pqtype.NullRawMessage{
+					RawMessage: labelsJSON,
+					Valid:      true,
+				},
+			})
+			require.NoError(t, err)
+		}
+
+		// Filter by env=prod — should match filter-a and filter-b.
+		filterJSON, err := json.Marshal(database.StringMap{"env": "prod"})
+		require.NoError(t, err)
+		results, err := db.GetChats(ctx, database.GetChatsParams{
+			OwnerID: owner.ID,
+			LabelFilter: pqtype.NullRawMessage{
+				RawMessage: filterJSON,
+				Valid:      true,
+			},
+		})
+		require.NoError(t, err)
+
+		titles := make([]string, 0, len(results))
+		for _, c := range results {
+			titles = append(titles, c.Chat.Title)
+		}
+		require.Contains(t, titles, "filter-a")
+		require.Contains(t, titles, "filter-b")
+		require.NotContains(t, titles, "filter-c")
+
+		// Filter by env=prod AND team=backend — should match only filter-a.
+		filterJSON, err = json.Marshal(database.StringMap{"env": "prod", "team": "backend"})
+		require.NoError(t, err)
+		results, err = db.GetChats(ctx, database.GetChatsParams{
+			OwnerID: owner.ID,
+			LabelFilter: pqtype.NullRawMessage{
+				RawMessage: filterJSON,
+				Valid:      true,
+			},
+		})
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		require.Equal(t, "filter-a", results[0].Chat.Title)
+		// No filter — should return all chats for this owner.
+		allChats, err := db.GetChats(ctx, database.GetChatsParams{
+			OwnerID: owner.ID,
+		})
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(allChats), 3)
+	})
+}
+
+func TestDeleteChatDebugDataAfterMessageIDIncludesTriggeredRuns(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitMedium)
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+
+	providerName := "openai"
+	modelName := "debug-model-" + uuid.NewString()
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             providerName,
+		DisplayName:          "Debug Provider",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             providerName,
+		Model:                modelName,
+		DisplayName:          "Debug Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chat, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-debug-rollback-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	const cutoff int64 = 50
+
+	affectedRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: cutoff + 10, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: cutoff - 5, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+	})
+	require.NoError(t, err)
+
+	_, err = store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      affectedRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+	})
+	require.NoError(t, err)
+
+	affectedByStepHistoryTipRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: cutoff - 1, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: cutoff - 1, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+	})
+	require.NoError(t, err)
+
+	_, err = store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:               affectedByStepHistoryTipRun.ID,
+		ChatID:              chat.ID,
+		StepNumber:          1,
+		Operation:           "stream",
+		Status:              "interrupted",
+		HistoryTipMessageID: sql.NullInt64{Int64: cutoff + 7, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// affectedByStepAssistantMsgRun: run-level fields are at/below
+	// the cutoff, but its step has assistant_message_id above the
+	// cutoff.  This exercises the step.assistant_message_id > cutoff
+	// branch of the UNION independently of history_tip_message_id.
+	affectedByStepAssistantMsgRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: cutoff - 2, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: cutoff - 2, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+	})
+	require.NoError(t, err)
+
+	_, err = store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:              affectedByStepAssistantMsgRun.ID,
+		ChatID:             chat.ID,
+		StepNumber:         1,
+		Operation:          "stream",
+		Status:             "completed",
+		AssistantMessageID: sql.NullInt64{Int64: cutoff + 3, Valid: true},
+	})
+	require.NoError(t, err)
+
+	unaffectedRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: cutoff, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: cutoff, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+	})
+	require.NoError(t, err)
+
+	unaffectedStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:              unaffectedRun.ID,
+		ChatID:             chat.ID,
+		StepNumber:         1,
+		Operation:          "stream",
+		Status:             "in_progress",
+		AssistantMessageID: sql.NullInt64{Int64: cutoff, Valid: true},
+	})
+	require.NoError(t, err)
+
+	deletedRows, err := store.DeleteChatDebugDataAfterMessageID(ctx, database.DeleteChatDebugDataAfterMessageIDParams{
+		ChatID:    chat.ID,
+		MessageID: cutoff,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 3, deletedRows)
+
+	_, err = store.GetChatDebugRunByID(ctx, affectedRun.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+
+	affectedSteps, err := store.GetChatDebugStepsByRunID(ctx, affectedRun.ID)
+	require.NoError(t, err)
+	require.Empty(t, affectedSteps)
+
+	_, err = store.GetChatDebugRunByID(ctx, affectedByStepHistoryTipRun.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+
+	affectedByStepHistoryTipSteps, err := store.GetChatDebugStepsByRunID(ctx, affectedByStepHistoryTipRun.ID)
+	require.NoError(t, err)
+	require.Empty(t, affectedByStepHistoryTipSteps)
+
+	// Verify the run caught by step-level assistant_message_id is
+	// also deleted.  This would survive if the
+	// step.assistant_message_id > @message_id clause were removed.
+	_, err = store.GetChatDebugRunByID(ctx, affectedByStepAssistantMsgRun.ID)
+	require.ErrorIs(t, err, sql.ErrNoRows)
+
+	affectedByStepAssistantMsgSteps, err := store.GetChatDebugStepsByRunID(ctx, affectedByStepAssistantMsgRun.ID)
+	require.NoError(t, err)
+	require.Empty(t, affectedByStepAssistantMsgSteps)
+
+	remainingRuns, err := store.GetChatDebugRunsByChatID(ctx, database.GetChatDebugRunsByChatIDParams{
+		ChatID:   chat.ID,
+		LimitVal: 100,
+	})
+	require.NoError(t, err)
+	require.Len(t, remainingRuns, 1)
+	require.Equal(t, unaffectedRun.ID, remainingRuns[0].ID)
+
+	remainingRun, err := store.GetChatDebugRunByID(ctx, unaffectedRun.ID)
+	require.NoError(t, err)
+	require.Equal(t, unaffectedRun.ID, remainingRun.ID)
+
+	remainingSteps, err := store.GetChatDebugStepsByRunID(ctx, unaffectedRun.ID)
+	require.NoError(t, err)
+	require.Len(t, remainingSteps, 1)
+	require.Equal(t, unaffectedStep.ID, remainingSteps[0].ID)
+}
+
+func TestFinalizeStaleChatDebugRows(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitMedium)
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+
+	providerName := "openai"
+	modelName := "debug-model-finalize-" + uuid.NewString()
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             providerName,
+		DisplayName:          "Debug Provider",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             providerName,
+		Model:                modelName,
+		DisplayName:          "Debug Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chat, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-finalize-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	// staleTime is well before the threshold so rows stamped with it
+	// are considered stale.  The threshold sits between staleTime and
+	// NOW(), letting us create rows that are stale-by-age and rows
+	// that are fresh-by-age in the same test.
+	staleTime := time.Now().Add(-2 * time.Hour)
+	staleThreshold := time.Now().Add(-1 * time.Hour)
+
+	// --- staleRun: in_progress run with no finished_at --- should be
+	// finalized.
+	staleRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 1, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 1, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+		UpdatedAt:           sql.NullTime{Time: staleTime, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// staleStep: in_progress step attached to staleRun.
+	staleStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      staleRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+		UpdatedAt:  sql.NullTime{Time: staleTime, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// --- orphanStep: in_progress step whose run is already completed ---
+	// its own updated_at is old, so it should be finalized directly.
+	completedRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 2, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 2, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "completed",
+	})
+	require.NoError(t, err)
+
+	// Mark the run as completed with a finished_at timestamp.
+	_, err = store.UpdateChatDebugRun(ctx, database.UpdateChatDebugRunParams{
+		ID:     completedRun.ID,
+		ChatID: completedRun.ChatID,
+		Status: sql.NullString{String: "completed", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	orphanStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      completedRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+		UpdatedAt:  sql.NullTime{Time: staleTime, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// --- cascadeRun: stale in_progress run with a FRESH step ---
+	// The run's updated_at is old so the run itself is finalized by
+	// age.  The step's updated_at is recent (default NOW()), so it is
+	// NOT caught by the age predicate.  It must be finalized solely
+	// via the cascade CTE clause: run_id IN (SELECT id FROM
+	// finalized_runs).  Removing that clause would leave this step
+	// stuck in 'in_progress'.
+	cascadeRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 10, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 10, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+		UpdatedAt:           sql.NullTime{Time: staleTime, Valid: true},
+	})
+	require.NoError(t, err)
+
+	// cascadeStep: recent updated_at (default NOW()), so only the
+	// cascade path can finalize it.
+	cascadeStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      cascadeRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+	})
+	require.NoError(t, err)
+
+	// --- alreadyDone: completed run/step --- should NOT be touched.
+	doneRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 3, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 3, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "completed",
+	})
+	require.NoError(t, err)
+
+	_, err = store.UpdateChatDebugRun(ctx, database.UpdateChatDebugRunParams{
+		ID:     doneRun.ID,
+		ChatID: doneRun.ChatID,
+		Status: sql.NullString{String: "completed", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	doneStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      doneRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "completed",
+	})
+	require.NoError(t, err)
+
+	_, err = store.UpdateChatDebugStep(ctx, database.UpdateChatDebugStepParams{
+		ID:     doneStep.ID,
+		ChatID: chat.ID,
+		Status: sql.NullString{String: "completed", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	// --- errorRun: error run/step --- should NOT be touched either,
+	// exercising the 'error' branch of the NOT IN clause.
+	errorRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 4, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 4, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "error",
+	})
+	require.NoError(t, err)
+
+	_, err = store.UpdateChatDebugRun(ctx, database.UpdateChatDebugRunParams{
+		ID:     errorRun.ID,
+		ChatID: errorRun.ChatID,
+		Status: sql.NullString{String: "error", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	errorStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      errorRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "error",
+	})
+	require.NoError(t, err)
+
+	_, err = store.UpdateChatDebugStep(ctx, database.UpdateChatDebugStepParams{
+		ID:     errorStep.ID,
+		ChatID: chat.ID,
+		Status: sql.NullString{String: "error", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  time.Now(),
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	// --- freshRun: recent in_progress run with current timestamp ---
+	// should NOT be finalized because its updated_at is after the
+	// threshold, exercising the age predicate (not just terminal
+	// status) as the survival reason.
+	freshRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 20, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 20, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+		// UpdatedAt defaults to NOW(), which is after staleThreshold.
+	})
+	require.NoError(t, err)
+
+	freshStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      freshRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+		// UpdatedAt defaults to NOW().
+	})
+	require.NoError(t, err)
+
+	// --- Execute the finalization sweep. ---
+	result, err := store.FinalizeStaleChatDebugRows(ctx, staleThreshold)
+	require.NoError(t, err)
+
+	// staleRun + cascadeRun were finalized; completedRun and doneRun
+	// were already terminal, and freshRun survives because its
+	// updated_at is after the threshold — so only 2 runs are expected.
+	assert.EqualValues(t, 2, result.RunsFinalized,
+		"stale + cascade in_progress runs should be finalized")
+	// staleStep (age), orphanStep (age), cascadeStep (cascade only)
+	// should all be finalized.
+	assert.EqualValues(t, 3, result.StepsFinalized,
+		"stale step + orphan step + cascade step should all be finalized")
+
+	// Verify the stale run was set to interrupted.
+	updatedStaleRun, err := store.GetChatDebugRunByID(ctx, staleRun.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "interrupted", updatedStaleRun.Status)
+	assert.True(t, updatedStaleRun.FinishedAt.Valid,
+		"finalized run should have a finished_at timestamp")
+
+	// Verify the stale step was set to interrupted.
+	staleSteps, err := store.GetChatDebugStepsByRunID(ctx, staleRun.ID)
+	require.NoError(t, err)
+	require.Len(t, staleSteps, 1)
+	assert.Equal(t, staleStep.ID, staleSteps[0].ID)
+	assert.Equal(t, "interrupted", staleSteps[0].Status)
+	assert.True(t, staleSteps[0].FinishedAt.Valid,
+		"finalized step should have a finished_at timestamp")
+
+	// Verify the orphan step was also finalized.
+	orphanSteps, err := store.GetChatDebugStepsByRunID(ctx, completedRun.ID)
+	require.NoError(t, err)
+	require.Len(t, orphanSteps, 1)
+	assert.Equal(t, orphanStep.ID, orphanSteps[0].ID)
+	assert.Equal(t, "interrupted", orphanSteps[0].Status)
+
+	// Verify the cascade run was finalized.
+	updatedCascadeRun, err := store.GetChatDebugRunByID(ctx, cascadeRun.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "interrupted", updatedCascadeRun.Status)
+	assert.True(t, updatedCascadeRun.FinishedAt.Valid,
+		"cascade run should have a finished_at timestamp")
+
+	// Verify the cascade step was finalized despite its recent
+	// updated_at, proving the cascade CTE clause is required.
+	cascadeSteps, err := store.GetChatDebugStepsByRunID(ctx, cascadeRun.ID)
+	require.NoError(t, err)
+	require.Len(t, cascadeSteps, 1)
+	assert.Equal(t, cascadeStep.ID, cascadeSteps[0].ID)
+	assert.Equal(t, "interrupted", cascadeSteps[0].Status,
+		"fresh step should be finalized via cascade, not age")
+	assert.True(t, cascadeSteps[0].FinishedAt.Valid,
+		"cascade step should have a finished_at timestamp")
+
+	// Verify the completed run/step are untouched.
+	unchangedRun, err := store.GetChatDebugRunByID(ctx, doneRun.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", unchangedRun.Status)
+
+	doneSteps, err := store.GetChatDebugStepsByRunID(ctx, doneRun.ID)
+	require.NoError(t, err)
+	require.Len(t, doneSteps, 1)
+	assert.Equal(t, "completed", doneSteps[0].Status)
+
+	// Verify the error run/step are untouched.
+	unchangedErrorRun, err := store.GetChatDebugRunByID(ctx, errorRun.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "error", unchangedErrorRun.Status)
+
+	errorSteps, err := store.GetChatDebugStepsByRunID(ctx, errorRun.ID)
+	require.NoError(t, err)
+	require.Len(t, errorSteps, 1)
+	assert.Equal(t, "error", errorSteps[0].Status)
+
+	// Verify the fresh in_progress run survived due to recency,
+	// not terminal status — its updated_at is after the threshold.
+	unchangedFreshRun, err := store.GetChatDebugRunByID(ctx, freshRun.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "in_progress", unchangedFreshRun.Status,
+		"fresh in_progress run must survive due to recency")
+	assert.False(t, unchangedFreshRun.FinishedAt.Valid,
+		"fresh run should not have a finished_at timestamp")
+
+	freshSteps, err := store.GetChatDebugStepsByRunID(ctx, freshRun.ID)
+	require.NoError(t, err)
+	require.Len(t, freshSteps, 1)
+	assert.Equal(t, freshStep.ID, freshSteps[0].ID)
+	assert.Equal(t, "in_progress", freshSteps[0].Status,
+		"fresh in_progress step must survive due to recency")
+	assert.False(t, freshSteps[0].FinishedAt.Valid,
+		"fresh step should not have a finished_at timestamp")
+
+	// A second sweep should be a no-op.
+	result2, err := store.FinalizeStaleChatDebugRows(ctx, staleThreshold)
+	require.NoError(t, err)
+	assert.EqualValues(t, 0, result2.RunsFinalized,
+		"second sweep should find nothing to finalize")
+	assert.EqualValues(t, 0, result2.StepsFinalized,
+		"second sweep should find nothing to finalize")
+}
+
+func TestChatDebugSQLGuards(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitMedium)
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+
+	providerName := "openai"
+	modelName := "debug-model-guards-" + uuid.NewString()
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             providerName,
+		DisplayName:          "Debug Provider",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             providerName,
+		Model:                modelName,
+		DisplayName:          "Debug Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chatA, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-guard-A-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	chatB, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-guard-B-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	runA, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chatA.ID,
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 1, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 1, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+	})
+	require.NoError(t, err)
+
+	stepA, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      runA.ID,
+		ChatID:     chatA.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+	})
+	require.NoError(t, err)
+
+	// InsertChatDebugStep: valid run_id but chat_id belongs to a
+	// different chat.  The INSERT...SELECT guard should produce zero
+	// rows, surfacing as sql.ErrNoRows.
+	t.Run("InsertChatDebugStep_MismatchedChatID", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		_, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+			RunID:      runA.ID,
+			ChatID:     chatB.ID, // wrong chat
+			StepNumber: 2,
+			Operation:  "stream",
+			Status:     "in_progress",
+		})
+		require.ErrorIs(t, err, sql.ErrNoRows,
+			"InsertChatDebugStep should fail when chat_id does not match the run's chat_id")
+	})
+
+	// UpdateChatDebugRun: valid run ID but wrong chat_id.
+	t.Run("UpdateChatDebugRun_MismatchedChatID", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		_, err := store.UpdateChatDebugRun(ctx, database.UpdateChatDebugRunParams{
+			ID:     runA.ID,
+			ChatID: chatB.ID, // wrong chat
+			Status: sql.NullString{String: "completed", Valid: true},
+			FinishedAt: sql.NullTime{
+				Time:  time.Now(),
+				Valid: true,
+			},
+		})
+		require.ErrorIs(t, err, sql.ErrNoRows,
+			"UpdateChatDebugRun should fail when chat_id does not match")
+	})
+
+	// UpdateChatDebugStep: valid step ID but wrong chat_id.
+	t.Run("UpdateChatDebugStep_MismatchedChatID", func(t *testing.T) {
+		t.Parallel()
+		ctx := testutil.Context(t, testutil.WaitMedium)
+		_, err := store.UpdateChatDebugStep(ctx, database.UpdateChatDebugStepParams{
+			ID:     stepA.ID,
+			ChatID: chatB.ID, // wrong chat
+			Status: sql.NullString{String: "completed", Valid: true},
+			FinishedAt: sql.NullTime{
+				Time:  time.Now(),
+				Valid: true,
+			},
+		})
+		require.ErrorIs(t, err, sql.ErrNoRows,
+			"UpdateChatDebugStep should fail when chat_id does not match")
+	})
+}
+
+// TestChatDebugRunCOALESCEPreservation verifies that the COALESCE
+// pattern in UpdateChatDebugRun preserves every field that was not
+// explicitly supplied in the update.  If COALESCE were removed from
+// any column, the corresponding field would silently null out.
+func TestChatDebugRunCOALESCEPreservation(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitMedium)
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+
+	providerName := "openai"
+	modelName := "debug-model-coalesce-" + uuid.NewString()
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             providerName,
+		DisplayName:          "Debug Provider",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             providerName,
+		Model:                modelName,
+		DisplayName:          "Debug Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chat, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-debug-coalesce-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	rootChatID := uuid.New()
+	parentChatID := uuid.New()
+
+	// Insert a fully-populated run so every nullable field has a value.
+	original, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:              chat.ID,
+		RootChatID:          uuid.NullUUID{UUID: rootChatID, Valid: true},
+		ParentChatID:        uuid.NullUUID{UUID: parentChatID, Valid: true},
+		ModelConfigID:       uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		TriggerMessageID:    sql.NullInt64{Int64: 42, Valid: true},
+		HistoryTipMessageID: sql.NullInt64{Int64: 41, Valid: true},
+		Kind:                "chat_turn",
+		Status:              "in_progress",
+		Provider:            sql.NullString{String: providerName, Valid: true},
+		Model:               sql.NullString{String: modelName, Valid: true},
+		Summary:             pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"key":"val"}`), Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Update only Status and FinishedAt. Every other nullable param
+	// is left as its Go zero value (Valid: false → SQL NULL), which
+	// the COALESCE pattern should interpret as "keep existing."
+	now := time.Now()
+	updated, err := store.UpdateChatDebugRun(ctx, database.UpdateChatDebugRunParams{
+		ID:     original.ID,
+		ChatID: chat.ID,
+		Status: sql.NullString{String: "completed", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  now,
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	// Status and FinishedAt should be updated.
+	require.Equal(t, "completed", updated.Status)
+	require.True(t, updated.FinishedAt.Valid)
+
+	// UpdatedAt should advance (set to NOW() unconditionally).
+	require.True(t, updated.UpdatedAt.After(original.UpdatedAt) ||
+		updated.UpdatedAt.Equal(original.UpdatedAt))
+
+	// Every field not in the update call must be preserved exactly.
+	require.Equal(t, original.RootChatID, updated.RootChatID,
+		"RootChatID should survive a partial update")
+	require.Equal(t, original.ParentChatID, updated.ParentChatID,
+		"ParentChatID should survive a partial update")
+	require.Equal(t, original.ModelConfigID, updated.ModelConfigID,
+		"ModelConfigID should survive a partial update")
+	require.Equal(t, original.TriggerMessageID, updated.TriggerMessageID,
+		"TriggerMessageID should survive a partial update")
+	require.Equal(t, original.HistoryTipMessageID, updated.HistoryTipMessageID,
+		"HistoryTipMessageID should survive a partial update")
+	require.Equal(t, original.Provider, updated.Provider,
+		"Provider should survive a partial update")
+	require.Equal(t, original.Model, updated.Model,
+		"Model should survive a partial update")
+	require.JSONEq(t, string(original.Summary), string(updated.Summary),
+		"Summary should survive a partial update")
+	require.Equal(t, original.Kind, updated.Kind,
+		"Kind should survive a partial update")
+	require.Equal(t, original.StartedAt.UTC(), updated.StartedAt.UTC(),
+		"StartedAt should survive a partial update")
+}
+
+// TestChatDebugStepCOALESCEPreservation verifies that the COALESCE
+// pattern in UpdateChatDebugStep preserves every field that was not
+// explicitly supplied in the update. If COALESCE were removed from
+// any column, the corresponding field would silently null out.
+func TestChatDebugStepCOALESCEPreservation(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitMedium)
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+
+	providerName := "openai"
+	modelName := "debug-step-coalesce-" + uuid.NewString()
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             providerName,
+		DisplayName:          "Debug Provider",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             providerName,
+		Model:                modelName,
+		DisplayName:          "Debug Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chat, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-step-coalesce-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	run, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID: chat.ID,
+		Kind:   "chat_turn",
+		Status: "in_progress",
+	})
+	require.NoError(t, err)
+
+	// Insert a fully-populated step so every nullable field has a value.
+	original, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:               run.ID,
+		ChatID:              chat.ID,
+		StepNumber:          1,
+		Operation:           "llm_call",
+		Status:              "in_progress",
+		HistoryTipMessageID: sql.NullInt64{Int64: 10, Valid: true},
+		AssistantMessageID:  sql.NullInt64{Int64: 11, Valid: true},
+		NormalizedRequest:   pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"prompt":"hello"}`), Valid: true},
+		NormalizedResponse:  pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"text":"world"}`), Valid: true},
+		Usage:               pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"tokens":42}`), Valid: true},
+		Attempts:            pqtype.NullRawMessage{RawMessage: json.RawMessage(`[{"n":1}]`), Valid: true},
+		Error:               pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"code":"transient"}`), Valid: true},
+		Metadata:            pqtype.NullRawMessage{RawMessage: json.RawMessage(`{"trace_id":"abc"}`), Valid: true},
+	})
+	require.NoError(t, err)
+
+	// Update only Status and FinishedAt. Every other nullable param
+	// is left as its Go zero value (Valid: false -> SQL NULL), which
+	// the COALESCE pattern should interpret as "keep existing."
+	now := time.Now()
+	updated, err := store.UpdateChatDebugStep(ctx, database.UpdateChatDebugStepParams{
+		ID:     original.ID,
+		ChatID: chat.ID,
+		Status: sql.NullString{String: "completed", Valid: true},
+		FinishedAt: sql.NullTime{
+			Time:  now,
+			Valid: true,
+		},
+	})
+	require.NoError(t, err)
+
+	// Status and FinishedAt should be updated.
+	require.Equal(t, "completed", updated.Status)
+	require.True(t, updated.FinishedAt.Valid)
+
+	// UpdatedAt should advance (set to NOW() unconditionally).
+	require.True(t, updated.UpdatedAt.After(original.UpdatedAt) ||
+		updated.UpdatedAt.Equal(original.UpdatedAt))
+
+	// Every field not in the update call must be preserved exactly.
+	require.Equal(t, original.HistoryTipMessageID, updated.HistoryTipMessageID,
+		"HistoryTipMessageID should survive a partial update")
+	require.Equal(t, original.AssistantMessageID, updated.AssistantMessageID,
+		"AssistantMessageID should survive a partial update")
+	require.JSONEq(t, string(original.NormalizedRequest), string(updated.NormalizedRequest),
+		"NormalizedRequest should survive a partial update")
+	require.JSONEq(t, string(original.NormalizedResponse.RawMessage), string(updated.NormalizedResponse.RawMessage),
+		"NormalizedResponse should survive a partial update")
+	require.JSONEq(t, string(original.Usage.RawMessage), string(updated.Usage.RawMessage),
+		"Usage should survive a partial update")
+	require.JSONEq(t, string(original.Attempts), string(updated.Attempts),
+		"Attempts should survive a partial update")
+	require.JSONEq(t, string(original.Error.RawMessage), string(updated.Error.RawMessage),
+		"Error should survive a partial update")
+	require.JSONEq(t, string(original.Metadata), string(updated.Metadata),
+		"Metadata should survive a partial update")
+	require.Equal(t, original.Operation, updated.Operation,
+		"Operation should survive a partial update")
+	require.Equal(t, original.StepNumber, updated.StepNumber,
+		"StepNumber should survive a partial update")
+	require.Equal(t, original.StartedAt.UTC(), updated.StartedAt.UTC(),
+		"StartedAt should survive a partial update")
+}
+
+// TestDeleteChatDebugDataAfterMessageIDNullMessagesSurvive verifies
+// that runs whose message ID columns are all NULL are never matched
+// by DeleteChatDebugDataAfterMessageID.  SQL's three-valued logic
+// means NULL > N evaluates to NULL (not TRUE), so these rows must
+// survive.  Without this test a future change could break the
+// invariant with no test failure.
+func TestDeleteChatDebugDataAfterMessageIDNullMessagesSurvive(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := testutil.Context(t, testutil.WaitMedium)
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+
+	providerName := "openai"
+	modelName := "debug-model-null-msg-" + uuid.NewString()
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             providerName,
+		DisplayName:          "Debug Provider",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             providerName,
+		Model:                modelName,
+		DisplayName:          "Debug Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chat, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "chat-debug-null-msg-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	// Insert a run with all message ID columns left as NULL (Valid: false).
+	nullMsgRun, err := store.InsertChatDebugRun(ctx, database.InsertChatDebugRunParams{
+		ChatID:        chat.ID,
+		ModelConfigID: uuid.NullUUID{UUID: modelCfg.ID, Valid: true},
+		Kind:          "chat_turn",
+		Status:        "in_progress",
+		Provider:      sql.NullString{String: providerName, Valid: true},
+		Model:         sql.NullString{String: modelName, Valid: true},
+		// TriggerMessageID and HistoryTipMessageID intentionally
+		// omitted (zero-value → SQL NULL).
+	})
+	require.NoError(t, err)
+
+	// Attach a step with NULL message IDs too.
+	nullMsgStep, err := store.InsertChatDebugStep(ctx, database.InsertChatDebugStepParams{
+		RunID:      nullMsgRun.ID,
+		ChatID:     chat.ID,
+		StepNumber: 1,
+		Operation:  "stream",
+		Status:     "in_progress",
+		// HistoryTipMessageID and AssistantMessageID intentionally
+		// omitted (zero-value → SQL NULL).
+	})
+	require.NoError(t, err)
+
+	// Delete with an arbitrary cutoff. The run and its step should
+	// survive because NULL > cutoff evaluates to NULL, not TRUE.
+	deletedRows, err := store.DeleteChatDebugDataAfterMessageID(ctx, database.DeleteChatDebugDataAfterMessageIDParams{
+		ChatID:    chat.ID,
+		MessageID: 1,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 0, deletedRows, "rows with NULL message IDs must not be deleted")
+
+	// Verify run still exists.
+	remaining, err := store.GetChatDebugRunByID(ctx, nullMsgRun.ID)
+	require.NoError(t, err)
+	require.Equal(t, nullMsgRun.ID, remaining.ID)
+
+	// Verify step still exists.
+	remainingSteps, err := store.GetChatDebugStepsByRunID(ctx, nullMsgRun.ID)
+	require.NoError(t, err)
+	require.Len(t, remainingSteps, 1)
+	require.Equal(t, nullMsgStep.ID, remainingSteps[0].ID)
+}
+
+func TestChatHasUnread(t *testing.T) {
+	t.Parallel()
+
+	store, _ := dbtestutil.NewDB(t)
+	ctx := context.Background()
+
+	org := dbgen.Organization(t, store, database.Organization{})
+	user := dbgen.User(t, store, database.User{})
+	dbgen.OrganizationMember(t, store, database.OrganizationMember{UserID: user.ID, OrganizationID: org.ID})
+
+	_, err := store.InsertChatProvider(ctx, database.InsertChatProviderParams{
+		Provider:             "openai",
+		DisplayName:          "OpenAI",
+		APIKey:               "test-key",
+		Enabled:              true,
+		CentralApiKeyEnabled: true,
+	})
+	require.NoError(t, err)
+
+	modelCfg, err := store.InsertChatModelConfig(ctx, database.InsertChatModelConfigParams{
+		Provider:             "openai",
+		Model:                "test-model-" + uuid.NewString(),
+		DisplayName:          "Test Model",
+		CreatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		UpdatedBy:            uuid.NullUUID{UUID: user.ID, Valid: true},
+		Enabled:              true,
+		IsDefault:            true,
+		ContextLimit:         128000,
+		CompressionThreshold: 80,
+		Options:              json.RawMessage(`{}`),
+	})
+	require.NoError(t, err)
+
+	chat, err := store.InsertChat(ctx, database.InsertChatParams{
+		OrganizationID:    org.ID,
+		Status:            database.ChatStatusWaiting,
+		OwnerID:           user.ID,
+		LastModelConfigID: modelCfg.ID,
+		Title:             "test-chat-" + uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	getHasUnread := func() bool {
+		rows, err := store.GetChats(ctx, database.GetChatsParams{
+			OwnerID: user.ID,
+		})
+		require.NoError(t, err)
+		for _, row := range rows {
+			if row.Chat.ID == chat.ID {
+				return row.HasUnread
+			}
+		}
+		t.Fatal("chat not found in GetChats result")
+		return false
+	}
+
+	// New chat with no messages: not unread.
+	require.False(t, getHasUnread(), "new chat with no messages should not be unread")
+
+	// Helper to insert a single chat message.
+	insertMsg := func(role database.ChatMessageRole, text string) {
+		t.Helper()
+		_, err := store.InsertChatMessages(ctx, database.InsertChatMessagesParams{
+			ChatID:              chat.ID,
+			CreatedBy:           []uuid.UUID{user.ID},
+			ModelConfigID:       []uuid.UUID{modelCfg.ID},
+			Role:                []database.ChatMessageRole{role},
+			Content:             []string{fmt.Sprintf(`[{"type":"text","text":%q}]`, text)},
+			ContentVersion:      []int16{0},
+			Visibility:          []database.ChatMessageVisibility{database.ChatMessageVisibilityBoth},
+			InputTokens:         []int64{0},
+			OutputTokens:        []int64{0},
+			TotalTokens:         []int64{0},
+			ReasoningTokens:     []int64{0},
+			CacheCreationTokens: []int64{0},
+			CacheReadTokens:     []int64{0},
+			ContextLimit:        []int64{0},
+			Compressed:          []bool{false},
+			TotalCostMicros:     []int64{0},
+			RuntimeMs:           []int64{0},
+			ProviderResponseID:  []string{""},
+		})
+		require.NoError(t, err)
+	}
+
+	// Insert an assistant message: becomes unread.
+	insertMsg(database.ChatMessageRoleAssistant, "hello")
+	require.True(t, getHasUnread(), "chat with unread assistant message should be unread")
+
+	// Mark as read: no longer unread.
+	lastMsg, err := store.GetLastChatMessageByRole(ctx, database.GetLastChatMessageByRoleParams{
+		ChatID: chat.ID,
+		Role:   database.ChatMessageRoleAssistant,
+	})
+	require.NoError(t, err)
+	err = store.UpdateChatLastReadMessageID(ctx, database.UpdateChatLastReadMessageIDParams{
+		ID:                chat.ID,
+		LastReadMessageID: lastMsg.ID,
+	})
+	require.NoError(t, err)
+	require.False(t, getHasUnread(), "chat should not be unread after marking as read")
+
+	// Insert another assistant message: becomes unread again.
+	insertMsg(database.ChatMessageRoleAssistant, "new message")
+	require.True(t, getHasUnread(), "new assistant message after read should be unread")
+
+	// Mark as read again, then verify user messages don't
+	// trigger unread.
+	lastMsg, err = store.GetLastChatMessageByRole(ctx, database.GetLastChatMessageByRoleParams{
+		ChatID: chat.ID,
+		Role:   database.ChatMessageRoleAssistant,
+	})
+	require.NoError(t, err)
+	err = store.UpdateChatLastReadMessageID(ctx, database.UpdateChatLastReadMessageIDParams{
+		ID:                chat.ID,
+		LastReadMessageID: lastMsg.ID,
+	})
+	require.NoError(t, err)
+	insertMsg(database.ChatMessageRoleUser, "user msg")
+	require.False(t, getHasUnread(), "user messages should not trigger unread")
 }

@@ -11,10 +11,10 @@ import (
 	"golang.org/x/xerrors"
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/sloghuman"
-	"cdr.dev/slog/sloggers/slogjson"
-	"cdr.dev/slog/sloggers/slogstackdriver"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
+	"cdr.dev/slog/v3/sloggers/slogjson"
+	"cdr.dev/slog/v3/sloggers/slogstackdriver"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/serpent"
@@ -104,7 +104,7 @@ func (b *Builder) Build(inv *serpent.Invocation) (log slog.Logger, closeLog func
 
 	addSinkIfProvided := func(sinkFn func(io.Writer) slog.Sink, loc string) error {
 		switch loc {
-		case "":
+		case "", "/dev/null":
 		case "/dev/stdout":
 			sinks = append(sinks, sinkFn(inv.Stdout))
 

@@ -3,6 +3,7 @@ package workspacetraffic
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -12,8 +13,8 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/sloghuman"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/scaletest/harness"
@@ -75,7 +76,12 @@ func (r *Runner) Run(ctx context.Context, _ string, logs io.Writer) (err error) 
 		echo                = r.cfg.Echo
 	)
 
-	logger = logger.With(slog.F("agent_id", agentID))
+	logger = logger.With(
+		slog.F("agent_id", agentID),
+		slog.F("workspace_id", r.cfg.WorkspaceID),
+		slog.F("workspace_name", r.cfg.WorkspaceName),
+		slog.F("agent_name", r.cfg.AgentName),
+	)
 
 	logger.Debug(ctx, "config",
 		slog.F("reconnecting_pty_id", reconnect),
@@ -131,8 +137,11 @@ func (r *Runner) Run(ctx context.Context, _ string, logs io.Writer) (err error) 
 	closeConn := func() error {
 		closeOnce.Do(func() {
 			closeErr = conn.Close()
-			if closeErr != nil {
+			if errors.Is(closeErr, io.EOF) {
+				closeErr = nil
+			} else if closeErr != nil {
 				logger.Error(ctx, "close agent connection", slog.Error(closeErr))
+				closeErr = xerrors.Errorf("close agent connection: %w", closeErr)
 			}
 		})
 		return closeErr
@@ -148,6 +157,14 @@ func (r *Runner) Run(ctx context.Context, _ string, logs io.Writer) (err error) 
 
 	conn.readMetrics = r.cfg.ReadMetrics
 	conn.writeMetrics = r.cfg.WriteMetrics
+
+	logTrafficSummary := func() {
+		//nolint:gocritic
+		logger.Info(ctx, "traffic summary",
+			slog.F("actual_bytes_read", r.cfg.ReadMetrics.GetTotalBytes()),
+			slog.F("actual_bytes_written", r.cfg.WriteMetrics.GetTotalBytes()),
+		)
+	}
 
 	// Create a ticker for sending data to the conn.
 	tick := time.NewTicker(tickInterval)
@@ -175,9 +192,18 @@ func (r *Runner) Run(ctx context.Context, _ string, logs io.Writer) (err error) 
 
 	var waitCloseTimeoutCh <-chan struct{}
 	deadlineCtxCh := deadlineCtx.Done()
+	deadlineReached := false
 	wchRef, rchRef := wch, rch
 	for {
 		if wchRef == nil && rchRef == nil {
+			logTrafficSummary()
+			if !deadlineReached {
+				return xerrors.Errorf("test did not complete: context canceled after %s of %s",
+					time.Since(start).Truncate(time.Second), r.cfg.Duration)
+			}
+			if r.cfg.ReadMetrics.GetTotalBytes() == 0 {
+				return xerrors.Errorf("zero bytes read from agent")
+			}
 			return nil
 		}
 
@@ -187,23 +213,27 @@ func (r *Runner) Run(ctx context.Context, _ string, logs io.Writer) (err error) 
 				slog.F("write_done", wchRef == nil),
 				slog.F("read_done", rchRef == nil),
 			)
+			logTrafficSummary()
 			return xerrors.Errorf("timed out waiting for read/write to complete: %w", ctx.Err())
 		case <-deadlineCtxCh:
 			go func() {
 				_ = closeConn()
 			}()
 			deadlineCtxCh = nil // Only trigger once.
+			deadlineReached = true
 			// Wait at most closeTimeout for the connection to close cleanly.
 			waitCtx, cancel := context.WithTimeout(context.Background(), waitCloseTimeout)
 			defer cancel() //nolint:revive // Only called once.
 			waitCloseTimeoutCh = waitCtx.Done()
 		case err = <-wchRef:
 			if err != nil {
+				logTrafficSummary()
 				return xerrors.Errorf("write to agent: %w", err)
 			}
 			wchRef = nil
 		case err = <-rchRef:
 			if err != nil {
+				logTrafficSummary()
 				return xerrors.Errorf("read from agent: %w", err)
 			}
 			rchRef = nil

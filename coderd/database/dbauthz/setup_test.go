@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/gob"
 	"errors"
+	"flag"
 	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -20,8 +21,7 @@ import (
 	"go.uber.org/mock/gomock"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
@@ -30,6 +30,7 @@ import (
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
 	"github.com/coder/coder/v2/coderd/rbac/regosql"
+	"github.com/coder/coder/v2/coderd/rbac/rolestore"
 	"github.com/coder/coder/v2/coderd/util/slice"
 )
 
@@ -90,6 +91,16 @@ func (s *MethodTestSuite) SetupSuite() {
 // TearDownSuite asserts that all methods were called at least once.
 func (s *MethodTestSuite) TearDownSuite() {
 	s.Run("Accounting", func() {
+		// testify/suite's -testify.m flag filters which suite methods
+		// run, but TearDownSuite still executes. Skip the Accounting
+		// check when filtering to avoid misleading "method never
+		// called" errors for every method that was filtered out.
+		if f := flag.Lookup("testify.m"); f != nil {
+			if f.Value.String() != "" {
+				s.T().Skip("Skipping Accounting check: -testify.m flag is set")
+			}
+		}
+
 		t := s.T()
 		notCalled := []string{}
 		for m, c := range s.methodAccounting {
@@ -97,7 +108,7 @@ func (s *MethodTestSuite) TearDownSuite() {
 				notCalled = append(notCalled, m)
 			}
 		}
-		sort.Strings(notCalled)
+		slices.Sort(notCalled)
 		for _, m := range notCalled {
 			t.Errorf("Method never called: %q", m)
 		}
@@ -106,12 +117,51 @@ func (s *MethodTestSuite) TearDownSuite() {
 
 var testActorID = uuid.New()
 
+type includeSystemRolesMatcher struct{}
+
+func (includeSystemRolesMatcher) Matches(x any) bool {
+	p, ok := x.(database.CustomRolesParams)
+	if !ok {
+		return false
+	}
+	return p.IncludeSystemRoles
+}
+
+func (includeSystemRolesMatcher) String() string {
+	return "CustomRolesParams with IncludeSystemRoles=true"
+}
+
 // Mocked runs a subtest with a mocked database. Removing the overhead of a real
 // postgres database resulting in much faster tests.
 func (s *MethodTestSuite) Mocked(testCaseF func(dmb *dbmock.MockStore, faker *gofakeit.Faker, check *expects)) func() {
 	t := s.T()
 	mDB := dbmock.NewMockStore(gomock.NewController(t))
 	mDB.EXPECT().Wrappers().Return([]string{}).AnyTimes()
+	// dbauthz now expands DB-backed system roles (e.g. organization-member)
+	// during role-assignment validation, which triggers a CustomRoles lookup
+	// with IncludeSystemRoles=true.
+	mDB.EXPECT().CustomRoles(gomock.Any(), includeSystemRolesMatcher{}).DoAndReturn(func(_ context.Context, arg database.CustomRolesParams) ([]database.CustomRole, error) {
+		if len(arg.LookupRoles) == 0 {
+			return []database.CustomRole{}, nil
+		}
+
+		out := make([]database.CustomRole, 0, len(arg.LookupRoles))
+
+		for _, pair := range arg.LookupRoles {
+			// Minimal set of fields that the tested code uses.
+			out = append(out, database.CustomRole{
+				Name: pair.Name,
+				OrganizationID: uuid.NullUUID{
+					UUID:  pair.OrganizationID,
+					Valid: pair.OrganizationID != uuid.Nil,
+				},
+				IsSystem: rolestore.IsSystemRoleName(pair.Name),
+				ID:       uuid.New(),
+			})
+		}
+
+		return out, nil
+	}).AnyTimes()
 
 	// Use a constant seed to prevent flakes from random data generation.
 	faker := gofakeit.New(0)
@@ -427,24 +477,6 @@ func (m *expects) Returns(rets ...any) *expects {
 // Errors is optional. If it is never called, it will not be asserted.
 func (m *expects) Errors(err error) *expects {
 	m.err = err
-	return m
-}
-
-// ErrorsWithPG is optional. If it is never called, it will not be asserted.
-// It will only be asserted if the test is running with a Postgres database.
-func (m *expects) ErrorsWithPG(err error) *expects {
-	if dbtestutil.WillUsePostgres() {
-		return m.Errors(err)
-	}
-	return m
-}
-
-// ErrorsWithInMemDB is optional. If it is never called, it will not be asserted.
-// It will only be asserted if the test is running with an in-memory database.
-func (m *expects) ErrorsWithInMemDB(err error) *expects {
-	if !dbtestutil.WillUsePostgres() {
-		return m.Errors(err)
-	}
 	return m
 }
 

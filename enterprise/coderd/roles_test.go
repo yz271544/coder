@@ -13,6 +13,7 @@ import (
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/util/slice"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/enterprise/coderd/coderdenttest"
 	"github.com/coder/coder/v2/enterprise/coderd/license"
@@ -63,7 +64,7 @@ func TestCustomOrganizationRole(t *testing.T) {
 		// 	Changing this might mess up the UI in how it renders the roles on the
 		//	users page. When the users endpoint is updated, this should be uncommented.
 		// roleNamesF := func(role codersdk.SlimRole) string { return role.Name }
-		// require.Contains(t, db2sdk.List(user.Roles, roleNamesF), role.Name)
+		// require.Contains(t, slice.List(user.Roles, roleNamesF), role.Name)
 
 		// Try to create a template version
 		coderdtest.CreateTemplateVersion(t, tmplAdmin, first.OrganizationID, nil)
@@ -256,6 +257,59 @@ func TestCustomOrganizationRole(t *testing.T) {
 		require.ErrorContains(t, err, "not allowed to assign user permissions")
 	})
 
+	// Attempt to add org member permissions, which is not allowed.
+	t.Run("MemberPermissions", func(t *testing.T) {
+		t.Parallel()
+
+		owner, first := coderdenttest.New(t, &coderdenttest.Options{
+			LicenseOptions: &coderdenttest.LicenseOptions{
+				Features: license.Features{
+					codersdk.FeatureCustomRoles: 1,
+				},
+			},
+		})
+
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		role := templateAdminCustom(first.OrganizationID)
+		role.Name = "test-role-member-perms"
+		role.OrganizationMemberPermissions = []codersdk.Permission{
+			{
+				ResourceType: codersdk.ResourceWorkspace,
+				Action:       codersdk.ActionRead,
+			},
+		}
+
+		//nolint:gocritic // we want unrestricted permissions for the test
+		_, err := owner.CreateOrganizationRole(ctx, role)
+		var apiErr *codersdk.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusBadRequest, apiErr.StatusCode())
+		require.ErrorContains(t, err, "not allowed to assign organization member permissions for an organization role")
+	})
+
+	// System roles are stored in the DB but excluded from the custom
+	// roles API, so attempting to delete one returns 404.
+	t.Run("DeleteSystemRole", func(t *testing.T) {
+		t.Parallel()
+
+		owner, first := coderdenttest.New(t, &coderdenttest.Options{
+			LicenseOptions: &coderdenttest.LicenseOptions{
+				Features: license.Features{
+					codersdk.FeatureCustomRoles: 1,
+				},
+			},
+		})
+
+		ctx := testutil.Context(t, testutil.WaitMedium)
+
+		//nolint:gocritic // we want unrestricted permissions for the test
+		err := owner.DeleteOrganizationRole(ctx, first.OrganizationID, rbac.RoleOrgMember())
+		var apiErr *codersdk.Error
+		require.ErrorAs(t, err, &apiErr)
+		require.Equal(t, http.StatusNotFound, apiErr.StatusCode())
+	})
+
 	t.Run("NotFound", func(t *testing.T) {
 		t.Parallel()
 		owner, first := coderdenttest.New(t, &coderdenttest.Options{
@@ -398,7 +452,13 @@ func TestCustomOrganizationRole(t *testing.T) {
 func TestListRoles(t *testing.T) {
 	t.Parallel()
 
+	dv := coderdtest.DeploymentValues(t)
+	dv.Experiments = []string{string(codersdk.ExperimentAgents)}
+
 	client, owner := coderdenttest.New(t, &coderdenttest.Options{
+		Options: &coderdtest.Options{
+			DeploymentValues: dv,
+		},
 		LicenseOptions: &coderdenttest.LicenseOptions{
 			Features: license.Features{
 				codersdk.FeatureExternalProvisionerDaemons: 1,
@@ -433,6 +493,7 @@ func TestListRoles(t *testing.T) {
 				{Name: codersdk.RoleAuditor}:       false,
 				{Name: codersdk.RoleTemplateAdmin}: false,
 				{Name: codersdk.RoleUserAdmin}:     false,
+				{Name: codersdk.RoleAgentsAccess}:  false,
 			}),
 		},
 		{
@@ -466,6 +527,7 @@ func TestListRoles(t *testing.T) {
 				{Name: codersdk.RoleAuditor}:       false,
 				{Name: codersdk.RoleTemplateAdmin}: false,
 				{Name: codersdk.RoleUserAdmin}:     false,
+				{Name: codersdk.RoleAgentsAccess}:  false,
 			}),
 		},
 		{
@@ -499,6 +561,7 @@ func TestListRoles(t *testing.T) {
 				{Name: codersdk.RoleAuditor}:       true,
 				{Name: codersdk.RoleTemplateAdmin}: true,
 				{Name: codersdk.RoleUserAdmin}:     true,
+				{Name: codersdk.RoleAgentsAccess}:  true,
 			}),
 		},
 		{
@@ -541,8 +604,8 @@ func TestListRoles(t *testing.T) {
 						BuiltIn:    true,
 					}
 				}
-				expected := db2sdk.List(c.ExpectedRoles, ignorePerms)
-				found := db2sdk.List(roles, ignorePerms)
+				expected := slice.List(c.ExpectedRoles, ignorePerms)
+				found := slice.List(roles, ignorePerms)
 				require.ElementsMatch(t, expected, found)
 			}
 		})

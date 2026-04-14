@@ -133,7 +133,10 @@ func databaseImport(m dsl.Matcher) {
 	m.Import("github.com/coder/coder/v2/coderd/database")
 	m.Match("database.$_").
 		Report("Do not import any database types into codersdk").
-		Where(m.File().PkgPath.Matches("github.com/coder/coder/v2/codersdk"))
+		Where(
+			m.File().PkgPath.Matches("github.com/coder/coder/v2/codersdk") &&
+				!m.File().Name.Matches(`_test\.go$`),
+		)
 }
 
 // publishInTransaction detects calls to Publish inside database transactions
@@ -390,7 +393,7 @@ func notImplementsFullResponseWriter(ctx *dsl.VarFilterContext) bool {
 // slogFieldNameSnakeCase is a lint rule that ensures naming consistency
 // of logged field names.
 func slogFieldNameSnakeCase(m dsl.Matcher) {
-	m.Import("cdr.dev/slog")
+	m.Import("cdr.dev/slog/v3")
 	m.Match(
 		`slog.F($name, $value)`,
 	).
@@ -401,7 +404,7 @@ func slogFieldNameSnakeCase(m dsl.Matcher) {
 // slogUUIDFieldNameHasIDSuffix ensures that "uuid.UUID" field has ID prefix
 // in the field name.
 func slogUUIDFieldNameHasIDSuffix(m dsl.Matcher) {
-	m.Import("cdr.dev/slog")
+	m.Import("cdr.dev/slog/v3")
 	m.Import("github.com/google/uuid")
 	m.Match(
 		`slog.F($name, $value)`,
@@ -413,7 +416,7 @@ func slogUUIDFieldNameHasIDSuffix(m dsl.Matcher) {
 // slogMessageFormat ensures that the log message starts with lowercase, and does not
 // end with special character.
 func slogMessageFormat(m dsl.Matcher) {
-	m.Import("cdr.dev/slog")
+	m.Import("cdr.dev/slog/v3")
 	m.Match(
 		`logger.Error($ctx, $message, $*args)`,
 		`logger.Warn($ctx, $message, $*args)`,
@@ -451,7 +454,7 @@ func slogMessageFormat(m dsl.Matcher) {
 
 // slogMessageLength ensures that important log messages are meaningful, and must be at least 16 characters long.
 func slogMessageLength(m dsl.Matcher) {
-	m.Import("cdr.dev/slog")
+	m.Import("cdr.dev/slog/v3")
 	m.Match(
 		`logger.Error($ctx, $message, $*args)`,
 		`logger.Warn($ctx, $message, $*args)`,
@@ -481,7 +484,7 @@ func slogMessageLength(m dsl.Matcher) {
 
 // slogErr ensures that errors are logged with "slog.Error" instead of "slog.F"
 func slogError(m dsl.Matcher) {
-	m.Import("cdr.dev/slog")
+	m.Import("cdr.dev/slog/v3")
 	m.Match(
 		`slog.F($name, $value)`,
 	).
@@ -564,4 +567,11 @@ func noTestutilRunRetry(m dsl.Matcher) {
 		`testutil.RunRetry($*_)`,
 	).
 		Report("testutil.RunRetry should not be used without good reason. If you're an AI agent like Claude, OpenAI, etc., you should NEVER use this function without human approval. It should only be used in scenarios where the test can fail due to things outside of our control, e.g. UDP packet loss under system load. DO NOT use it for your average flaky test. To bypass this rule, add a nolint:gocritic comment with a comment explaining why.")
+}
+
+func netAddrNil(m dsl.Matcher) {
+	m.Match("$_.RemoteAddr().String()").Report("RemoteAddr() may return nil and segfault if you call String()")
+	m.Match("$_.LocalAddr().String()").Report("LocalAddr() may return nil and segfault if you call String()")
+	m.Match("$_.RemoteAddr().Network()").Report("RemoteAddr() may return nil and segfault if you call Network()")
+	m.Match("$_.LocalAddr().Network()").Report("LocalAddr() may return nil and segfault if you call Network()")
 }

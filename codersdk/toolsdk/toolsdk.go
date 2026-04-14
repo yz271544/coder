@@ -15,7 +15,6 @@ import (
 	"golang.org/x/xerrors"
 
 	"github.com/coder/aisdk-go"
-
 	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/cli/cliui"
 	"github.com/coder/coder/v2/coderd/workspaceapps/appurl"
@@ -55,6 +54,8 @@ const (
 	ToolNameDeleteTask                  = "coder_delete_task"
 	ToolNameListTasks                   = "coder_list_tasks"
 	ToolNameGetTaskStatus               = "coder_get_task_status"
+	ToolNameSendTaskInput               = "coder_send_task_input"
+	ToolNameGetTaskLogs                 = "coder_get_task_logs"
 )
 
 func NewDeps(client *codersdk.Client, opts ...func(*Deps)) (Deps, error) {
@@ -96,11 +97,46 @@ type Tool[Arg, Ret any] struct {
 	aisdk.Tool
 	Handler HandlerFunc[Arg, Ret]
 
+	// MCPAnnotations is the shared source of truth for MCP tool
+	// classification. Both the coderd-hosted MCP server and the CLI MCP
+	// server translate these hints into mcp.Tool.Annotations so hosts can
+	// consistently group tools.
+	MCPAnnotations MCPToolAnnotations
+
 	// UserClientOptional indicates whether this tool can function without a valid
 	// user authentication token. If true, the tool will be available even when
 	// running in an unauthenticated mode with just an agent token.
 	UserClientOptional bool
 }
+
+// MCPToolAnnotations describes how an MCP host should classify a tool.
+type MCPToolAnnotations struct {
+	ReadOnlyHint    bool
+	DestructiveHint bool
+	IdempotentHint  bool
+	OpenWorldHint   bool
+}
+
+var (
+	mcpReadOnlyAnnotations = MCPToolAnnotations{
+		ReadOnlyHint:    true,
+		DestructiveHint: false,
+		IdempotentHint:  true,
+		OpenWorldHint:   false,
+	}
+	mcpMutationAnnotations = MCPToolAnnotations{
+		ReadOnlyHint:    false,
+		DestructiveHint: false,
+		IdempotentHint:  false,
+		OpenWorldHint:   false,
+	}
+	mcpDestructiveAnnotations = MCPToolAnnotations{
+		ReadOnlyHint:    false,
+		DestructiveHint: true,
+		IdempotentHint:  false,
+		OpenWorldHint:   false,
+	}
+)
 
 // Generic returns a type-erased version of a TypedTool where the arguments and
 // return values are converted to/from json.RawMessage.
@@ -110,6 +146,7 @@ type Tool[Arg, Ret any] struct {
 func (t Tool[Arg, Ret]) Generic() GenericTool {
 	return GenericTool{
 		Tool:               t.Tool,
+		MCPAnnotations:     t.MCPAnnotations,
 		UserClientOptional: t.UserClientOptional,
 		Handler: wrap(func(ctx context.Context, deps Deps, args json.RawMessage) (json.RawMessage, error) {
 			var typedArgs Arg
@@ -132,6 +169,9 @@ func (t Tool[Arg, Ret]) Generic() GenericTool {
 type GenericTool struct {
 	aisdk.Tool
 	Handler GenericHandlerFunc
+
+	// MCPAnnotations are host hints used when this tool is exposed over MCP.
+	MCPAnnotations MCPToolAnnotations
 
 	// UserClientOptional indicates whether this tool can function without a valid
 	// user authentication token. If true, the tool will be available even when
@@ -233,6 +273,8 @@ var All = []GenericTool{
 	DeleteTask.Generic(),
 	ListTasks.Generic(),
 	GetTaskStatus.Generic(),
+	SendTaskInput.Generic(),
+	GetTaskLogs.Generic(),
 }
 
 type ReportTaskArgs struct {
@@ -262,7 +304,7 @@ Bad Tasks
 Use the "state" field to indicate your progress. Periodically report
 progress with state "working" to keep the user updated. It is not possible to send too many updates!
 
-ONLY report an "idle" or "failure" state if you have FULLY completed the task.
+ONLY report a "complete", "idle", or "failure" state if you have FULLY completed the task.
 `,
 		Schema: aisdk.Schema{
 			Properties: map[string]any{
@@ -276,9 +318,10 @@ ONLY report an "idle" or "failure" state if you have FULLY completed the task.
 				},
 				"state": map[string]any{
 					"type":        "string",
-					"description": "The state of your task. This can be one of the following: working, idle, or failure. Select the state that best represents your current progress.",
+					"description": "The state of your task. This can be one of the following: working, complete, idle, or failure. Select the state that best represents your current progress.",
 					"enum": []string{
 						string(codersdk.WorkspaceAppStatusStateWorking),
+						string(codersdk.WorkspaceAppStatusStateComplete),
 						string(codersdk.WorkspaceAppStatusStateIdle),
 						string(codersdk.WorkspaceAppStatusStateFailure),
 					},
@@ -287,6 +330,7 @@ ONLY report an "idle" or "failure" state if you have FULLY completed the task.
 			Required: []string{"summary", "link", "state"},
 		},
 	},
+	MCPAnnotations:     mcpMutationAnnotations,
 	UserClientOptional: true,
 	Handler: func(_ context.Context, deps Deps, args ReportTaskArgs) (codersdk.Response, error) {
 		if len(args.Summary) > 160 {
@@ -313,22 +357,24 @@ type GetWorkspaceArgs struct {
 var GetWorkspace = Tool[GetWorkspaceArgs, codersdk.Workspace]{
 	Tool: aisdk.Tool{
 		Name: ToolNameGetWorkspace,
-		Description: `Get a workspace by ID.
+		Description: `Get a workspace by name or ID.
 
 This returns more data than list_workspaces to reduce token usage.`,
 		Schema: aisdk.Schema{
 			Properties: map[string]any{
 				"workspace_id": map[string]any{
-					"type": "string",
+					"type":        "string",
+					"description": workspaceDescription,
 				},
 			},
 			Required: []string{"workspace_id"},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args GetWorkspaceArgs) (codersdk.Workspace, error) {
 		wsID, err := uuid.Parse(args.WorkspaceID)
 		if err != nil {
-			return codersdk.Workspace{}, xerrors.New("workspace_id must be a valid UUID")
+			return namedWorkspace(ctx, deps.coderClient, NormalizeWorkspaceInput(args.WorkspaceID))
 		}
 		return deps.coderClient.Workspace(ctx, wsID)
 	},
@@ -349,6 +395,18 @@ var CreateWorkspace = Tool[CreateWorkspaceArgs, codersdk.Workspace]{
 If a user is asking to "test a template", they are typically referring
 to creating a workspace from a template to ensure the infrastructure
 is provisioned correctly and the agent can connect to the control plane.
+
+Before creating a workspace, always confirm the template choice with the user by:
+
+	1. Listing the available templates that match their request.
+	2. Recommending the most relevant option.
+	2. Asking the user to confirm which template to use.
+
+It is important to not create a workspace without confirming the template
+choice with the user.
+
+After creating a workspace, watch the build logs and wait for the workspace to
+be ready before trying to use or connect to the workspace.
 `,
 		Schema: aisdk.Schema{
 			Properties: map[string]any{
@@ -372,6 +430,7 @@ is provisioned correctly and the agent can connect to the control plane.
 			Required: []string{"user", "template_version_id", "name", "rich_parameters"},
 		},
 	},
+	MCPAnnotations: mcpMutationAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args CreateWorkspaceArgs) (codersdk.Workspace, error) {
 		tvID, err := uuid.Parse(args.TemplateVersionID)
 		if err != nil {
@@ -417,6 +476,7 @@ var ListWorkspaces = Tool[ListWorkspacesArgs, []MinimalWorkspace]{
 			Required: []string{},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args ListWorkspacesArgs) ([]MinimalWorkspace, error) {
 		owner := args.Owner
 		if owner == "" {
@@ -454,6 +514,7 @@ var ListTemplates = Tool[NoArgs, []MinimalTemplate]{
 			Required:   []string{},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, _ NoArgs) ([]MinimalTemplate, error) {
 		templates, err := deps.coderClient.Templates(ctx, codersdk.TemplateFilter{})
 		if err != nil {
@@ -491,6 +552,7 @@ var ListTemplateVersionParameters = Tool[ListTemplateVersionParametersArgs, []co
 			Required: []string{"template_version_id"},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args ListTemplateVersionParametersArgs) ([]codersdk.TemplateVersionParameter, error) {
 		templateVersionID, err := uuid.Parse(args.TemplateVersionID)
 		if err != nil {
@@ -513,6 +575,7 @@ var GetAuthenticatedUser = Tool[NoArgs, codersdk.User]{
 			Required:   []string{},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, _ NoArgs) (codersdk.User, error) {
 		return deps.coderClient.User(ctx, "me")
 	},
@@ -526,8 +589,13 @@ type CreateWorkspaceBuildArgs struct {
 
 var CreateWorkspaceBuild = Tool[CreateWorkspaceBuildArgs, codersdk.WorkspaceBuild]{
 	Tool: aisdk.Tool{
-		Name:        ToolNameCreateWorkspaceBuild,
-		Description: "Create a new workspace build for an existing workspace. Use this to start, stop, or delete.",
+		Name: ToolNameCreateWorkspaceBuild,
+		Description: `Create a new workspace build for an existing workspace. Use this to start, stop, or delete.
+
+After creating a workspace build, watch the build logs and wait for the
+workspace build to complete before trying to start another build or use or
+connect to the workspace.
+`,
 		Schema: aisdk.Schema{
 			Properties: map[string]any{
 				"workspace_id": map[string]any{
@@ -546,6 +614,7 @@ var CreateWorkspaceBuild = Tool[CreateWorkspaceBuildArgs, codersdk.WorkspaceBuil
 			Required: []string{"workspace_id", "transition"},
 		},
 	},
+	MCPAnnotations: mcpDestructiveAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args CreateWorkspaceBuildArgs) (codersdk.WorkspaceBuild, error) {
 		workspaceID, err := uuid.Parse(args.WorkspaceID)
 		if err != nil {
@@ -1039,6 +1108,7 @@ The file_id provided is a reference to a tar file you have uploaded containing t
 			Required: []string{"file_id"},
 		},
 	},
+	MCPAnnotations: mcpMutationAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args CreateTemplateVersionArgs) (codersdk.TemplateVersion, error) {
 		me, err := deps.coderClient.User(ctx, "me")
 		if err != nil {
@@ -1089,6 +1159,7 @@ var GetWorkspaceAgentLogs = Tool[GetWorkspaceAgentLogsArgs, []string]{
 			Required: []string{"workspace_agent_id"},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args GetWorkspaceAgentLogsArgs) ([]string, error) {
 		workspaceAgentID, err := uuid.Parse(args.WorkspaceAgentID)
 		if err != nil {
@@ -1128,6 +1199,7 @@ var GetWorkspaceBuildLogs = Tool[GetWorkspaceBuildLogsArgs, []string]{
 			Required: []string{"workspace_build_id"},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args GetWorkspaceBuildLogsArgs) ([]string, error) {
 		workspaceBuildID, err := uuid.Parse(args.WorkspaceBuildID)
 		if err != nil {
@@ -1163,6 +1235,7 @@ var GetTemplateVersionLogs = Tool[GetTemplateVersionLogsArgs, []string]{
 			Required: []string{"template_version_id"},
 		},
 	},
+	MCPAnnotations: mcpReadOnlyAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args GetTemplateVersionLogsArgs) ([]string, error) {
 		templateVersionID, err := uuid.Parse(args.TemplateVersionID)
 		if err != nil {
@@ -1203,6 +1276,7 @@ var UpdateTemplateActiveVersion = Tool[UpdateTemplateActiveVersionArgs, string]{
 			Required: []string{"template_id", "template_version_id"},
 		},
 	},
+	MCPAnnotations: mcpMutationAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args UpdateTemplateActiveVersionArgs) (string, error) {
 		templateID, err := uuid.Parse(args.TemplateID)
 		if err != nil {
@@ -1240,6 +1314,7 @@ var UploadTarFile = Tool[UploadTarFileArgs, codersdk.UploadResponse]{
 			Required: []string{"files"},
 		},
 	},
+	MCPAnnotations: mcpMutationAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args UploadTarFileArgs) (codersdk.UploadResponse, error) {
 		pipeReader, pipeWriter := io.Pipe()
 		done := make(chan struct{})
@@ -1315,6 +1390,7 @@ var CreateTemplate = Tool[CreateTemplateArgs, codersdk.Template]{
 			Required: []string{"name", "display_name", "description", "version_id"},
 		},
 	},
+	MCPAnnotations: mcpMutationAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args CreateTemplateArgs) (codersdk.Template, error) {
 		me, err := deps.coderClient.User(ctx, "me")
 		if err != nil {
@@ -1354,6 +1430,7 @@ var DeleteTemplate = Tool[DeleteTemplateArgs, codersdk.Response]{
 			Required: []string{"template_id"},
 		},
 	},
+	MCPAnnotations: mcpDestructiveAnnotations,
 	Handler: func(ctx context.Context, deps Deps, args DeleteTemplateArgs) (codersdk.Response, error) {
 		templateID, err := uuid.Parse(args.TemplateID)
 		if err != nil {
@@ -1411,7 +1488,7 @@ var WorkspaceLS = Tool[WorkspaceLSArgs, WorkspaceLSResponse]{
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 				"path": map[string]any{
 					"type":        "string",
@@ -1421,6 +1498,7 @@ var WorkspaceLS = Tool[WorkspaceLSArgs, WorkspaceLSResponse]{
 			Required: []string{"path", "workspace"},
 		},
 	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspaceLSArgs) (WorkspaceLSResponse, error) {
 		conn, err := newAgentConn(ctx, deps.coderClient, args.Workspace)
@@ -1468,7 +1546,7 @@ var WorkspaceReadFile = Tool[WorkspaceReadFileArgs, WorkspaceReadFileResponse]{
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 				"path": map[string]any{
 					"type":        "string",
@@ -1486,6 +1564,7 @@ var WorkspaceReadFile = Tool[WorkspaceReadFileArgs, WorkspaceReadFileResponse]{
 			Required: []string{"path", "workspace"},
 		},
 	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspaceReadFileArgs) (WorkspaceReadFileResponse, error) {
 		conn, err := newAgentConn(ctx, deps.coderClient, args.Workspace)
@@ -1527,13 +1606,25 @@ type WorkspaceWriteFileArgs struct {
 
 var WorkspaceWriteFile = Tool[WorkspaceWriteFileArgs, codersdk.Response]{
 	Tool: aisdk.Tool{
-		Name:        ToolNameWorkspaceWriteFile,
-		Description: `Write a file in a workspace.`,
+		Name: ToolNameWorkspaceWriteFile,
+		Description: `Write a file in a workspace.
+
+If a file write fails due to syntax errors or encoding issues, do NOT switch
+to using bash commands as a workaround. Instead:
+
+	1. Read the error message carefully to identify the issue
+	2. Fix the content encoding/syntax
+	3. Retry with this tool
+
+The content parameter expects base64-encoded bytes. Ensure your source content
+is correct before encoding it. If you encounter errors, decode and verify the
+content you are trying to write, then re-encode it properly.
+`,
 		Schema: aisdk.Schema{
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 				"path": map[string]any{
 					"type":        "string",
@@ -1547,6 +1638,7 @@ var WorkspaceWriteFile = Tool[WorkspaceWriteFileArgs, codersdk.Response]{
 			Required: []string{"path", "workspace", "content"},
 		},
 	},
+	MCPAnnotations:     mcpDestructiveAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspaceWriteFileArgs) (codersdk.Response, error) {
 		conn, err := newAgentConn(ctx, deps.coderClient, args.Workspace)
@@ -1581,7 +1673,7 @@ var WorkspaceEditFile = Tool[WorkspaceEditFileArgs, codersdk.Response]{
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 				"path": map[string]any{
 					"type":        "string",
@@ -1609,6 +1701,7 @@ var WorkspaceEditFile = Tool[WorkspaceEditFileArgs, codersdk.Response]{
 			Required: []string{"path", "workspace", "edits"},
 		},
 	},
+	MCPAnnotations:     mcpDestructiveAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspaceEditFileArgs) (codersdk.Response, error) {
 		conn, err := newAgentConn(ctx, deps.coderClient, args.Workspace)
@@ -1648,7 +1741,7 @@ var WorkspaceEditFiles = Tool[WorkspaceEditFilesArgs, codersdk.Response]{
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 				"files": map[string]any{
 					"type":        "array",
@@ -1668,11 +1761,15 @@ var WorkspaceEditFiles = Tool[WorkspaceEditFilesArgs, codersdk.Response]{
 									"properties": map[string]any{
 										"search": map[string]any{
 											"type":        "string",
-											"description": "The old string to replace.",
+											"description": "The old string to replace. Must uniquely match exactly one location in the file unless replace_all is true. Include enough surrounding context to make the match unique.",
 										},
 										"replace": map[string]any{
 											"type":        "string",
 											"description": "The new string that replaces the old string.",
+										},
+										"replace_all": map[string]any{
+											"type":        "boolean",
+											"description": "When true, replaces all occurrences of the search string. Defaults to false, which requires the search string to match exactly once.",
 										},
 									},
 									"required": []string{"search", "replace"},
@@ -1686,6 +1783,7 @@ var WorkspaceEditFiles = Tool[WorkspaceEditFilesArgs, codersdk.Response]{
 			Required: []string{"workspace", "files"},
 		},
 	},
+	MCPAnnotations:     mcpDestructiveAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspaceEditFilesArgs) (codersdk.Response, error) {
 		conn, err := newAgentConn(ctx, deps.coderClient, args.Workspace)
@@ -1722,7 +1820,7 @@ var WorkspacePortForward = Tool[WorkspacePortForwardArgs, WorkspacePortForwardRe
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 				"port": map[string]any{
 					"type":        "number",
@@ -1732,6 +1830,7 @@ var WorkspacePortForward = Tool[WorkspacePortForwardArgs, WorkspacePortForwardRe
 			Required: []string{"workspace", "port"},
 		},
 	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspacePortForwardArgs) (WorkspacePortForwardResponse, error) {
 		workspaceName := NormalizeWorkspaceInput(args.Workspace)
@@ -1779,12 +1878,13 @@ var WorkspaceListApps = Tool[WorkspaceListAppsArgs, WorkspaceListAppsResponse]{
 			Properties: map[string]any{
 				"workspace": map[string]any{
 					"type":        "string",
-					"description": workspaceDescription,
+					"description": workspaceAgentDescription,
 				},
 			},
 			Required: []string{"workspace"},
 		},
 	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args WorkspaceListAppsArgs) (WorkspaceListAppsResponse, error) {
 		workspaceName := NormalizeWorkspaceInput(args.Workspace)
@@ -1842,6 +1942,7 @@ var CreateTask = Tool[CreateTaskArgs, codersdk.Task]{
 			Required: []string{"input", "template_version_id"},
 		},
 	},
+	MCPAnnotations:     mcpMutationAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args CreateTaskArgs) (codersdk.Task, error) {
 		if args.Input == "" {
@@ -1865,8 +1966,7 @@ var CreateTask = Tool[CreateTaskArgs, codersdk.Task]{
 			args.User = codersdk.Me
 		}
 
-		expClient := codersdk.NewExperimentalClient(deps.coderClient)
-		task, err := expClient.CreateTask(ctx, args.User, codersdk.CreateTaskRequest{
+		task, err := deps.coderClient.CreateTask(ctx, args.User, codersdk.CreateTaskRequest{
 			Input:                   args.Input,
 			TemplateVersionID:       tvID,
 			TemplateVersionPresetID: tvPresetID,
@@ -1897,32 +1997,19 @@ var DeleteTask = Tool[DeleteTaskArgs, codersdk.Response]{
 			Required: []string{"task_id"},
 		},
 	},
+	MCPAnnotations:     mcpDestructiveAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args DeleteTaskArgs) (codersdk.Response, error) {
 		if args.TaskID == "" {
 			return codersdk.Response{}, xerrors.New("task_id is required")
 		}
 
-		expClient := codersdk.NewExperimentalClient(deps.coderClient)
-
-		var owner string
-		id, err := uuid.Parse(args.TaskID)
-		if err == nil {
-			task, err := expClient.TaskByID(ctx, id)
-			if err != nil {
-				return codersdk.Response{}, xerrors.Errorf("get task %q: %w", args.TaskID, err)
-			}
-			owner = task.OwnerName
-		} else {
-			ws, err := normalizedNamedWorkspace(ctx, deps.coderClient, args.TaskID)
-			if err != nil {
-				return codersdk.Response{}, xerrors.Errorf("get task workspace %q: %w", args.TaskID, err)
-			}
-			owner = ws.OwnerName
-			id = ws.ID
+		task, err := deps.coderClient.TaskByIdentifier(ctx, args.TaskID)
+		if err != nil {
+			return codersdk.Response{}, xerrors.Errorf("resolve task: %w", err)
 		}
 
-		err = expClient.DeleteTask(ctx, owner, id)
+		err = deps.coderClient.DeleteTask(ctx, task.OwnerName, task.ID)
 		if err != nil {
 			return codersdk.Response{}, xerrors.Errorf("delete task: %w", err)
 		}
@@ -1934,8 +2021,8 @@ var DeleteTask = Tool[DeleteTaskArgs, codersdk.Response]{
 }
 
 type ListTasksArgs struct {
-	Status string `json:"status"`
-	User   string `json:"user"`
+	Status codersdk.TaskStatus `json:"status"`
+	User   string              `json:"user"`
 }
 
 type ListTasksResponse struct {
@@ -1960,14 +2047,14 @@ var ListTasks = Tool[ListTasksArgs, ListTasksResponse]{
 			Required: []string{},
 		},
 	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args ListTasksArgs) (ListTasksResponse, error) {
 		if args.User == "" {
 			args.User = codersdk.Me
 		}
 
-		expClient := codersdk.NewExperimentalClient(deps.coderClient)
-		tasks, err := expClient.Tasks(ctx, &codersdk.TasksFilter{
+		tasks, err := deps.coderClient.Tasks(ctx, &codersdk.TasksFilter{
 			Owner:  args.User,
 			Status: args.Status,
 		})
@@ -1986,7 +2073,7 @@ type GetTaskStatusArgs struct {
 }
 
 type GetTaskStatusResponse struct {
-	Status codersdk.WorkspaceStatus `json:"status"`
+	Status codersdk.TaskStatus      `json:"status"`
 	State  *codersdk.TaskStateEntry `json:"state"`
 }
 
@@ -2004,26 +2091,16 @@ var GetTaskStatus = Tool[GetTaskStatusArgs, GetTaskStatusResponse]{
 			Required: []string{"task_id"},
 		},
 	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
 	UserClientOptional: true,
 	Handler: func(ctx context.Context, deps Deps, args GetTaskStatusArgs) (GetTaskStatusResponse, error) {
 		if args.TaskID == "" {
 			return GetTaskStatusResponse{}, xerrors.New("task_id is required")
 		}
 
-		expClient := codersdk.NewExperimentalClient(deps.coderClient)
-
-		id, err := uuid.Parse(args.TaskID)
+		task, err := deps.coderClient.TaskByIdentifier(ctx, args.TaskID)
 		if err != nil {
-			ws, err := normalizedNamedWorkspace(ctx, deps.coderClient, args.TaskID)
-			if err != nil {
-				return GetTaskStatusResponse{}, xerrors.Errorf("get task workspace %q: %w", args.TaskID, err)
-			}
-			id = ws.ID
-		}
-
-		task, err := expClient.TaskByID(ctx, id)
-		if err != nil {
-			return GetTaskStatusResponse{}, xerrors.Errorf("get task %q: %w", args.TaskID, err)
+			return GetTaskStatusResponse{}, xerrors.Errorf("resolve task %q: %w", args.TaskID, err)
 		}
 
 		return GetTaskStatusResponse{
@@ -2033,11 +2110,95 @@ var GetTaskStatus = Tool[GetTaskStatusArgs, GetTaskStatusResponse]{
 	},
 }
 
-// normalizedNamedWorkspace normalizes the workspace name before getting the
-// workspace by name.
-func normalizedNamedWorkspace(ctx context.Context, client *codersdk.Client, name string) (codersdk.Workspace, error) {
-	// Maybe namedWorkspace should itself call NormalizeWorkspaceInput?
-	return namedWorkspace(ctx, client, NormalizeWorkspaceInput(name))
+type SendTaskInputArgs struct {
+	TaskID string `json:"task_id"`
+	Input  string `json:"input"`
+}
+
+var SendTaskInput = Tool[SendTaskInputArgs, codersdk.Response]{
+	Tool: aisdk.Tool{
+		Name:        ToolNameSendTaskInput,
+		Description: `Send input to a running task.`,
+		Schema: aisdk.Schema{
+			Properties: map[string]any{
+				"task_id": map[string]any{
+					"type":        "string",
+					"description": taskIDDescription("prompt"),
+				},
+				"input": map[string]any{
+					"type":        "string",
+					"description": "The input to send to the task.",
+				},
+			},
+			Required: []string{"task_id", "input"},
+		},
+	},
+	MCPAnnotations:     mcpMutationAnnotations,
+	UserClientOptional: true,
+	Handler: func(ctx context.Context, deps Deps, args SendTaskInputArgs) (codersdk.Response, error) {
+		if args.TaskID == "" {
+			return codersdk.Response{}, xerrors.New("task_id is required")
+		}
+
+		if args.Input == "" {
+			return codersdk.Response{}, xerrors.New("input is required")
+		}
+
+		task, err := deps.coderClient.TaskByIdentifier(ctx, args.TaskID)
+		if err != nil {
+			return codersdk.Response{}, xerrors.Errorf("resolve task %q: %w", args.TaskID, err)
+		}
+
+		err = deps.coderClient.TaskSend(ctx, task.OwnerName, task.ID, codersdk.TaskSendRequest{
+			Input: args.Input,
+		})
+		if err != nil {
+			return codersdk.Response{}, xerrors.Errorf("send task input %q: %w", args.TaskID, err)
+		}
+
+		return codersdk.Response{
+			Message: "Input sent to task successfully.",
+		}, nil
+	},
+}
+
+type GetTaskLogsArgs struct {
+	TaskID string `json:"task_id"`
+}
+
+var GetTaskLogs = Tool[GetTaskLogsArgs, codersdk.TaskLogsResponse]{
+	Tool: aisdk.Tool{
+		Name:        ToolNameGetTaskLogs,
+		Description: `Get the logs of a task.`,
+		Schema: aisdk.Schema{
+			Properties: map[string]any{
+				"task_id": map[string]any{
+					"type":        "string",
+					"description": taskIDDescription("query"),
+				},
+			},
+			Required: []string{"task_id"},
+		},
+	},
+	MCPAnnotations:     mcpReadOnlyAnnotations,
+	UserClientOptional: true,
+	Handler: func(ctx context.Context, deps Deps, args GetTaskLogsArgs) (codersdk.TaskLogsResponse, error) {
+		if args.TaskID == "" {
+			return codersdk.TaskLogsResponse{}, xerrors.New("task_id is required")
+		}
+
+		task, err := deps.coderClient.TaskByIdentifier(ctx, args.TaskID)
+		if err != nil {
+			return codersdk.TaskLogsResponse{}, err
+		}
+
+		logs, err := deps.coderClient.TaskLogs(ctx, task.OwnerName, task.ID)
+		if err != nil {
+			return codersdk.TaskLogsResponse{}, xerrors.Errorf("get task logs %q: %w", args.TaskID, err)
+		}
+
+		return logs, nil
+	},
 }
 
 // NormalizeWorkspaceInput converts workspace name input to standard format.
@@ -2101,7 +2262,9 @@ func newAgentConn(ctx context.Context, client *codersdk.Client, workspace string
 	return conn, nil
 }
 
-const workspaceDescription = "The workspace name in the format [owner/]workspace[.agent]. If an owner is not specified, the authenticated user is used."
+const workspaceDescription = "The workspace ID or name in the format [owner/]workspace. If an owner is not specified, the authenticated user is used."
+
+const workspaceAgentDescription = "The workspace name in the format [owner/]workspace[.agent]. If an owner is not specified, the authenticated user is used."
 
 func taskIDDescription(action string) string {
 	return fmt.Sprintf("ID or workspace identifier in the format [owner/]workspace[.agent] for the task to %s. If an owner is not specified, the authenticated user is used.", action)

@@ -83,13 +83,31 @@ Specify automatic updates setting for the workspace (accepts 'always' or 'never'
 
 Specify the source workspace name to copy parameters from.
 
+### --use-parameter-defaults
+
+|             |                                                      |
+|-------------|------------------------------------------------------|
+| Type        | <code>bool</code>                                    |
+| Environment | <code>$CODER_WORKSPACE_USE_PARAMETER_DEFAULTS</code> |
+
+Automatically accept parameter defaults when no value is provided.
+
+### --no-wait
+
+|             |                                    |
+|-------------|------------------------------------|
+| Type        | <code>bool</code>                  |
+| Environment | <code>$CODER_CREATE_NO_WAIT</code> |
+
+Return immediately after creating the workspace. The build will run in the background.
+
 ### -y, --yes
 
 |      |                   |
 |------|-------------------|
 | Type | <code>bool</code> |
 
-Bypass prompts.
+Bypass confirmation prompts.
 
 ### --parameter
 

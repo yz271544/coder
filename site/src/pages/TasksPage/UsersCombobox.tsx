@@ -1,8 +1,10 @@
-import Skeleton from "@mui/material/Skeleton";
-import { users } from "api/queries/users";
-import type { User } from "api/typesGenerated";
-import { Avatar } from "components/Avatar/Avatar";
-import { Button } from "components/Button/Button";
+import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
+import { type FC, useState } from "react";
+import { keepPreviousData, useQuery } from "react-query";
+import { users } from "#/api/queries/users";
+import type { User } from "#/api/typesGenerated";
+import { Avatar } from "#/components/Avatar/Avatar";
+import { Button } from "#/components/Button/Button";
 import {
 	Command,
 	CommandEmpty,
@@ -10,18 +12,16 @@ import {
 	CommandInput,
 	CommandItem,
 	CommandList,
-} from "components/Command/Command";
+} from "#/components/Command/Command";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
-} from "components/Popover/Popover";
-import { useAuthenticated } from "hooks";
-import { useDebouncedValue } from "hooks/debounce";
-import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
-import { type FC, useState } from "react";
-import { keepPreviousData, useQuery } from "react-query";
-import { cn } from "utils/cn";
+} from "#/components/Popover/Popover";
+import { Skeleton } from "#/components/Skeleton/Skeleton";
+import { useDebouncedValue } from "#/hooks/debounce";
+import { useAuthenticated } from "#/hooks/useAuthenticated";
+import { cn } from "#/utils/cn";
 
 type UserOption = {
 	label: string;
@@ -46,7 +46,7 @@ export const UsersCombobox: FC<UsersComboboxProps> = ({
 	const debouncedSearch = useDebouncedValue(search, 250);
 	const { user } = useAuthenticated();
 	const { data: options } = useQuery({
-		...users({ q: debouncedSearch }),
+		...users({ q: debouncedSearch ? `name:"${debouncedSearch}"` : "" }),
 		select: (res) => mapUsersToOptions(res.users, user, value),
 		placeholderData: keepPreviousData,
 	});
@@ -75,7 +75,11 @@ export const UsersCombobox: FC<UsersComboboxProps> = ({
 				</Button>
 			</PopoverTrigger>
 			<PopoverContent className="w-[280px] p-0">
-				<Command>
+				{/*
+				 * `shouldFilter` is false because we don't want to filter on the `value`
+				 * because we're using the `name` field to filter on the backend.
+				 */}
+				<Command shouldFilter={false}>
 					<CommandInput
 						placeholder="Search user..."
 						value={search}

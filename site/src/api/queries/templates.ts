@@ -1,4 +1,9 @@
-import { API, type GetTemplatesOptions, type GetTemplatesQuery } from "api/api";
+import type { MutationOptions, QueryClient, QueryOptions } from "react-query";
+import {
+	API,
+	type GetTemplatesOptions,
+	type GetTemplatesQuery,
+} from "#/api/api";
 import type {
 	CreateTemplateRequest,
 	CreateTemplateVersionRequest,
@@ -8,10 +13,9 @@ import type {
 	TemplateRole,
 	TemplateVersion,
 	UsersRequest,
-} from "api/typesGenerated";
-import type { MutationOptions, QueryClient, QueryOptions } from "react-query";
-import { delay } from "utils/delay";
-import { getTemplateVersionFiles } from "utils/templateVersion";
+} from "#/api/typesGenerated";
+import { delay } from "#/utils/delay";
+import { getTemplateVersionFiles } from "#/utils/templateVersion";
 
 const templateKey = (templateId: string) => ["template", templateId];
 
@@ -35,7 +39,7 @@ export const templateByName = (organization: string, name: string) => {
 	} satisfies QueryOptions<Template>;
 };
 
-const getTemplatesQueryKey = (
+export const getTemplatesQueryKey = (
 	options?: GetTemplatesOptions | GetTemplatesQuery,
 ) => ["templates", options];
 
@@ -249,9 +253,15 @@ export const templateVersionLogs = (versionId: string) => {
 	};
 };
 
+export const richParametersKey = (versionId: string) => [
+	templateVersionRoot,
+	versionId,
+	"richParameters",
+];
+
 export const richParameters = (versionId: string) => {
 	return {
-		queryKey: [templateVersionRoot, versionId, "richParameters"],
+		queryKey: richParametersKey(versionId),
 		queryFn: () => API.getTemplateVersionRichParameters(versionId),
 	};
 };
@@ -298,9 +308,15 @@ export const previousTemplateVersion = (
 	};
 };
 
+export const templateVersionPresetsKey = (versionId: string) => [
+	templateVersionRoot,
+	versionId,
+	"presets",
+];
+
 export const templateVersionPresets = (versionId: string) => {
 	return {
-		queryKey: [templateVersionRoot, versionId, "presets"],
+		queryKey: templateVersionPresetsKey(versionId),
 		queryFn: () => API.getTemplateVersionPresets(versionId),
 	};
 };

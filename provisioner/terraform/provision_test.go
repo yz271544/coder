@@ -3,31 +3,25 @@
 package terraform_test
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/terraform-provider-coder/v2/provider"
-
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/codersdk/drpcsdk"
 	"github.com/coder/coder/v2/provisioner/terraform"
 	"github.com/coder/coder/v2/provisionersdk"
@@ -85,6 +79,27 @@ func setupProvisioner(t *testing.T, opts *provisionerServeOptions) (context.Cont
 	return ctx, api
 }
 
+// sendInitAndGetResp will send the init request and wait for and return the InitComplete response.
+func sendInitAndGetResp(t *testing.T, sess proto.DRPCProvisioner_SessionClient, archive []byte, onLog ...func(log string)) *proto.InitComplete {
+	t.Helper()
+	err := sendInit(sess, archive)
+	require.NoError(t, err)
+	for {
+		msg, err := sess.Recv()
+		require.NoError(t, err)
+		if logMsg, ok := msg.Type.(*proto.Response_Log); ok {
+			for _, do := range onLog {
+				do(logMsg.Log.Output)
+			}
+			continue
+		}
+
+		init := msg.GetInit()
+		require.NotNil(t, init)
+		return init
+	}
+}
+
 func configure(ctx context.Context, t *testing.T, client proto.DRPCProvisionerClient, config *proto.Config) proto.DRPCProvisioner_SessionClient {
 	t.Helper()
 	sess, err := client.Session(ctx)
@@ -94,169 +109,8 @@ func configure(ctx context.Context, t *testing.T, client proto.DRPCProvisionerCl
 	return sess
 }
 
-func hashTemplateFilesAndTestName(t *testing.T, testName string, templateFiles map[string]string) string {
-	t.Helper()
-
-	sortedFileNames := make([]string, 0, len(templateFiles))
-	for fileName := range templateFiles {
-		sortedFileNames = append(sortedFileNames, fileName)
-	}
-	sort.Strings(sortedFileNames)
-
-	// Inserting a delimiter between the file name and the file content
-	// ensures that a file named `ab` with content `cd`
-	// will not hash to the same value as a file named `abc` with content `d`.
-	// This can still happen if the file name or content include the delimiter,
-	// but hopefully they won't.
-	delimiter := []byte("🎉 🌱 🌷")
-
-	hasher := sha256.New()
-	for _, fileName := range sortedFileNames {
-		file := templateFiles[fileName]
-		_, err := hasher.Write([]byte(fileName))
-		require.NoError(t, err)
-		_, err = hasher.Write(delimiter)
-		require.NoError(t, err)
-		_, err = hasher.Write([]byte(file))
-		require.NoError(t, err)
-	}
-	_, err := hasher.Write(delimiter)
-	require.NoError(t, err)
-	_, err = hasher.Write([]byte(testName))
-	require.NoError(t, err)
-
-	return hex.EncodeToString(hasher.Sum(nil))
-}
-
-const (
-	terraformConfigFileName   = "terraform.rc"
-	cacheProvidersDirName     = "providers"
-	cacheTemplateFilesDirName = "files"
-)
-
-// Writes a Terraform CLI config file (`terraform.rc`) in `dir` to enforce using the local provider mirror.
-// This blocks network access for providers, forcing Terraform to use only what's cached in `dir`.
-// Returns the path to the generated config file.
-func writeCliConfig(t *testing.T, dir string) string {
-	t.Helper()
-
-	cliConfigPath := filepath.Join(dir, terraformConfigFileName)
-	require.NoError(t, os.MkdirAll(filepath.Dir(cliConfigPath), 0o700))
-
-	content := fmt.Sprintf(`
-		provider_installation {
-			filesystem_mirror {
-				path    = "%s"
-				include = ["*/*"]
-			}
-			direct {
-				exclude = ["*/*"]
-			}
-		}
-	`, filepath.Join(dir, cacheProvidersDirName))
-	require.NoError(t, os.WriteFile(cliConfigPath, []byte(content), 0o600))
-	return cliConfigPath
-}
-
-func runCmd(t *testing.T, dir string, args ...string) {
-	t.Helper()
-
-	stdout, stderr := bytes.NewBuffer(nil), bytes.NewBuffer(nil)
-	cmd := exec.Command(args[0], args[1:]...) //#nosec
-	cmd.Dir = dir
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("failed to run %s: %s\nstdout: %s\nstderr: %s", strings.Join(args, " "), err, stdout.String(), stderr.String())
-	}
-}
-
-// Each test gets a unique cache dir based on its name and template files.
-// This ensures that tests can download providers in parallel and that they
-// will redownload providers if the template files change.
-func getTestCacheDir(t *testing.T, rootDir string, testName string, templateFiles map[string]string) string {
-	t.Helper()
-
-	hash := hashTemplateFilesAndTestName(t, testName, templateFiles)
-	dir := filepath.Join(rootDir, hash[:12])
-	return dir
-}
-
-// Ensures Terraform providers are downloaded and cached locally in a unique directory for the test.
-// Uses `terraform init` then `mirror` to populate the cache if needed.
-// Returns the cache directory path.
-func downloadProviders(t *testing.T, rootDir string, testName string, templateFiles map[string]string) string {
-	t.Helper()
-
-	dir := getTestCacheDir(t, rootDir, testName, templateFiles)
-	if _, err := os.Stat(dir); err == nil {
-		t.Logf("%s: using cached terraform providers", testName)
-		return dir
-	}
-	filesDir := filepath.Join(dir, cacheTemplateFilesDirName)
-	defer func() {
-		// The files dir will contain a copy of terraform providers generated
-		// by the terraform init command. We don't want to persist them since
-		// we already have a registry mirror in the providers dir.
-		if err := os.RemoveAll(filesDir); err != nil {
-			t.Logf("failed to remove files dir %s: %s", filesDir, err)
-		}
-		if !t.Failed() {
-			return
-		}
-		// If `downloadProviders` function failed, clean up the cache dir.
-		// We don't want to leave it around because it may be incomplete or corrupted.
-		if err := os.RemoveAll(dir); err != nil {
-			t.Logf("failed to remove dir %s: %s", dir, err)
-		}
-	}()
-
-	require.NoError(t, os.MkdirAll(filesDir, 0o700))
-
-	for fileName, file := range templateFiles {
-		filePath := filepath.Join(filesDir, fileName)
-		require.NoError(t, os.MkdirAll(filepath.Dir(filePath), 0o700))
-		require.NoError(t, os.WriteFile(filePath, []byte(file), 0o600))
-	}
-
-	providersDir := filepath.Join(dir, cacheProvidersDirName)
-	require.NoError(t, os.MkdirAll(providersDir, 0o700))
-
-	// We need to run init because if a test uses modules in its template,
-	// the mirror command will fail without it.
-	runCmd(t, filesDir, "terraform", "init")
-	// Now, mirror the providers into `providersDir`. We use this explicit mirror
-	// instead of relying only on the standard Terraform plugin cache.
-	//
-	// Why? Because this mirror, when used with the CLI config from `writeCliConfig`,
-	// prevents Terraform from hitting the network registry during `plan`. This cuts
-	// down on network calls, making CI tests less flaky.
-	//
-	// In contrast, the standard cache *still* contacts the registry for metadata
-	// during `init`, even if the plugins are already cached locally - see link below.
-	//
-	// Ref: https://developer.hashicorp.com/terraform/cli/config/config-file#provider-plugin-cache
-	// > When a plugin cache directory is enabled, the terraform init command will
-	// > still use the configured or implied installation methods to obtain metadata
-	// > about which plugins are available
-	runCmd(t, filesDir, "terraform", "providers", "mirror", providersDir)
-
-	return dir
-}
-
-// Caches providers locally and generates a Terraform CLI config to use *only* that cache.
-// This setup prevents network access for providers during `terraform init`, improving reliability
-// in subsequent test runs.
-// Returns the path to the generated CLI config file.
-func cacheProviders(t *testing.T, rootDir string, testName string, templateFiles map[string]string) string {
-	t.Helper()
-
-	providersParentDir := downloadProviders(t, rootDir, testName, templateFiles)
-	cliConfigPath := writeCliConfig(t, providersParentDir)
-	return cliConfigPath
-}
-
-func readProvisionLog(t *testing.T, response proto.DRPCProvisioner_SessionClient) string {
+func readProvisionLog(t *testing.T, response proto.DRPCProvisioner_SessionClient) (string, *proto.Response) {
+	var last *proto.Response
 	var logBuf strings.Builder
 	for {
 		msg, err := response.Recv()
@@ -268,9 +122,16 @@ func readProvisionLog(t *testing.T, response proto.DRPCProvisioner_SessionClient
 			require.NoError(t, err)
 			continue
 		}
+		last = msg
 		break
 	}
-	return logBuf.String()
+	return logBuf.String(), last
+}
+
+func sendInit(sess proto.DRPCProvisioner_SessionClient, archive []byte) error {
+	return sess.Send(&proto.Request{Type: &proto.Request_Init{Init: &proto.InitRequest{
+		TemplateSourceArchive: archive,
+	}}})
 }
 
 func sendPlan(sess proto.DRPCProvisioner_SessionClient, transition proto.WorkspaceTransition) error {
@@ -282,6 +143,12 @@ func sendPlan(sess proto.DRPCProvisioner_SessionClient, transition proto.Workspa
 func sendApply(sess proto.DRPCProvisioner_SessionClient, transition proto.WorkspaceTransition) error {
 	return sess.Send(&proto.Request{Type: &proto.Request_Apply{Apply: &proto.ApplyRequest{
 		Metadata: &proto.Metadata{WorkspaceTransition: transition},
+	}}})
+}
+
+func sendGraph(sess proto.DRPCProvisioner_SessionClient, source proto.GraphSource) error {
+	return sess.Send(&proto.Request{Type: &proto.Request_Graph{Graph: &proto.GraphRequest{
+		Source: source,
 	}}})
 }
 
@@ -322,20 +189,25 @@ func TestProvision_Cancel(t *testing.T) {
 			binPath := filepath.Join(dir, "terraform")
 
 			// Example: exec /path/to/terrafork_fake_cancel.sh 1.2.1 apply "$@"
-			content := fmt.Sprintf("#!/bin/sh\nexec %q %s %s \"$@\"\n", fakeBin, terraform.TerraformVersion.String(), tt.mode)
+			content := fmt.Sprintf("#!/usr/bin/env sh\nexec %q %s %s \"$@\"\n", fakeBin, terraform.TerraformVersion.String(), tt.mode)
 			err := os.WriteFile(binPath, []byte(content), 0o755) //#nosec
 			require.NoError(t, err)
 			t.Logf("wrote fake terraform script to %s", binPath)
 
+			logger := slogtest.Make(t, &slogtest.Options{IgnoreErrors: true}).
+				With(slog.F("source", "provisioner")).
+				Leveled(slog.LevelDebug)
+
 			ctx, api := setupProvisioner(t, &provisionerServeOptions{
 				binaryPath: binPath,
+				logger:     &logger,
 			})
-			sess := configure(ctx, t, api, &proto.Config{
-				TemplateSourceArchive: testutil.CreateTar(t, nil),
-			})
+			sess := configure(ctx, t, api, &proto.Config{})
 
-			err = sendPlan(sess, proto.WorkspaceTransition_START)
+			err = sendInit(sess, testutil.CreateTar(t, nil))
 			require.NoError(t, err)
+
+			var planOnce sync.Once
 
 			for _, line := range tt.startSequence {
 			LoopStart:
@@ -343,14 +215,25 @@ func TestProvision_Cancel(t *testing.T) {
 				require.NoError(t, err)
 
 				t.Log(msg.Type)
+				if msg.GetInit() != nil && msg.GetInit().GetError() == "" {
+					planOnce.Do(func() {
+						t.Log("Sending terraform plan request")
+						// Send plan after init
+						err = sendPlan(sess, proto.WorkspaceTransition_START)
+						require.NoError(t, err)
+					})
+					goto LoopStart
+				}
 
 				log := msg.GetLog()
 				if log == nil {
 					goto LoopStart
 				}
+
 				require.Equal(t, line, log.Output)
 			}
 
+			t.Log("Sending the cancel request")
 			err = sess.Send(&proto.Request{
 				Type: &proto.Request_Cancel{
 					Cancel: &proto.CancelRequest{},
@@ -365,10 +248,14 @@ func TestProvision_Cancel(t *testing.T) {
 
 				if log := msg.GetLog(); log != nil {
 					gotLog = append(gotLog, log.Output)
-				}
-				if c := msg.GetPlan(); c != nil {
+				} else if c := msg.GetPlan(); c != nil {
 					require.Contains(t, c.Error, "exit status 1")
 					break
+				} else if c := msg.GetInit(); c != nil {
+					require.Contains(t, c.Error, "exit status 1")
+					break
+				} else {
+					t.Fatalf("unexpected message: %v", msg)
 				}
 			}
 			require.Equal(t, tt.wantLog, gotLog)
@@ -397,15 +284,14 @@ func TestProvision_CancelTimeout(t *testing.T) {
 		exitTimeout: time.Second,
 	})
 
-	sess := configure(ctx, t, api, &proto.Config{
-		TemplateSourceArchive: testutil.CreateTar(t, nil),
-	})
+	sess := configure(ctx, t, api, &proto.Config{})
+	sendInitAndGetResp(t, sess, testutil.CreateTar(t, nil))
 
 	// provisioner requires plan before apply, so test cancel with plan.
 	err = sendPlan(sess, proto.WorkspaceTransition_START)
 	require.NoError(t, err)
 
-	for _, line := range []string{"init", "plan_start"} {
+	for _, line := range []string{"plan_start"} {
 	LoopStart:
 		msg, err := sess.Recv()
 		require.NoError(t, err)
@@ -482,11 +368,9 @@ func TestProvision_TextFileBusy(t *testing.T) {
 		logger:      &logger,
 	})
 
-	sess := configure(ctx, t, api, &proto.Config{
-		TemplateSourceArchive: testutil.CreateTar(t, nil),
-	})
+	sess := configure(ctx, t, api, &proto.Config{})
 
-	err = sendPlan(sess, proto.WorkspaceTransition_START)
+	err = sendInit(sess, testutil.CreateTar(t, nil))
 	require.NoError(t, err)
 
 	found := false
@@ -494,7 +378,7 @@ func TestProvision_TextFileBusy(t *testing.T) {
 		msg, err := sess.Recv()
 		require.NoError(t, err)
 
-		if c := msg.GetPlan(); c != nil {
+		if c := msg.GetInit(); c != nil {
 			require.Contains(t, c.Error, "exit status 1")
 			found = true
 			break
@@ -513,11 +397,14 @@ func TestProvision(t *testing.T) {
 		Metadata *proto.Metadata
 		Request  *proto.PlanRequest
 		// Response may be nil to not check the response.
-		Response *proto.PlanComplete
+		Response              *proto.GraphComplete
+		InitResponse          *proto.InitComplete
+		InitErrorContains     string
+		InitExpectLogContains string
 		// If ErrorContains is not empty, PlanComplete should have an Error containing the given string
-		ErrorContains string
-		// If ExpectLogContains is not empty, then the logs should contain it.
-		ExpectLogContains string
+		PlanErrorContains string
+		// If PlanExpectLogContains is not empty, then the logs should contain it.
+		PlanExpectLogContains string
 		// If Apply is true, then send an Apply request and check we get the same Resources as in Response.
 		Apply bool
 		// Some tests may need to be skipped until the relevant provider version is released.
@@ -531,8 +418,8 @@ func TestProvision(t *testing.T) {
 				"main.tf": `variable "A" {
 			}`,
 			},
-			ErrorContains:     "terraform plan:",
-			ExpectLogContains: "No value for required variable",
+			PlanErrorContains:     "terraform plan:",
+			PlanExpectLogContains: "No value for required variable",
 		},
 		{
 			Name: "missing-variable-dry-run",
@@ -540,15 +427,15 @@ func TestProvision(t *testing.T) {
 				"main.tf": `variable "A" {
 			}`,
 			},
-			ErrorContains:     "terraform plan:",
-			ExpectLogContains: "No value for required variable",
+			PlanErrorContains:     "terraform plan:",
+			PlanExpectLogContains: "No value for required variable",
 		},
 		{
 			Name: "single-resource-dry-run",
 			Files: map[string]string{
 				"main.tf": `resource "null_resource" "A" {}`,
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "A",
 					Type: "null_resource",
@@ -560,7 +447,7 @@ func TestProvision(t *testing.T) {
 			Files: map[string]string{
 				"main.tf": `resource "null_resource" "A" {}`,
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "A",
 					Type: "null_resource",
@@ -581,7 +468,7 @@ func TestProvision(t *testing.T) {
 					}
 				}`,
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "A",
 					Type: "null_resource",
@@ -594,18 +481,18 @@ func TestProvision(t *testing.T) {
 			Files: map[string]string{
 				"main.tf": `a`,
 			},
-			ErrorContains:      "initialize terraform",
-			ExpectLogContains:  "Argument or block definition required",
-			SkipCacheProviders: true,
+			InitErrorContains:     "initialize terraform",
+			InitExpectLogContains: "Argument or block definition required",
+			SkipCacheProviders:    true,
 		},
 		{
 			Name: "bad-syntax-2",
 			Files: map[string]string{
 				"main.tf": `;asdf;`,
 			},
-			ErrorContains:      "initialize terraform",
-			ExpectLogContains:  `The ";" character is not valid.`,
-			SkipCacheProviders: true,
+			InitErrorContains:     "initialize terraform",
+			InitExpectLogContains: `The ";" character is not valid.`,
+			SkipCacheProviders:    true,
 		},
 		{
 			Name: "destroy-no-state",
@@ -615,7 +502,7 @@ func TestProvision(t *testing.T) {
 			Metadata: &proto.Metadata{
 				WorkspaceTransition: proto.WorkspaceTransition_DESTROY,
 			},
-			ExpectLogContains: "nothing to do",
+			PlanExpectLogContains: "nothing to do",
 		},
 		{
 			Name: "rich-parameter-with-value",
@@ -659,7 +546,7 @@ func TestProvision(t *testing.T) {
 					},
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Parameters: []*proto.RichParameter{
 					{
 						Name:         "Example",
@@ -737,7 +624,7 @@ func TestProvision(t *testing.T) {
 					},
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Parameters: []*proto.RichParameter{
 					{
 						Name:         "Example",
@@ -789,7 +676,7 @@ func TestProvision(t *testing.T) {
 					AccessToken: "some-value",
 				}},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "null_resource",
@@ -832,7 +719,7 @@ func TestProvision(t *testing.T) {
 					WorkspaceOwnerSshPrivateKey: "fake private key",
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "null_resource",
@@ -875,7 +762,7 @@ func TestProvision(t *testing.T) {
 					WorkspaceOwnerLoginType: "github",
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "null_resource",
@@ -904,16 +791,7 @@ func TestProvision(t *testing.T) {
 				`,
 			},
 			Request: &proto.PlanRequest{},
-			Response: &proto.PlanComplete{
-				Resources: []*proto.Resource{{
-					Name:       "example",
-					Type:       "null_resource",
-					ModulePath: "module.hello",
-				}, {
-					Name:       "inner_example",
-					Type:       "null_resource",
-					ModulePath: "module.hello.module.there",
-				}},
+			InitResponse: &proto.InitComplete{
 				Modules: []*proto.Module{{
 					Key:     "hello",
 					Version: "",
@@ -922,6 +800,17 @@ func TestProvision(t *testing.T) {
 					Key:     "hello.there",
 					Version: "",
 					Source:  "./inner_module",
+				}},
+			},
+			Response: &proto.GraphComplete{
+				Resources: []*proto.Resource{{
+					Name:       "example",
+					Type:       "null_resource",
+					ModulePath: "module.hello",
+				}, {
+					Name:       "inner_example",
+					Type:       "null_resource",
+					ModulePath: "module.hello.module.there",
 				}},
 			},
 		},
@@ -958,7 +847,7 @@ func TestProvision(t *testing.T) {
 					WorkspaceOwnerRbacRoles: []*proto.Role{{Name: "member", OrgId: ""}},
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "null_resource",
@@ -999,7 +888,7 @@ func TestProvision(t *testing.T) {
 					PrebuiltWorkspaceBuildStage: proto.PrebuiltWorkspaceBuildStage_CREATE,
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "null_resource",
@@ -1037,7 +926,7 @@ func TestProvision(t *testing.T) {
 					PrebuiltWorkspaceBuildStage: proto.PrebuiltWorkspaceBuildStage_CLAIM,
 				},
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "null_resource",
@@ -1051,18 +940,15 @@ func TestProvision(t *testing.T) {
 		{
 			Name: "ai-task-multiple-allowed-in-plan",
 			Files: map[string]string{
-				"main.tf": fmt.Sprintf(`terraform {
+				"main.tf": `terraform {
 					required_providers {
 					  coder = {
 						source  = "coder/coder"
-						version = ">= 2.7.0"
+						version = ">= 2.13.0"
 					  }
 					}
 				}
-				data "coder_parameter" "prompt" {
-					name = "%s"
-					type = "string"
-				}
+				data "coder_task" "me" {}
 				resource "coder_ai_task" "a" {
 				  sidebar_app {
 					id = "7128be08-8722-44cb-bbe1-b5a391c4d94b" # fake ID, irrelevant here anyway but needed for validation
@@ -1073,10 +959,10 @@ func TestProvision(t *testing.T) {
 					id = "7128be08-8722-44cb-bbe1-b5a391c4d94b" # fake ID, irrelevant here anyway but needed for validation
 				  }
 				}
-				`, provider.TaskPromptParameterName),
+				`,
 			},
 			Request: &proto.PlanRequest{},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{
 					{
 						Name: "a",
@@ -1085,14 +971,6 @@ func TestProvision(t *testing.T) {
 					{
 						Name: "b",
 						Type: "coder_ai_task",
-					},
-				},
-				Parameters: []*proto.RichParameter{
-					{
-						Name:     provider.TaskPromptParameterName,
-						Type:     "string",
-						Required: true,
-						FormType: proto.ParameterFormType_INPUT,
 					},
 				},
 				AiTasks: []*proto.AITask{
@@ -1128,7 +1006,7 @@ func TestProvision(t *testing.T) {
 				}
 				`,
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{{
 					Name: "example",
 					Type: "coder_external_agent",
@@ -1144,7 +1022,7 @@ func TestProvision(t *testing.T) {
 					required_providers {
 						coder = {
 							source  = "coder/coder"
-							version = "= 2.12.0-pre0"
+							version = ">= 2.12.0"
 						}
 					}
 				}
@@ -1153,7 +1031,7 @@ func TestProvision(t *testing.T) {
 				}
 				`,
 			},
-			Response: &proto.PlanComplete{
+			Response: &proto.GraphComplete{
 				Resources: []*proto.Resource{
 					{
 						Name: "my-task",
@@ -1170,6 +1048,14 @@ func TestProvision(t *testing.T) {
 			},
 			SkipCacheProviders: true,
 		},
+		{
+			Name: "malicious-tar",
+			Files: map[string]string{
+				// Non-local path outside the working directory.
+				"../../../etc/passwd": "content",
+			},
+			InitErrorContains: "refusing to extract to non-local path",
+		},
 	}
 
 	// Remove unused cache dirs before running tests.
@@ -1177,7 +1063,7 @@ func TestProvision(t *testing.T) {
 	cacheRootDir := filepath.Join(testutil.PersistentCacheDir(t), "terraform_provision_test")
 	expectedCacheDirs := make(map[string]bool)
 	for _, testCase := range testCases {
-		cacheDir := getTestCacheDir(t, cacheRootDir, testCase.Name, testCase.Files)
+		cacheDir := testutil.GetTestTFCacheDir(t, cacheRootDir, testCase.Name, testCase.Files)
 		expectedCacheDirs[cacheDir] = true
 	}
 	currentCacheDirs, err := filepath.Glob(filepath.Join(cacheRootDir, "*"))
@@ -1199,7 +1085,7 @@ func TestProvision(t *testing.T) {
 
 			cliConfigPath := ""
 			if !testCase.SkipCacheProviders {
-				cliConfigPath = cacheProviders(
+				cliConfigPath = testutil.CacheTFProviders(
 					t,
 					cacheRootDir,
 					testCase.Name,
@@ -1209,9 +1095,19 @@ func TestProvision(t *testing.T) {
 			ctx, api := setupProvisioner(t, &provisionerServeOptions{
 				cliConfigPath: cliConfigPath,
 			})
-			sess := configure(ctx, t, api, &proto.Config{
-				TemplateSourceArchive: testutil.CreateTar(t, testCase.Files),
+			sess := configure(ctx, t, api, &proto.Config{})
+			initLogGot := testCase.InitExpectLogContains == ""
+			initComplete := sendInitAndGetResp(t, sess, testutil.CreateTar(t, testCase.Files), func(log string) {
+				if strings.Contains(log, testCase.InitExpectLogContains) {
+					initLogGot = true
+				}
 			})
+			require.Truef(t, initLogGot, "did not get expected init log substring %q", testCase.InitExpectLogContains)
+			if testCase.InitErrorContains != "" {
+				require.Contains(t, initComplete.Error, testCase.InitErrorContains)
+				return
+			}
+			require.Empty(t, initComplete.Error, "unexpected init error")
 
 			planRequest := &proto.Request{Type: &proto.Request_Plan{Plan: &proto.PlanRequest{
 				Metadata: testCase.Metadata,
@@ -1220,7 +1116,7 @@ func TestProvision(t *testing.T) {
 				planRequest = &proto.Request{Type: &proto.Request_Plan{Plan: testCase.Request}}
 			}
 
-			gotExpectedLog := testCase.ExpectLogContains == ""
+			gotExpectedLog := testCase.PlanExpectLogContains == ""
 
 			provision := func(req *proto.Request) *proto.Response {
 				err := sess.Send(req)
@@ -1229,7 +1125,7 @@ func TestProvision(t *testing.T) {
 					msg, err := sess.Recv()
 					require.NoError(t, err)
 					if msg.GetLog() != nil {
-						if testCase.ExpectLogContains != "" && strings.Contains(msg.GetLog().Output, testCase.ExpectLogContains) {
+						if testCase.PlanExpectLogContains != "" && strings.Contains(msg.GetLog().Output, testCase.PlanExpectLogContains) {
 							gotExpectedLog = true
 						}
 
@@ -1244,35 +1140,43 @@ func TestProvision(t *testing.T) {
 			planComplete := resp.GetPlan()
 			require.NotNil(t, planComplete)
 
-			if testCase.ErrorContains != "" {
-				require.Contains(t, planComplete.GetError(), testCase.ErrorContains)
+			if testCase.PlanErrorContains != "" {
+				require.Contains(t, planComplete.GetError(), testCase.PlanErrorContains)
 			}
 
+			graphCompleteResp := provision(&proto.Request{Type: &proto.Request_Graph{Graph: &proto.GraphRequest{
+				Source: proto.GraphSource_SOURCE_PLAN,
+			}}})
+			graphComplete := graphCompleteResp.GetGraph()
+			require.NotNil(t, graphCompleteResp)
+
 			if testCase.Response != nil {
-				require.Equal(t, testCase.Response.Error, planComplete.Error)
+				require.Equal(t, testCase.Response.Error, graphComplete.Error)
 
 				// Remove randomly generated data and sort by name.
-				normalizeResources(planComplete.Resources)
-				resourcesGot, err := json.Marshal(planComplete.Resources)
+				normalizeResources(graphComplete.Resources)
+				resourcesGot, err := json.Marshal(graphComplete.Resources)
 				require.NoError(t, err)
 				resourcesWant, err := json.Marshal(testCase.Response.Resources)
 				require.NoError(t, err)
 				require.Equal(t, string(resourcesWant), string(resourcesGot))
 
-				parametersGot, err := json.Marshal(planComplete.Parameters)
+				parametersGot, err := json.Marshal(graphComplete.Parameters)
 				require.NoError(t, err)
 				parametersWant, err := json.Marshal(testCase.Response.Parameters)
 				require.NoError(t, err)
 				require.Equal(t, string(parametersWant), string(parametersGot))
 
-				modulesGot, err := json.Marshal(planComplete.Modules)
+				modulesGot, err := json.Marshal(initComplete.Modules)
 				require.NoError(t, err)
-				modulesWant, err := json.Marshal(testCase.Response.Modules)
-				require.NoError(t, err)
-				require.Equal(t, string(modulesWant), string(modulesGot))
+				if testCase.InitResponse != nil {
+					modulesWant, err := json.Marshal(testCase.InitResponse.Modules)
+					require.NoError(t, err)
+					require.Equal(t, string(modulesWant), string(modulesGot))
+				}
 
-				require.Equal(t, planComplete.HasAiTasks, testCase.Response.HasAiTasks)
-				require.Equal(t, planComplete.HasExternalAgents, testCase.Response.HasExternalAgents)
+				require.Equal(t, graphComplete.HasAiTasks, testCase.Response.HasAiTasks)
+				require.Equal(t, graphComplete.HasExternalAgents, testCase.Response.HasExternalAgents)
 			}
 
 			if testCase.Apply {
@@ -1283,8 +1187,8 @@ func TestProvision(t *testing.T) {
 				require.NotNil(t, applyComplete)
 
 				if testCase.Response != nil {
-					normalizeResources(applyComplete.Resources)
-					resourcesGot, err := json.Marshal(applyComplete.Resources)
+					normalizeResources(graphComplete.Resources)
+					resourcesGot, err := json.Marshal(graphComplete.Resources)
 					require.NoError(t, err)
 					resourcesWant, err := json.Marshal(testCase.Response.Resources)
 					require.NoError(t, err)
@@ -1293,7 +1197,7 @@ func TestProvision(t *testing.T) {
 			}
 
 			if !gotExpectedLog {
-				t.Fatalf("expected log string %q but never saw it", testCase.ExpectLogContains)
+				t.Fatalf("expected log string %q but never saw it", testCase.PlanExpectLogContains)
 			}
 		})
 	}
@@ -1326,9 +1230,10 @@ func TestProvision_ExtraEnv(t *testing.T) {
 	t.Setenv("TF_SUPERSECRET", secretValue)
 
 	ctx, api := setupProvisioner(t, nil)
-	sess := configure(ctx, t, api, &proto.Config{
-		TemplateSourceArchive: testutil.CreateTar(t, map[string]string{"main.tf": `resource "null_resource" "A" {}`}),
-	})
+	sess := configure(ctx, t, api, &proto.Config{})
+
+	resp := sendInitAndGetResp(t, sess, testutil.CreateTar(t, map[string]string{"main.tf": `resource "null_resource" "A" {}`}))
+	require.Empty(t, resp.Error)
 
 	err := sendPlan(sess, proto.WorkspaceTransition_START)
 	require.NoError(t, err)
@@ -1376,37 +1281,41 @@ func TestProvision_SafeEnv(t *testing.T) {
 	`
 
 	ctx, api := setupProvisioner(t, nil)
-	sess := configure(ctx, t, api, &proto.Config{
-		TemplateSourceArchive: testutil.CreateTar(t, map[string]string{"main.tf": echoResource}),
-	})
+	sess := configure(ctx, t, api, &proto.Config{})
+
+	resp := sendInitAndGetResp(t, sess, testutil.CreateTar(t, map[string]string{"main.tf": echoResource}))
+	require.Empty(t, resp.Error)
 
 	err := sendPlan(sess, proto.WorkspaceTransition_START)
 	require.NoError(t, err)
 
-	_ = readProvisionLog(t, sess)
+	_, _ = readProvisionLog(t, sess)
 
 	err = sendApply(sess, proto.WorkspaceTransition_START)
 	require.NoError(t, err)
 
-	log := readProvisionLog(t, sess)
+	log, applyComplete := readProvisionLog(t, sess)
 	require.Contains(t, log, passedValue)
 	require.NotContains(t, log, secretValue)
 	require.Contains(t, log, "CODER_")
+	require.Contains(t, log, "AWS_SDK_UA_APP_ID=APN_1.1/pc_cdfmjwn8i6u8l9fwz8h82e4w3$")
+
+	apply := applyComplete.Type.(*proto.Response_Apply)
+	require.NotEmpty(t, apply.Apply.State, "state exists")
 }
 
 func TestProvision_MalformedModules(t *testing.T) {
 	t.Parallel()
 
 	ctx, api := setupProvisioner(t, nil)
-	sess := configure(ctx, t, api, &proto.Config{
-		TemplateSourceArchive: testutil.CreateTar(t, map[string]string{
-			"main.tf":          `module "hello" { source = "./module" }`,
-			"module/module.tf": `resource "null_`,
-		}),
-	})
+	sess := configure(ctx, t, api, &proto.Config{})
 
-	err := sendPlan(sess, proto.WorkspaceTransition_START)
+	err := sendInit(sess, testutil.CreateTar(t, map[string]string{
+		"main.tf":          `module "hello" { source = "./module" }`,
+		"module/module.tf": `resource "null_`,
+	}))
 	require.NoError(t, err)
-	log := readProvisionLog(t, sess)
+
+	log, _ := readProvisionLog(t, sess)
 	require.Contains(t, log, "Invalid block definition")
 }

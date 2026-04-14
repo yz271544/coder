@@ -162,16 +162,55 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
     },
     "agent_stat_refresh_interval": 0,
     "ai": {
+      "aibridge_proxy": {
+        "allowed_private_cidrs": [
+          "string"
+        ],
+        "cert_file": "string",
+        "domain_allowlist": [
+          "string"
+        ],
+        "enabled": true,
+        "key_file": "string",
+        "listen_addr": "string",
+        "tls_cert_file": "string",
+        "tls_key_file": "string",
+        "upstream_proxy": "string",
+        "upstream_proxy_ca": "string"
+      },
       "bridge": {
         "anthropic": {
           "base_url": "string",
           "key": "string"
         },
+        "bedrock": {
+          "access_key": "string",
+          "access_key_secret": "string",
+          "base_url": "string",
+          "model": "string",
+          "region": "string",
+          "small_fast_model": "string"
+        },
+        "circuit_breaker_enabled": true,
+        "circuit_breaker_failure_threshold": 0,
+        "circuit_breaker_interval": 0,
+        "circuit_breaker_max_requests": 0,
+        "circuit_breaker_timeout": 0,
         "enabled": true,
+        "inject_coder_mcp_tools": true,
+        "max_concurrency": 0,
         "openai": {
           "base_url": "string",
           "key": "string"
-        }
+        },
+        "rate_limit": 0,
+        "retention": 0,
+        "send_actor_headers": true,
+        "structured_logging": true
+      },
+      "chat": {
+        "acquire_batch_size": 0,
+        "debug_logging_enabled": true
       }
     },
     "allow_workspace_renames": true,
@@ -224,6 +263,7 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
     "disable_owner_workspace_exec": true,
     "disable_password_auth": true,
     "disable_path_apps": true,
+    "disable_workspace_sharing": true,
     "docs_url": {
       "forceQuery": true,
       "fragment": "string",
@@ -237,6 +277,7 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
       "scheme": "string",
       "user": {}
     },
+    "enable_authz_recording": true,
     "enable_terraform_debug_mode": true,
     "ephemeral_deployment": true,
     "experiments": [
@@ -245,10 +286,14 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
     "external_auth": {
       "value": [
         {
+          "api_base_url": "string",
           "app_install_url": "string",
           "app_installations_url": "string",
           "auth_url": "string",
           "client_id": "string",
+          "code_challenge_methods_supported": [
+            "string"
+          ],
           "device_code_url": "string",
           "device_flow": true,
           "display_icon": "string",
@@ -269,6 +314,7 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
         }
       ]
     },
+    "external_auth_github_default_provider_enable": true,
     "external_token_encryption_keys": [
       "string"
     ],
@@ -279,6 +325,7 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
     "hide_ai_tasks": true,
     "http_address": "string",
     "http_cookies": {
+      "host_prefix": true,
       "same_site": "string",
       "secure_auth_cookie": true
     },
@@ -396,6 +443,19 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
       "organization_assign_default": true,
       "organization_field": "string",
       "organization_mapping": {},
+      "redirect_url": {
+        "forceQuery": true,
+        "fragment": "string",
+        "host": "string",
+        "omitHost": true,
+        "opaque": "string",
+        "path": "string",
+        "rawFragment": "string",
+        "rawPath": "string",
+        "rawQuery": "string",
+        "scheme": "string",
+        "user": {}
+      },
       "scopes": [
         "string"
       ],
@@ -411,6 +471,8 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
       "username_field": "string"
     },
     "pg_auth": "string",
+    "pg_conn_max_idle": "string",
+    "pg_conn_max_open": 0,
     "pg_connection_url": "string",
     "pprof": {
       "address": {
@@ -453,6 +515,12 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
       "disable_all": true
     },
     "redirect_to_access_url": true,
+    "retention": {
+      "api_keys": 0,
+      "audit_logs": 0,
+      "connection_logs": 0,
+      "workspace_agent_logs": 0
+    },
     "scim_api_key": "string",
     "session_lifetime": {
       "default_duration": 0,
@@ -463,6 +531,11 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
       "refresh_default_duration": 0
     },
     "ssh_keygen_algorithm": "string",
+    "stats_collection": {
+      "usage_stats": {
+        "enable": true
+      }
+    },
     "strict_transport_security": 0,
     "strict_transport_security_options": [
       "string"
@@ -472,6 +545,7 @@ curl -X GET http://coder-server:8080/api/v2/deployment/config \
         "value": [
           {
             "icon": "bug",
+            "location": "navbar",
             "name": "string",
             "target": "string"
           }

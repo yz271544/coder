@@ -1,5 +1,3 @@
-import { useTheme } from "@emotion/react";
-import useMediaQuery from "@mui/material/useMediaQuery";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import type { FC } from "react";
 import { NumberedPageButton, PlaceholderPageButton } from "./PageButtons";
@@ -14,6 +12,10 @@ export type PaginationWidgetBaseProps = {
 
 	hasPreviousPage?: boolean;
 	hasNextPage?: boolean;
+	/** Override the computed totalPages.
+	 * Used when, e.g., the row count is capped and the user navigates beyond
+	 * the known range, so totalPages stays at least as high as currentPage. */
+	totalPages?: number;
 };
 
 export const PaginationWidgetBase: FC<PaginationWidgetBaseProps> = ({
@@ -23,10 +25,9 @@ export const PaginationWidgetBase: FC<PaginationWidgetBaseProps> = ({
 	onPageChange,
 	hasPreviousPage,
 	hasNextPage,
+	totalPages: totalPagesProp,
 }) => {
-	const theme = useTheme();
-	const isMobile = useMediaQuery(theme.breakpoints.down("md"));
-	const totalPages = Math.ceil(totalRecords / pageSize);
+	const totalPages = totalPagesProp ?? Math.ceil(totalRecords / pageSize);
 
 	if (totalPages < 2) {
 		return null;
@@ -41,7 +42,6 @@ export const PaginationWidgetBase: FC<PaginationWidgetBaseProps> = ({
 	return (
 		<div className="flex flex-row items-center justify-center px-5 gap-x-1.5">
 			<PaginationNavButton
-				disabledMessage="You are already on the first page"
 				disabled={isPrevDisabled}
 				aria-label="Previous page"
 				onClick={() => {
@@ -53,22 +53,22 @@ export const PaginationWidgetBase: FC<PaginationWidgetBaseProps> = ({
 				<ChevronLeftIcon />
 			</PaginationNavButton>
 
-			{isMobile ? (
+			<div className="contents md:hidden">
 				<NumberedPageButton
 					highlighted
 					pageNumber={currentPage}
 					totalPages={totalPages}
 				/>
-			) : (
+			</div>
+			<div className="hidden md:contents">
 				<PaginationRow
 					currentPage={currentPage}
 					totalPages={totalPages}
 					onChange={onPageChange}
 				/>
-			)}
+			</div>
 
 			<PaginationNavButton
-				disabledMessage="You are already on the last page"
 				disabled={isNextDisabled}
 				aria-label="Next page"
 				onClick={() => {

@@ -1,15 +1,15 @@
-import { MockUserOwner } from "testHelpers/entities";
-import { renderWithAuth } from "testHelpers/renderHelpers";
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { API } from "api/api";
+import { API } from "#/api/api";
+import { MockUserOwner } from "#/testHelpers/entities";
+import { renderWithAuth } from "#/testHelpers/renderHelpers";
 import AppearancePage from "./AppearancePage";
 
 describe("appearance page", () => {
 	it("does nothing when selecting current theme", async () => {
 		renderWithAuth(<AppearancePage />);
 
-		jest.spyOn(API, "updateAppearanceSettings").mockResolvedValueOnce({
+		vi.spyOn(API, "updateAppearanceSettings").mockResolvedValueOnce({
 			...MockUserOwner,
 			theme_preference: "dark",
 			terminal_font: "fira-code",
@@ -25,9 +25,9 @@ describe("appearance page", () => {
 	it("changes theme to light", async () => {
 		renderWithAuth(<AppearancePage />);
 
-		jest.spyOn(API, "updateAppearanceSettings").mockResolvedValueOnce({
+		vi.spyOn(API, "updateAppearanceSettings").mockResolvedValueOnce({
 			...MockUserOwner,
-			terminal_font: "ibm-plex-mono",
+			terminal_font: "geist-mono",
 			theme_preference: "light",
 		});
 
@@ -37,7 +37,7 @@ describe("appearance page", () => {
 		// Check if the API was called correctly
 		expect(API.updateAppearanceSettings).toHaveBeenCalledTimes(1);
 		expect(API.updateAppearanceSettings).toHaveBeenCalledWith({
-			terminal_font: "ibm-plex-mono",
+			terminal_font: "geist-mono",
 			theme_preference: "light",
 		});
 	});
@@ -45,7 +45,7 @@ describe("appearance page", () => {
 	it("changes font to fira code", async () => {
 		renderWithAuth(<AppearancePage />);
 
-		jest.spyOn(API, "updateAppearanceSettings").mockResolvedValueOnce({
+		vi.spyOn(API, "updateAppearanceSettings").mockResolvedValueOnce({
 			...MockUserOwner,
 			terminal_font: "fira-code",
 			theme_preference: "dark",
@@ -62,12 +62,11 @@ describe("appearance page", () => {
 		});
 	});
 
-	it("changes font to fira code, then back to web terminal font", async () => {
+	it("changes font to fira code, then back to geist mono", async () => {
 		renderWithAuth(<AppearancePage />);
 
 		// given
-		jest
-			.spyOn(API, "updateAppearanceSettings")
+		vi.spyOn(API, "updateAppearanceSettings")
 			.mockResolvedValueOnce({
 				...MockUserOwner,
 				terminal_font: "fira-code",
@@ -75,7 +74,7 @@ describe("appearance page", () => {
 			})
 			.mockResolvedValueOnce({
 				...MockUserOwner,
-				terminal_font: "ibm-plex-mono",
+				terminal_font: "geist-mono",
 				theme_preference: "dark",
 			});
 
@@ -91,13 +90,13 @@ describe("appearance page", () => {
 		});
 
 		// when
-		const ibmPlex = await screen.findByText("Web Terminal Font");
-		await userEvent.click(ibmPlex);
+		const geistMono = await screen.findByText("Geist Mono");
+		await userEvent.click(geistMono);
 
 		// then
 		expect(API.updateAppearanceSettings).toHaveBeenCalledTimes(2);
 		expect(API.updateAppearanceSettings).toHaveBeenNthCalledWith(2, {
-			terminal_font: "ibm-plex-mono",
+			terminal_font: "geist-mono",
 			theme_preference: "dark",
 		});
 	});

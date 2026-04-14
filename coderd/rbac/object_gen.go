@@ -63,6 +63,25 @@ var (
 		Type: "audit_log",
 	}
 
+	// ResourceBoundaryUsage
+	// Valid Actions
+	//  - "ActionDelete" :: delete boundary usage statistics
+	//  - "ActionRead" :: read boundary usage statistics
+	//  - "ActionUpdate" :: upsert boundary usage statistics
+	ResourceBoundaryUsage = Object{
+		Type: "boundary_usage",
+	}
+
+	// ResourceChat
+	// Valid Actions
+	//  - "ActionCreate" :: create a new chat
+	//  - "ActionDelete" :: delete a chat
+	//  - "ActionRead" :: read chat messages and metadata
+	//  - "ActionUpdate" :: update chat title or settings
+	ResourceChat = Object{
+		Type: "chat",
+	}
+
 	// ResourceConnectionLog
 	// Valid Actions
 	//  - "ActionRead" :: read connection logs
@@ -286,6 +305,16 @@ var (
 		Type: "tailnet_coordinator",
 	}
 
+	// ResourceTask
+	// Valid Actions
+	//  - "ActionCreate" :: create a new task
+	//  - "ActionDelete" :: delete task
+	//  - "ActionRead" :: read task data or output to view on the UI or CLI
+	//  - "ActionUpdate" :: edit task settings or send input to an existing task
+	ResourceTask = Object{
+		Type: "task",
+	}
+
 	// ResourceTemplate
 	// Valid Actions
 	//  - "ActionCreate" :: create a template
@@ -346,10 +375,12 @@ var (
 	//  - "ActionDelete" :: delete workspace
 	//  - "ActionDeleteAgent" :: delete an existing workspace agent
 	//  - "ActionRead" :: read workspace data to view on the UI
+	//  - "ActionShare" :: share a workspace with other users or groups
 	//  - "ActionSSH" :: ssh into a given workspace
 	//  - "ActionWorkspaceStart" :: allows starting a workspace
 	//  - "ActionWorkspaceStop" :: allows stopping a workspace
 	//  - "ActionUpdate" :: edit workspace settings (scheduling, permissions, parameters)
+	//  - "ActionUpdateAgent" :: update an existing workspace agent
 	ResourceWorkspace = Object{
 		Type: "workspace",
 	}
@@ -378,10 +409,12 @@ var (
 	//  - "ActionDelete" :: delete workspace
 	//  - "ActionDeleteAgent" :: delete an existing workspace agent
 	//  - "ActionRead" :: read workspace data to view on the UI
+	//  - "ActionShare" :: share a workspace with other users or groups
 	//  - "ActionSSH" :: ssh into a given workspace
 	//  - "ActionWorkspaceStart" :: allows starting a workspace
 	//  - "ActionWorkspaceStop" :: allows stopping a workspace
 	//  - "ActionUpdate" :: edit workspace settings (scheduling, permissions, parameters)
+	//  - "ActionUpdateAgent" :: update an existing workspace agent
 	ResourceWorkspaceDormant = Object{
 		Type: "workspace_dormant",
 	}
@@ -405,6 +438,8 @@ func AllResources() []Objecter {
 		ResourceAssignOrgRole,
 		ResourceAssignRole,
 		ResourceAuditLog,
+		ResourceBoundaryUsage,
+		ResourceChat,
 		ResourceConnectionLog,
 		ResourceCryptoKey,
 		ResourceDebugInfo,
@@ -430,6 +465,7 @@ func AllResources() []Objecter {
 		ResourceReplicas,
 		ResourceSystem,
 		ResourceTailnetCoordinator,
+		ResourceTask,
 		ResourceTemplate,
 		ResourceUsageEvent,
 		ResourceUser,
@@ -454,8 +490,10 @@ func AllActions() []policy.Action {
 		policy.ActionRead,
 		policy.ActionReadPersonal,
 		policy.ActionSSH,
+		policy.ActionShare,
 		policy.ActionUnassign,
 		policy.ActionUpdate,
+		policy.ActionUpdateAgent,
 		policy.ActionUpdatePersonal,
 		policy.ActionUse,
 		policy.ActionViewInsights,

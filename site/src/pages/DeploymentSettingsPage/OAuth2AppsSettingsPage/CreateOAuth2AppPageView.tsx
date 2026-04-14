@@ -1,27 +1,35 @@
-import type * as TypesGen from "api/typesGenerated";
-import { ErrorAlert } from "components/Alert/ErrorAlert";
-import { Button } from "components/Button/Button";
+import { ChevronLeftIcon } from "lucide-react";
+import type { FC } from "react";
+import { Link as RouterLink } from "react-router";
+import type * as TypesGen from "#/api/typesGenerated";
+import { ErrorAlert } from "#/components/Alert/ErrorAlert";
+import { Button } from "#/components/Button/Button";
 import {
 	SettingsHeader,
 	SettingsHeaderDescription,
 	SettingsHeaderTitle,
-} from "components/SettingsHeader/SettingsHeader";
-import { Stack } from "components/Stack/Stack";
-import { ChevronLeftIcon } from "lucide-react";
-import type { FC } from "react";
-import { Link as RouterLink } from "react-router";
+} from "#/components/SettingsHeader/SettingsHeader";
+import { Stack } from "#/components/Stack/Stack";
 import { OAuth2AppForm } from "./OAuth2AppForm";
 
 type CreateOAuth2AppProps = {
 	isUpdating: boolean;
 	createApp: (req: TypesGen.PostOAuth2ProviderAppRequest) => void;
 	error?: unknown;
+	defaultValues?: {
+		name: string;
+		callback_url: string;
+		icon: string;
+	};
+	canCreateApp: boolean;
 };
 
 export const CreateOAuth2AppPageView: FC<CreateOAuth2AppProps> = ({
 	isUpdating,
 	createApp,
 	error,
+	defaultValues,
+	canCreateApp,
 }) => {
 	return (
 		<>
@@ -51,6 +59,8 @@ export const CreateOAuth2AppPageView: FC<CreateOAuth2AppProps> = ({
 					onSubmit={createApp}
 					isUpdating={isUpdating}
 					error={error}
+					defaultValues={defaultValues}
+					disabled={!canCreateApp}
 				/>
 			</Stack>
 		</>

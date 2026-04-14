@@ -1,16 +1,16 @@
+import range from "lodash/range";
 import {
 	type DeploymentConfig,
 	type GetLicensesResponse,
 	withDefaultFeatures,
-} from "api/api";
-import type { FieldError } from "api/errors";
-import type * as TypesGen from "api/typesGenerated";
-import type { ProxyLatencyReport } from "contexts/useProxyLatency";
-import range from "lodash/range";
-import type { Permissions } from "modules/permissions";
-import type { OrganizationPermissions } from "modules/permissions/organizations";
-import type { FileTree } from "utils/filetree";
-import type { TemplateVersionFiles } from "utils/templateVersion";
+} from "#/api/api";
+import type { FieldError } from "#/api/errors";
+import type * as TypesGen from "#/api/typesGenerated";
+import type { ProxyLatencyReport } from "#/contexts/useProxyLatency";
+import type { Permissions } from "#/modules/permissions";
+import type { OrganizationPermissions } from "#/modules/permissions/organizations";
+import type { FileTree } from "#/utils/filetree";
+import type { TemplateVersionFiles } from "#/utils/templateVersion";
 
 export const MockOrganization: TypesGen.Organization = {
 	id: "my-organization-id",
@@ -85,6 +85,7 @@ export const MockToken: TypesGen.APIKeyWithOwner = {
 	login_type: "token",
 	scope: "all",
 	scopes: ["coder:all"],
+	allow_list: [{ type: "*", id: "*" }],
 	lifetime_seconds: 2592000,
 	token_name: "token-one",
 	username: "admin",
@@ -102,6 +103,7 @@ export const MockTokens: TypesGen.APIKeyWithOwner[] = [
 		login_type: "token",
 		scope: "all",
 		scopes: ["coder:all"],
+		allow_list: [{ type: "*", id: "*" }],
 		lifetime_seconds: 2592000,
 		token_name: "token-two",
 		username: "admin",
@@ -279,45 +281,50 @@ export const MockOwnerRole: TypesGen.Role = {
 	name: "owner",
 	display_name: "Owner",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: "",
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockUserAdminRole: TypesGen.Role = {
 	name: "user_admin",
 	display_name: "User Admin",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: "",
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockTemplateAdminRole: TypesGen.Role = {
 	name: "template_admin",
 	display_name: "Template Admin",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: "",
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockAuditorRole: TypesGen.Role = {
 	name: "auditor",
 	display_name: "Auditor",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: "",
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockWorkspaceCreationBanRole: TypesGen.Role = {
 	name: "organization-workspace-creation-ban",
 	display_name: "Organization Workspace Creation Ban",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: "",
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockMemberRole: TypesGen.SlimRole = {
@@ -329,27 +336,30 @@ export const MockOrganizationAdminRole: TypesGen.Role = {
 	name: "organization-admin",
 	display_name: "Organization Admin",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: MockOrganization.id,
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockOrganizationUserAdminRole: TypesGen.Role = {
 	name: "organization-user-admin",
 	display_name: "Organization User Admin",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: MockOrganization.id,
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockOrganizationTemplateAdminRole: TypesGen.Role = {
 	name: "organization-template-admin",
 	display_name: "Organization Template Admin",
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: MockOrganization.id,
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockOrganizationAuditorRole: TypesGen.AssignableRoles = {
@@ -358,18 +368,20 @@ export const MockOrganizationAuditorRole: TypesGen.AssignableRoles = {
 	assignable: true,
 	built_in: false,
 	site_permissions: [],
-	organization_permissions: [],
 	user_permissions: [],
 	organization_id: MockOrganization.id,
+	organization_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockRoleWithOrgPermissions: TypesGen.AssignableRoles = {
 	name: "my-role-1",
 	display_name: "My Role 1",
-	organization_id: MockOrganization.id,
 	assignable: true,
 	built_in: false,
 	site_permissions: [],
+	user_permissions: [],
+	organization_id: MockOrganization.id,
 	organization_permissions: [
 		{
 			negate: false,
@@ -452,14 +464,15 @@ export const MockRoleWithOrgPermissions: TypesGen.AssignableRoles = {
 			action: "create",
 		},
 	],
-	user_permissions: [],
+	organization_member_permissions: [],
 };
 
 export const MockRole2WithOrgPermissions: TypesGen.Role = {
 	name: "my-role-1",
 	display_name: "My Role 1",
-	organization_id: MockOrganization.id,
 	site_permissions: [],
+	user_permissions: [],
+	organization_id: MockOrganization.id,
 	organization_permissions: [
 		{
 			negate: false,
@@ -467,7 +480,7 @@ export const MockRole2WithOrgPermissions: TypesGen.Role = {
 			action: "create",
 		},
 	],
-	user_permissions: [],
+	organization_member_permissions: [],
 };
 
 // assignableRole takes a role and a boolean. The boolean implies if the
@@ -494,10 +507,6 @@ export const MockAssignableSiteRoles = [
 	assignableRole(MockWorkspaceCreationBanRole, true),
 ];
 
-export const MockMemberPermissions = {
-	viewAuditLog: false,
-};
-
 export const MockUserOwner: TypesGen.User = {
 	id: "test-user",
 	username: "TestUser",
@@ -510,6 +519,7 @@ export const MockUserOwner: TypesGen.User = {
 	avatar_url: "https://avatars.githubusercontent.com/u/95932066?s=200&v=4",
 	last_seen_at: "",
 	login_type: "password",
+	has_ai_seat: false,
 	name: "",
 };
 
@@ -525,6 +535,7 @@ export const MockUserMember: TypesGen.User = {
 	avatar_url: "",
 	last_seen_at: "2022-09-14T19:12:21Z",
 	login_type: "oidc",
+	has_ai_seat: false,
 	name: "Mock User The Second",
 };
 
@@ -540,6 +551,7 @@ export const SuspendedMockUser: TypesGen.User = {
 	avatar_url: "",
 	last_seen_at: "",
 	login_type: "password",
+	has_ai_seat: false,
 	name: "",
 };
 
@@ -550,6 +562,8 @@ export const MockUserAppearanceSettings: TypesGen.UserAppearanceSettings = {
 
 export const MockTasksTabVisible: boolean = false;
 
+export const MockAgentsTabVisible: boolean = false;
+
 export const MockOrganizationMember: TypesGen.OrganizationMemberWithUserData = {
 	organization_id: MockOrganization.id,
 	user_id: MockUserOwner.id,
@@ -557,9 +571,15 @@ export const MockOrganizationMember: TypesGen.OrganizationMemberWithUserData = {
 	email: MockUserOwner.email,
 	updated_at: "2025-05-22T17:51:49.49745Z",
 	created_at: "2025-05-22T17:51:49.497449Z",
+	user_updated_at: MockUserMember.updated_at,
+	user_created_at: MockUserMember.created_at,
+	last_seen_at: MockUserMember.last_seen_at,
+	status: MockUserMember.status,
+	login_type: MockUserMember.login_type,
 	name: MockUserOwner.name,
 	avatar_url: MockUserOwner.avatar_url,
 	global_roles: MockUserOwner.roles,
+	has_ai_seat: false,
 	roles: [],
 };
 
@@ -571,9 +591,15 @@ export const MockOrganizationMember2: TypesGen.OrganizationMemberWithUserData =
 		email: MockUserMember.email,
 		updated_at: "2025-05-22T17:51:49.49745Z",
 		created_at: "2025-05-22T17:51:49.497449Z",
+		user_updated_at: MockUserMember.updated_at,
+		user_created_at: MockUserMember.created_at,
+		last_seen_at: MockUserMember.last_seen_at,
+		status: MockUserMember.status,
+		login_type: MockUserMember.login_type,
 		name: MockUserMember.name,
 		avatar_url: MockUserMember.avatar_url,
 		global_roles: MockUserMember.roles,
+		has_ai_seat: false,
 		roles: [],
 	};
 
@@ -843,9 +869,11 @@ export const MockTemplate: TypesGen.Template = {
 	require_active_version: false,
 	deprecated: false,
 	deprecation_message: "",
+	deleted: false,
 	max_port_share_level: "public",
 	use_classic_parameter_flow: false,
 	cors_behavior: "simple",
+	disable_module_cache: false,
 };
 
 const _MockTemplateVersionFiles: TemplateVersionFiles = {
@@ -1033,7 +1061,7 @@ export const MockWorkspaceAppStatus: TypesGen.WorkspaceAppStatus = {
 	icon: "",
 };
 
-const MockWorkspaceAgentDisconnected: TypesGen.WorkspaceAgent = {
+export const MockWorkspaceAgentDisconnected: TypesGen.WorkspaceAgent = {
 	...MockWorkspaceAgent,
 	id: "test-workspace-agent-2",
 	name: "another-workspace-agent",
@@ -1441,6 +1469,7 @@ export const MockWorkspace: TypesGen.Workspace = {
 	dormant_at: null,
 	next_start_at: null,
 	is_prebuild: false,
+	shared_with: [],
 };
 
 export const MockPrebuiltWorkspace = {
@@ -1780,31 +1809,6 @@ export const MockTemplateVersionVariable5: TypesGen.TemplateVersionVariable = {
 	default_value: "",
 	required: true,
 	sensitive: false,
-};
-
-export const MockWorkspaceRequest: TypesGen.CreateWorkspaceRequest = {
-	name: "test",
-	template_version_id: "test-template-version",
-	rich_parameter_values: [],
-};
-
-export const MockWorkspaceRichParametersRequest: TypesGen.CreateWorkspaceRequest =
-	{
-		name: "test",
-		template_version_id: "test-template-version",
-		rich_parameter_values: [
-			{
-				name: MockTemplateVersionParameter1.name,
-				value: MockTemplateVersionParameter1.default_value,
-			},
-		],
-	};
-
-const _MockUserAgent = {
-	browser: "Chrome 99.0.4844",
-	device: "Other",
-	ip_address: "11.22.33.44",
-	os: "Windows 10",
 };
 
 export const MockAuthMethodsPasswordOnly: TypesGen.AuthMethods = {
@@ -2476,6 +2480,10 @@ export const MockEntitlements: TypesGen.Entitlements = {
 			enabled: true,
 			entitlement: "entitled",
 		},
+		task_batch_actions: {
+			enabled: true,
+			entitlement: "entitled",
+		},
 	}),
 	require_telemetry: false,
 	trial: false,
@@ -2987,6 +2995,20 @@ export const MockGroup: TypesGen.Group = {
 	total_member_count: 2,
 };
 
+export const MockGroupWithoutMembers: TypesGen.Group = {
+	id: "fbd2116a-8961-4954-87ae-e4575bd29ce0",
+	name: "Front-End",
+	display_name: "Front-End",
+	avatar_url: "https://example.com",
+	organization_id: MockOrganization.id,
+	organization_name: MockOrganization.name,
+	organization_display_name: MockOrganization.display_name,
+	members: [],
+	quota_allowance: 5,
+	source: "user",
+	total_member_count: 2,
+};
+
 export const MockGroup2: TypesGen.Group = {
 	id: "13de3eb4-9b4f-49e7-b0f8-0c3728a0d2e2",
 	name: "developer",
@@ -3092,6 +3114,12 @@ export const MockPermissions: Permissions = {
 	editAnySettings: true,
 	viewAnyIdpSyncSettings: true,
 	viewAnyMembers: true,
+	viewAnyAIBridgeInterception: true,
+	createOAuth2App: true,
+	editOAuth2App: true,
+	deleteOAuth2App: true,
+	viewOAuth2AppSecrets: true,
+	createChat: true,
 };
 
 export const MockNoPermissions: Permissions = {
@@ -3120,6 +3148,12 @@ export const MockNoPermissions: Permissions = {
 	editAnySettings: false,
 	viewAnyIdpSyncSettings: false,
 	viewAnyMembers: false,
+	viewAnyAIBridgeInterception: true,
+	createOAuth2App: false,
+	editOAuth2App: false,
+	deleteOAuth2App: false,
+	viewOAuth2AppSecrets: false,
+	createChat: false,
 };
 
 export const MockOrganizationPermissions: OrganizationPermissions = {
@@ -3492,6 +3526,7 @@ export const MockLicenseResponse: GetLicensesResponse[] = [
 			version: 1,
 			features: {},
 			license_expires: 3420244800,
+			nbf: 1660104000, // valid from 8/10/2022
 		},
 	},
 	{
@@ -3506,6 +3541,7 @@ export const MockLicenseResponse: GetLicensesResponse[] = [
 			version: 1,
 			features: {},
 			license_expires: 3420244800,
+			nbf: 1660104000, // valid from 8/10/2022
 		},
 	},
 	{
@@ -3519,6 +3555,7 @@ export const MockLicenseResponse: GetLicensesResponse[] = [
 			version: 1,
 			features: {},
 			license_expires: 3420244800,
+			nbf: 1660104000, // valid from 8/10/2022
 		},
 	},
 	{
@@ -3532,6 +3569,7 @@ export const MockLicenseResponse: GetLicensesResponse[] = [
 			version: 1,
 			features: {},
 			license_expires: 1660104000,
+			nbf: 1628568000, // valid from 8/10/2021
 		},
 	},
 	{
@@ -3545,6 +3583,7 @@ export const MockLicenseResponse: GetLicensesResponse[] = [
 			version: 1,
 			features: {},
 			license_expires: 1682346425,
+			nbf: 1650810425, // valid from 4/24/2022
 		},
 	},
 ];
@@ -4506,6 +4545,7 @@ export const MockGithubExternalProvider: TypesGen.ExternalAuthLinkProvider = {
 	allow_refresh: true,
 	allow_validate: true,
 	supports_revocation: false,
+	code_challenge_methods_supported: ["S256"],
 };
 
 export const MockGithubAuthLink: TypesGen.ExternalAuthLink = {
@@ -4528,6 +4568,7 @@ export const MockOAuth2ProviderApps: TypesGen.OAuth2ProviderApp[] = [
 			authorization: "http://localhost:3001/oauth2/authorize",
 			token: "http://localhost:3001/oauth2/token",
 			device_authorization: "",
+			token_revoke: "http://localhost:3001/oauth2/revoke",
 		},
 	},
 ];
@@ -4704,6 +4745,31 @@ export const MockSystemNotificationTemplates: TypesGen.NotificationTemplate[] =
 			enabled_by_default: true,
 		},
 		{
+			id: "8c5a4d12-9f7e-4b3a-a1c8-6e4f2d9b5a7c",
+			name: "Task Completed",
+			title_template: "Task '{{.Labels.workspace}}' completed",
+			body_template: "The task '{{.Labels.task}}' has completed successfully.",
+			actions:
+				'[{"url": "{{base_url}}/tasks/{{.UserUsername}}/{{.Labels.workspace}}", "label": "View task"}, {"url": "{{base_url}}/@{{.UserUsername}}/{{.Labels.workspace}}", "label": "View workspace"}]',
+			group: "Task Events",
+			method: "",
+			kind: "system",
+			enabled_by_default: false,
+		},
+		{
+			id: "3b7e8f1a-4c2d-49a6-b5e9-7f3a1c8d6b4e",
+			name: "Task Failed",
+			title_template: "Task '{{.Labels.workspace}}' failed",
+			body_template:
+				"The task '{{.Labels.task}}' has failed. Check the logs for more details.",
+			actions:
+				'[{"url": "{{base_url}}/tasks/{{.UserUsername}}/{{.Labels.workspace}}", "label": "View task"}, {"url": "{{base_url}}/@{{.UserUsername}}/{{.Labels.workspace}}", "label": "View workspace"}]',
+			group: "Task Events",
+			method: "",
+			kind: "system",
+			enabled_by_default: false,
+		},
+		{
 			id: "d4a6271c-cced-4ed0-84ad-afd02a9c7799",
 			name: "Task Idle",
 			title_template: "Task '{{.Labels.workspace}}' is idle",
@@ -4713,7 +4779,7 @@ export const MockSystemNotificationTemplates: TypesGen.NotificationTemplate[] =
 			group: "Task Events",
 			method: "",
 			kind: "system",
-			enabled_by_default: true,
+			enabled_by_default: false,
 		},
 		{
 			id: "bd4b7168-d05e-4e19-ad0f-3593b77aa90f",
@@ -4726,7 +4792,7 @@ export const MockSystemNotificationTemplates: TypesGen.NotificationTemplate[] =
 			group: "Task Events",
 			method: "",
 			kind: "system",
-			enabled_by_default: true,
+			enabled_by_default: false,
 		},
 	];
 
@@ -4953,14 +5019,13 @@ export const MockPresets: TypesGen.Preset[] = [
 	},
 ];
 
-export const MockAIPromptPresets: TypesGen.Preset[] = [
+export const MockTaskPresets: TypesGen.Preset[] = [
 	{
 		ID: "ai-preset-1",
 		Name: "Code Review",
 		Description: "",
 		Icon: "",
 		Parameters: [
-			{ Name: "AI Prompt", Value: "Review the code for best practices" },
 			{ Name: "cpu", Value: "4" },
 			{ Name: "memory", Value: "8GB" },
 		],
@@ -4981,58 +5046,29 @@ export const MockAIPromptPresets: TypesGen.Preset[] = [
 	},
 ];
 
-// Mock Tasks for AI Tasks page
-export const MockTasks = [
-	{
-		workspace: {
-			...MockWorkspace,
-			name: "create-competitors-page",
-			latest_app_status: MockWorkspaceAppStatus,
-		},
-		prompt: "Create competitors page",
-	},
-	{
-		workspace: {
-			...MockWorkspace,
-			id: "workspace-2",
-			name: "fix-avatar-size",
-			latest_app_status: {
-				...MockWorkspaceAppStatus,
-				message: "Avatar size fixed!",
-			},
-		},
-		prompt: "Fix user avatar size",
-	},
-	{
-		workspace: {
-			...MockWorkspace,
-			id: "workspace-3",
-			name: "fix-accessibility-issues",
-			latest_app_status: {
-				...MockWorkspaceAppStatus,
-				message: "Accessibility issues fixed!",
-			},
-		},
-		prompt: "Fix accessibility issues",
-	},
-];
-
-export const MockTask: TypesGen.Task = {
+export const MockTask = {
 	id: "test-task",
-	name: "task-wild-test-123",
+	name: "perform-some-task-123",
+	display_name: "Perform some task",
 	organization_id: MockOrganization.id,
 	owner_id: MockUserOwner.id,
 	owner_name: MockUserOwner.username,
+	owner_avatar_url: MockUserOwner.avatar_url,
 	template_id: MockTemplate.id,
 	template_name: MockTemplate.name,
 	template_display_name: MockTemplate.display_name,
 	template_icon: MockTemplate.icon,
+	template_version_id: MockTemplateVersion.id,
 	workspace_id: MockWorkspace.id,
+	workspace_name: MockWorkspace.name,
+	workspace_status: "running",
+	workspace_build_number: MockWorkspaceBuild.build_number,
 	workspace_agent_id: MockWorkspaceAgent.id,
 	workspace_agent_lifecycle: MockWorkspaceAgent.lifecycle_state,
 	workspace_agent_health: MockWorkspaceAgent.health,
+	workspace_app_id: MockWorkspaceApp.id,
 	initial_prompt: "Perform some task",
-	status: "running",
+	status: "active",
 	current_state: {
 		timestamp: "2022-05-17T17:39:01.382927298Z",
 		state: "idle",
@@ -5041,16 +5077,243 @@ export const MockTask: TypesGen.Task = {
 	},
 	created_at: "2022-05-17T17:39:01.382927298Z",
 	updated_at: "2022-05-17T17:39:01.382927298Z",
+} satisfies TypesGen.Task;
+
+export const MockTaskWorkspace: TypesGen.Workspace = {
+	...MockWorkspace,
+	task_id: MockTask.id,
 };
 
-export const MockNewTaskData = {
-	prompt: "Create a new task",
-	workspace: {
-		...MockWorkspace,
-		id: "workspace-4",
-		latest_app_status: {
-			...MockWorkspaceAppStatus,
-			message: "Task created successfully!",
+export const MockTasks = [
+	MockTask,
+	{
+		...MockTask,
+		id: "task-2",
+		name: "fix-avatar-size",
+		display_name: "Fix avatar size",
+		current_state: {
+			...MockTask.current_state,
+			message: "Avatar size fixed!",
+			state: "complete",
 		},
 	},
+	{
+		...MockTask,
+		id: "task-3",
+		name: "fix-accessibility-issues",
+		display_name: "Fix accessibility issues",
+		current_state: {
+			...MockTask.current_state,
+			message: "Accessibility issues fixed!",
+			state: "complete",
+		},
+	},
+] satisfies TypesGen.Task[];
+
+export const MockInitializingTasks = [
+	{
+		...MockTask,
+		id: "task-1",
+		name: "workspace-pending",
+		display_name: "Workspace pending",
+		initial_prompt: "Task Workspace Pending",
+		status: "initializing",
+		current_state: {
+			timestamp: new Date().toISOString(),
+			state: "working",
+			message: "Workspace is pending",
+			uri: "",
+		},
+	},
+	{
+		...MockTask,
+		id: "task-2",
+		name: "workspace-starting",
+		display_name: "Workspace starting",
+		initial_prompt: "Task Workspace Starting",
+		status: "initializing",
+		current_state: {
+			timestamp: new Date().toISOString(),
+			state: "working",
+			message: "Workspace is starting",
+			uri: "",
+		},
+	},
+	{
+		...MockTask,
+		id: "task-3",
+		name: "agent-connecting",
+		display_name: "Agent connecting",
+		initial_prompt: "Task Agent Connecting",
+		status: "initializing",
+		current_state: {
+			timestamp: new Date().toISOString(),
+			state: "working",
+			message: "Agent is connecting",
+			uri: "",
+		},
+	},
+	{
+		...MockTask,
+		id: "task-4",
+		name: "agent-starting",
+		display_name: "Agent Starting",
+		initial_prompt: "Task Agent Starting",
+		status: "initializing",
+		current_state: {
+			timestamp: new Date().toISOString(),
+			state: "working",
+			message: "Agent is starting",
+			uri: "",
+		},
+	},
+	{
+		...MockTask,
+		id: "task-5",
+		name: "app-initializing",
+		display_name: "App Initializing",
+		initial_prompt: "Task App Initializing",
+		status: "initializing",
+		current_state: {
+			timestamp: new Date().toISOString(),
+			state: "working",
+			message: "App is initializing",
+			uri: "",
+		},
+	},
+] satisfies TypesGen.Task[];
+
+export const MockDisplayNameTasks = [
+	{
+		...MockTask,
+	},
+	{
+		...MockTask,
+		id: "task-4",
+		name: "validate-email-regex",
+		// Display name with 64 characters with ellipsis
+		display_name:
+			"Write a function to validate email addresses using regular expr…",
+		current_state: {
+			...MockTask.current_state,
+			message: "Email validation complete!",
+			state: "complete",
+		},
+	},
+	{
+		...MockTask,
+		id: "payment-api-tests",
+		name: "payment-api-tests",
+		// Display name with 81 characters
+		display_name:
+			"Create a comprehensive test suite for the new payment processing microservice API",
+		current_state: {
+			...MockTask.current_state,
+			message: "Test suite created!",
+			state: "complete",
+		},
+	},
+] satisfies TypesGen.Task[];
+
+export const MockInterception: TypesGen.AIBridgeInterception = {
+	id: "5c1da48a-9eb0-440e-9c82-5bc5692a603d",
+	initiator: {
+		id: "1ebb7622-e6ea-45b4-b244-dda30afc7238",
+		username: "testuser",
+		avatar_url: "https://example.com/avatar.png",
+	},
+	provider: "openai",
+	provider_name: "openai",
+	model: "gpt-4o",
+	started_at: "2022-05-17T17:39:01.382927298Z",
+	ended_at: "2022-05-17T17:39:01.382927298Z",
+	token_usages: [
+		{
+			id: "32e7fd17-24be-46b9-b867-2f0adfd42aff",
+			interception_id: "5c1da48a-9eb0-440e-9c82-5bc5692a603d",
+			provider_response_id: "res_1234567890",
+			input_tokens: 5,
+			output_tokens: 1,
+			cache_read_input_tokens: 3,
+			cache_write_input_tokens: 1,
+			metadata: {},
+			created_at: "2022-05-17T17:39:01.382927298Z",
+		},
+	],
+	metadata: {},
+	user_prompts: [
+		{
+			id: "85154044-818e-4ee4-bac2-87f3ac8f066b",
+			interception_id: "5c1da48a-9eb0-440e-9c82-5bc5692a603d",
+			provider_response_id: "res_1234567890",
+			prompt: "Hello OpenAI",
+			metadata: {},
+			created_at: "2022-05-17T17:39:01.382927298Z",
+		},
+	],
+	tool_usages: [],
+	api_key_id: "5c1da48a-9eb0-440e-9c82-5bc5692a603d",
+	client: "Claude Code",
+};
+
+export const MockInterceptionAnthropic: TypesGen.AIBridgeInterception = {
+	...MockInterception,
+	id: "e5610f5b-2d6c-43db-b1c0-1dfcc6531f04",
+	provider: "anthropic",
+	model: "claude-sonnet-4.5",
+	user_prompts: [
+		{
+			id: "c820f31f-0170-4044-8b7c-b1b18747b4fb",
+			interception_id: "e5610f5b-2d6c-43db-b1c0-1dfcc6531f04",
+			provider_response_id: "res_2345678901",
+			prompt: "Hello Anthropic",
+			metadata: {},
+			created_at: "2022-05-17T17:39:01.382927298Z",
+		},
+	],
+};
+
+export const MockInterceptionCopilot: TypesGen.AIBridgeInterception = {
+	...MockInterception,
+	id: "22c9d31e-1a1f-464a-b397-562958599aa8",
+	provider: "copilot",
+	model: "claude-opus-4-5",
+	user_prompts: [
+		{
+			id: "c6c613d1-177e-416f-95b5-c7f0eeefb922",
+			interception_id: "22c9d31e-1a1f-464a-b397-562958599aa8",
+			provider_response_id: "res_3456789012",
+			prompt: "Hello Copilot",
+			metadata: {},
+			created_at: "2022-05-17T17:39:01.382927298Z",
+		},
+	],
+};
+
+export const MockSession: TypesGen.AIBridgeSession = {
+	id: "c8f2df8c-149c-43e1-9d51-898daaa2c505",
+	initiator: {
+		id: "59da0bfe-9c99-47fa-a563-f9fdb18449d0",
+		username: "bob",
+		name: "The Builder, Bob",
+		avatar_url:
+			"https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQeDqc5b7Ny5bJOKxDeFvy17kBQ2_ZmBE8vKw&s",
+	},
+	providers: ["anthropic", "openai"],
+	models: ["claude-opus-4-6", "gpt-5.4"],
+	client: "Mux",
+	metadata: {
+		request_user_agent:
+			"mux/0.20.1-next.8.g0f494106 ai-sdk/anthropic/3.0.58 ai-sdk/provider-utils/4.0.19 runtime/node.js/22",
+	},
+	started_at: "2026-03-09T09:28:15.03152Z",
+	ended_at: "2026-03-09T10:28:17.294897Z",
+	threads: 17,
+	token_usage_summary: {
+		input_tokens: 1234,
+		output_tokens: 4321,
+		cache_read_input_tokens: 980,
+		cache_write_input_tokens: 120,
+	},
+	last_prompt: "But *can* I really fix it?",
 };

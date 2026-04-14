@@ -1,24 +1,23 @@
 import { css } from "@emotion/css";
-import AlertTitle from "@mui/material/AlertTitle";
 import Autocomplete from "@mui/material/Autocomplete";
 import CircularProgress from "@mui/material/CircularProgress";
 import TextField from "@mui/material/TextField";
-import { templateVersions } from "api/queries/templates";
-import type { TemplateVersion, Workspace } from "api/typesGenerated";
-import { Alert } from "components/Alert/Alert";
-import { Avatar } from "components/Avatar/Avatar";
-import { AvatarData } from "components/Avatar/AvatarData";
-import { ConfirmDialog } from "components/Dialogs/ConfirmDialog/ConfirmDialog";
-import type { DialogProps } from "components/Dialogs/Dialog";
-import { FormFields } from "components/Form/Form";
-import { Loader } from "components/Loader/Loader";
-import { Pill } from "components/Pill/Pill";
-import { Stack } from "components/Stack/Stack";
 import { InfoIcon } from "lucide-react";
-import { TemplateUpdateMessage } from "modules/templates/TemplateUpdateMessage";
 import { type FC, useState } from "react";
 import { useQuery } from "react-query";
-import { createDayString } from "utils/createDayString";
+import { templateVersions } from "#/api/queries/templates";
+import type { TemplateVersion, Workspace } from "#/api/typesGenerated";
+import { Alert, AlertTitle } from "#/components/Alert/Alert";
+import { Avatar } from "#/components/Avatar/Avatar";
+import { AvatarData } from "#/components/Avatar/AvatarData";
+import { ConfirmDialog } from "#/components/Dialogs/ConfirmDialog/ConfirmDialog";
+import type { DialogProps } from "#/components/Dialogs/Dialog";
+import { FormFields } from "#/components/Form/Form";
+import { Loader } from "#/components/Loader/Loader";
+import { Pill } from "#/components/Pill/Pill";
+import { Stack } from "#/components/Stack/Stack";
+import { TemplateUpdateMessage } from "#/modules/templates/TemplateUpdateMessage";
+import { createDayString } from "#/utils/createDayString";
 
 type ChangeWorkspaceVersionDialogProps = DialogProps & {
 	workspace: Workspace;
@@ -165,6 +164,6 @@ export const ChangeWorkspaceVersionDialog: FC<
 const classNames = {
 	// Same `padding-left` as input
 	root: css`
-    padding-left: 14px !important;
-  `,
+		padding-left: 14px !important;
+	`,
 };

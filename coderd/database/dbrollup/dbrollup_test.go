@@ -10,9 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbrollup"
@@ -51,10 +50,6 @@ func (w *wrapUpsertDB) UpsertTemplateUsageStats(ctx context.Context) error {
 
 func TestRollup_TwoInstancesUseLocking(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("Skipping test; only works with PostgreSQL.")
-	}
 
 	db, ps := dbtestutil.NewDB(t, dbtestutil.WithDumpOnFailure())
 	logger := testutil.Logger(t)

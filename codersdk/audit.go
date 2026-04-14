@@ -44,6 +44,8 @@ const (
 	// Deprecated: Workspace App connections are now included in the
 	// connection log.
 	ResourceTypeWorkspaceApp ResourceType = "workspace_app"
+	ResourceTypeTask         ResourceType = "task"
+	ResourceTypeAISeat       ResourceType = "ai_seat"
 )
 
 func (r ResourceType) FriendlyString() string {
@@ -100,6 +102,10 @@ func (r ResourceType) FriendlyString() string {
 		return "workspace agent"
 	case ResourceTypeWorkspaceApp:
 		return "workspace app"
+	case ResourceTypeTask:
+		return "task"
+	case ResourceTypeAISeat:
+		return "ai seat"
 	default:
 		return "unknown"
 	}
@@ -206,6 +212,7 @@ type AuditLogsRequest struct {
 type AuditLogResponse struct {
 	AuditLogs []AuditLog `json:"audit_logs"`
 	Count     int64      `json:"count"`
+	CountCap  int64      `json:"count_cap"`
 }
 
 type CreateTestAuditLogRequest struct {

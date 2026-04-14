@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,22 +25,23 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mattn/go-isatty"
 	"github.com/mitchellh/go-wordwrap"
 	"golang.org/x/mod/semver"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/pretty"
-
-	"github.com/coder/serpent"
-
 	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/cli/cliui"
 	"github.com/coder/coder/v2/cli/config"
 	"github.com/coder/coder/v2/cli/gitauth"
+	"github.com/coder/coder/v2/cli/sessionstore"
 	"github.com/coder/coder/v2/cli/telemetry"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/codersdk/agentsdk"
+	"github.com/coder/pretty"
+	"github.com/coder/quartz"
+	"github.com/coder/serpent"
 )
 
 var (
@@ -54,6 +56,8 @@ var (
 	// ErrSilent is a sentinel error that tells the command handler to just exit with a non-zero error, but not print
 	// anything.
 	ErrSilent = xerrors.New("silent error")
+
+	errKeyringNotSupported = xerrors.New("keyring storage is not supported on this operating system; omit --use-keyring to use file-based storage")
 )
 
 const (
@@ -68,12 +72,14 @@ const (
 	varVerbose                 = "verbose"
 	varDisableDirect           = "disable-direct-connections"
 	varDisableNetworkTelemetry = "disable-network-telemetry"
+	varUseKeyring              = "use-keyring"
 
 	notLoggedInMessage = "You are not logged in. Try logging in using '%s login <url>'."
 
 	envNoVersionCheck   = "CODER_NO_VERSION_WARNING"
 	envNoFeatureWarning = "CODER_NO_FEATURE_WARNING"
 	envSessionToken     = "CODER_SESSION_TOKEN"
+	envUseKeyring       = "CODER_USE_KEYRING"
 	//nolint:gosec
 	envAgentToken = "CODER_AGENT_TOKEN"
 	//nolint:gosec
@@ -99,6 +105,7 @@ func (r *RootCmd) CoreSubcommands() []*serpent.Command {
 		r.resetPassword(),
 		r.sharing(),
 		r.state(),
+		r.tasksCommand(),
 		r.templates(),
 		r.tokens(),
 		r.users(),
@@ -111,6 +118,7 @@ func (r *RootCmd) CoreSubcommands() []*serpent.Command {
 		r.deleteWorkspace(),
 		r.favorite(),
 		r.list(),
+		r.logs(),
 		r.open(),
 		r.ping(),
 		r.rename(),
@@ -141,11 +149,11 @@ func (r *RootCmd) AGPLExperimental() []*serpent.Command {
 	return []*serpent.Command{
 		r.scaletestCmd(),
 		r.errorExample(),
+		r.chatCommand(),
 		r.mcpCommand(),
 		r.promptExample(),
 		r.rptyCommand(),
-		r.tasksCommand(),
-		r.boundary(),
+		r.syncCommand(),
 	}
 }
 
@@ -225,6 +233,10 @@ func (r *RootCmd) RunWithSubcommands(subcommands []*serpent.Command) {
 }
 
 func (r *RootCmd) Command(subcommands []*serpent.Command) (*serpent.Command, error) {
+	if r.clock == nil {
+		r.clock = quartz.NewReal()
+	}
+
 	fmtLong := `Coder %s — A tool for provisioning self-hosted development environments with Terraform.
 `
 	hiddenAgentAuth := &AgentAuth{}
@@ -325,6 +337,12 @@ func (r *RootCmd) Command(subcommands []*serpent.Command) (*serpent.Command, err
 				if cmd.Name() == "server" {
 					// The server command is funky and has YAML-only options, e.g.
 					// support links.
+					return
+				}
+				if cmd.Name() == "boundary" {
+					// The boundary command is integrated from the boundary package
+					// and has YAML-only options (e.g., allowlist from config file)
+					// that don't have flags or env vars.
 					return
 				}
 				merr = errors.Join(
@@ -475,6 +493,17 @@ func (r *RootCmd) Command(subcommands []*serpent.Command) (*serpent.Command, err
 			Group:       globalGroup,
 		},
 		{
+			Flag: varUseKeyring,
+			Env:  envUseKeyring,
+			Description: "Store and retrieve session tokens using the operating system " +
+				"keyring. This flag is ignored and file-based storage is used when " +
+				"--global-config is set or keyring usage is not supported on the current " +
+				"platform. Set to false to force file-based storage on supported platforms.",
+			Default: "true",
+			Value:   serpent.BoolOf(&r.useKeyring),
+			Group:   globalGroup,
+		},
+		{
 			Flag:        "debug-http",
 			Description: "Debug codersdk HTTP requests.",
 			Value:       serpent.BoolOf(&r.debugHTTP),
@@ -508,6 +537,7 @@ func (r *RootCmd) Command(subcommands []*serpent.Command) (*serpent.Command, err
 type RootCmd struct {
 	clientURL     *url.URL
 	token         string
+	tokenBackend  sessionstore.Backend
 	globalConfig  string
 	header        []string
 	headerCommand string
@@ -519,43 +549,64 @@ type RootCmd struct {
 	disableDirect bool
 	debugHTTP     bool
 
-	disableNetworkTelemetry bool
-	noVersionCheck          bool
-	noFeatureWarning        bool
+	disableNetworkTelemetry    bool
+	noVersionCheck             bool
+	noFeatureWarning           bool
+	useKeyring                 bool
+	keyringServiceName         string
+	useKeyringWithGlobalConfig bool
+
+	// clock is used for time-dependent operations. Initialized to
+	// quartz.NewReal() in Command() if not set via SetClock.
+	clock quartz.Clock
+}
+
+// SetClock sets the clock used for time-dependent operations.
+// Must be called before Command() to take effect.
+func (r *RootCmd) SetClock(clk quartz.Clock) {
+	r.clock = clk
+}
+
+// ensureClientURL loads the client URL from the config file if it
+// wasn't provided via --url or CODER_URL.
+func (r *RootCmd) ensureClientURL() error {
+	if r.clientURL != nil && r.clientURL.String() != "" {
+		return nil
+	}
+	rawURL, err := r.createConfig().URL().Read()
+	// If the configuration files are absent, the user is logged out.
+	if os.IsNotExist(err) {
+		binPath, err := os.Executable()
+		if err != nil {
+			binPath = "coder"
+		}
+		return xerrors.Errorf(notLoggedInMessage, binPath)
+	}
+	if err != nil {
+		return err
+	}
+	r.clientURL, err = url.Parse(strings.TrimSpace(rawURL))
+	return err
 }
 
 // InitClient creates and configures a new client with authentication, telemetry,
 // and version checks.
 func (r *RootCmd) InitClient(inv *serpent.Invocation) (*codersdk.Client, error) {
-	conf := r.createConfig()
-	var err error
-	// Read the client URL stored on disk.
-	if r.clientURL == nil || r.clientURL.String() == "" {
-		rawURL, err := conf.URL().Read()
-		// If the configuration files are absent, the user is logged out
-		if os.IsNotExist(err) {
-			binPath, err := os.Executable()
-			if err != nil {
-				binPath = "coder"
-			}
-			return nil, xerrors.Errorf(notLoggedInMessage, binPath)
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		r.clientURL, err = url.Parse(strings.TrimSpace(rawURL))
-		if err != nil {
-			return nil, err
-		}
+	if err := r.ensureClientURL(); err != nil {
+		return nil, err
 	}
-	// Read the token stored on disk.
 	if r.token == "" {
-		r.token, err = conf.Session().Read()
+		tok, err := r.ensureTokenBackend().Read(r.clientURL)
 		// Even if there isn't a token, we don't care.
 		// Some API routes can be unauthenticated.
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && !xerrors.Is(err, os.ErrNotExist) {
+			if xerrors.Is(err, sessionstore.ErrNotImplemented) {
+				return nil, errKeyringNotSupported
+			}
 			return nil, err
+		}
+		if tok != "" {
+			r.token = tok
 		}
 	}
 
@@ -588,7 +639,6 @@ func (r *RootCmd) InitClient(inv *serpent.Invocation) (*codersdk.Client, error) 
 // This allows commands to run without requiring authentication, but still use auth if available.
 func (r *RootCmd) TryInitClient(inv *serpent.Invocation) (*codersdk.Client, error) {
 	conf := r.createConfig()
-	var err error
 	// Read the client URL stored on disk.
 	if r.clientURL == nil || r.clientURL.String() == "" {
 		rawURL, err := conf.URL().Read()
@@ -605,13 +655,18 @@ func (r *RootCmd) TryInitClient(inv *serpent.Invocation) (*codersdk.Client, erro
 			}
 		}
 	}
-	// Read the token stored on disk.
 	if r.token == "" {
-		r.token, err = conf.Session().Read()
+		tok, err := r.ensureTokenBackend().Read(r.clientURL)
 		// Even if there isn't a token, we don't care.
 		// Some API routes can be unauthenticated.
-		if err != nil && !os.IsNotExist(err) {
+		if err != nil && !xerrors.Is(err, os.ErrNotExist) {
+			if xerrors.Is(err, sessionstore.ErrNotImplemented) {
+				return nil, errKeyringNotSupported
+			}
 			return nil, err
+		}
+		if tok != "" {
+			r.token = tok
 		}
 	}
 
@@ -655,8 +710,9 @@ func (r *RootCmd) HeaderTransport(ctx context.Context, serverURL *url.URL) (*cod
 func (r *RootCmd) createHTTPClient(ctx context.Context, serverURL *url.URL, inv *serpent.Invocation) (*http.Client, error) {
 	transport := http.DefaultTransport
 	transport = wrapTransportWithTelemetryHeader(transport, inv)
+	transport = wrapTransportWithUserAgentHeader(transport, inv)
 	if !r.noVersionCheck {
-		transport = wrapTransportWithVersionMismatchCheck(transport, inv, buildinfo.Version(), func(ctx context.Context) (codersdk.BuildInfoResponse, error) {
+		transport = wrapTransportWithVersionCheck(transport, inv, buildinfo.Version(), func(ctx context.Context) (codersdk.BuildInfoResponse, error) {
 			// Create a new client without any wrapped transport
 			// otherwise it creates an infinite loop!
 			basicClient := codersdk.New(serverURL)
@@ -686,6 +742,45 @@ func (r *RootCmd) createUnauthenticatedClient(ctx context.Context, serverURL *ur
 	}
 	client := codersdk.New(serverURL, codersdk.WithHTTPClient(httpClient))
 	return client, nil
+}
+
+// ensureTokenBackend returns the session token storage backend, creating it if necessary.
+// This must be called after flags are parsed so we can respect the value of the --use-keyring
+// flag.
+func (r *RootCmd) ensureTokenBackend() sessionstore.Backend {
+	if r.tokenBackend == nil {
+		// Checking for the --global-config directory being set is a bit wonky but necessary
+		// to allow extensions that invoke the CLI with this flag (e.g. VS code) to continue
+		// working without modification. In the future we should modify these extensions to
+		// either access the credential in the keyring (like Coder Desktop) or some other
+		// approach that doesn't rely on the session token being stored on disk.
+		assumeExtensionInUse := r.globalConfig != config.DefaultDir() && !r.useKeyringWithGlobalConfig
+		keyringSupported := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+		if r.useKeyring && !assumeExtensionInUse && keyringSupported {
+			serviceName := sessionstore.DefaultServiceName
+			if r.keyringServiceName != "" {
+				serviceName = r.keyringServiceName
+			}
+			r.tokenBackend = sessionstore.NewKeyringWithService(serviceName)
+		} else {
+			r.tokenBackend = sessionstore.NewFile(r.createConfig)
+		}
+	}
+	return r.tokenBackend
+}
+
+// WithKeyringServiceName sets a custom keyring service name for testing purposes.
+// This allows tests to use isolated keyring storage while still exercising the
+// genuine storage backend selection logic in ensureTokenBackend().
+func (r *RootCmd) WithKeyringServiceName(serviceName string) {
+	r.keyringServiceName = serviceName
+}
+
+// UseKeyringWithGlobalConfig enables the use of the keyring storage backend
+// when the --global-config directory is set. This is only intended as an override
+// for tests, which require specifying the global config directory for test isolation.
+func (r *RootCmd) UseKeyringWithGlobalConfig() {
+	r.useKeyringWithGlobalConfig = true
 }
 
 type AgentAuth struct {
@@ -809,16 +904,27 @@ func (o *OrganizationContext) Selected(inv *serpent.Invocation, client *codersdk
 		index := slices.IndexFunc(orgs, func(org codersdk.Organization) bool {
 			return org.Name == o.FlagSelect || org.ID.String() == o.FlagSelect
 		})
+		if index >= 0 {
+			return orgs[index], nil
+		}
 
-		if index < 0 {
+		// Not in membership list - try direct fetch.
+		// This allows site-wide admins (e.g., Owners) to use orgs they aren't
+		// members of.
+		org, err := client.OrganizationByName(inv.Context(), o.FlagSelect)
+		if err != nil {
 			var names []string
 			for _, org := range orgs {
 				names = append(names, org.Name)
 			}
-			return codersdk.Organization{}, xerrors.Errorf("organization %q not found, are you sure you are a member of this organization? "+
-				"Valid options for '--org=' are [%s].", o.FlagSelect, strings.Join(names, ", "))
+			var sdkErr *codersdk.Error
+			if errors.As(err, &sdkErr) && sdkErr.StatusCode() == http.StatusNotFound {
+				return codersdk.Organization{}, xerrors.Errorf("organization %q not found, are you sure you are a member of this organization? "+
+					"Valid options for '--org=' are [%s].", o.FlagSelect, strings.Join(names, ", "))
+			}
+			return codersdk.Organization{}, xerrors.Errorf("get organization %q: %w", o.FlagSelect, err)
 		}
-		return orgs[index], nil
+		return org, nil
 	}
 
 	if len(orgs) == 1 {
@@ -854,6 +960,9 @@ func splitNamedWorkspace(identifier string) (owner string, workspaceName string,
 // a bare name (for a workspace owned by the current user) or a "user/workspace" combination,
 // where user is either a username or UUID.
 func namedWorkspace(ctx context.Context, client *codersdk.Client, identifier string) (codersdk.Workspace, error) {
+	if uid, err := uuid.Parse(identifier); err == nil {
+		return client.Workspace(ctx, uid)
+	}
 	owner, name, err := splitNamedWorkspace(identifier)
 	if err != nil {
 		return codersdk.Workspace{}, err
@@ -1307,7 +1416,6 @@ func tailLineStyle() pretty.Style {
 	return pretty.Style{pretty.Nop}
 }
 
-//nolint:unused
 func SlimUnsupported(w io.Writer, cmd string) {
 	_, _ = fmt.Fprintf(w, "You are using a 'slim' build of Coder, which does not support the %s subcommand.\n", pretty.Sprint(cliui.DefaultStyles.Code, cmd))
 	_, _ = fmt.Fprintln(w, "")
@@ -1328,6 +1436,21 @@ func defaultUpgradeMessage(version string) string {
 	return fmt.Sprintf("download the server version with: 'curl -L https://coder.com/install.sh | sh -s -- --version %s'", version)
 }
 
+// serverVersionMessage returns a warning message if the server version
+// is a release candidate or development build. Returns empty string
+// for stable versions. RC is checked before devel because RC dev
+// builds (e.g. v2.33.0-rc.1-devel+hash) contain both tags.
+func serverVersionMessage(serverVersion string) string {
+	switch {
+	case buildinfo.IsRCVersion(serverVersion):
+		return fmt.Sprintf("the server is running a release candidate of Coder (%s)", serverVersion)
+	case buildinfo.IsDevVersion(serverVersion):
+		return fmt.Sprintf("the server is running a development version of Coder (%s)", serverVersion)
+	default:
+		return ""
+	}
+}
+
 // wrapTransportWithEntitlementsCheck adds a middleware to the HTTP transport
 // that checks for entitlement warnings and prints them to the user.
 func wrapTransportWithEntitlementsCheck(rt http.RoundTripper, w io.Writer) http.RoundTripper {
@@ -1346,10 +1469,10 @@ func wrapTransportWithEntitlementsCheck(rt http.RoundTripper, w io.Writer) http.
 	})
 }
 
-// wrapTransportWithVersionMismatchCheck adds a middleware to the HTTP transport
-// that checks for version mismatches between the client and server. If a mismatch
-// is detected, a warning is printed to the user.
-func wrapTransportWithVersionMismatchCheck(rt http.RoundTripper, inv *serpent.Invocation, clientVersion string, getBuildInfo func(ctx context.Context) (codersdk.BuildInfoResponse, error)) http.RoundTripper {
+// wrapTransportWithVersionCheck adds a middleware to the HTTP transport
+// that checks the server version and warns about development builds,
+// release candidates, and client/server version mismatches.
+func wrapTransportWithVersionCheck(rt http.RoundTripper, inv *serpent.Invocation, clientVersion string, getBuildInfo func(ctx context.Context) (codersdk.BuildInfoResponse, error)) http.RoundTripper {
 	var once sync.Once
 	return roundTripper(func(req *http.Request) (*http.Response, error) {
 		res, err := rt.RoundTrip(req)
@@ -1361,9 +1484,16 @@ func wrapTransportWithVersionMismatchCheck(rt http.RoundTripper, inv *serpent.In
 			if serverVersion == "" {
 				return
 			}
+			// Warn about non-stable server versions. Skip
+			// during tests to avoid polluting golden files.
+			if msg := serverVersionMessage(serverVersion); msg != "" && flag.Lookup("test.v") == nil {
+				warning := pretty.Sprint(cliui.DefaultStyles.Warn, msg)
+				_, _ = fmt.Fprintln(inv.Stderr, warning)
+			}
 			if buildinfo.VersionsMatch(clientVersion, serverVersion) {
 				return
 			}
+
 			upgradeMessage := defaultUpgradeMessage(semver.Canonical(serverVersion))
 			if serverInfo, err := getBuildInfo(inv.Context()); err == nil {
 				switch {
@@ -1425,6 +1555,22 @@ func wrapTransportWithTelemetryHeader(transport http.RoundTripper, inv *serpent.
 		if value != "" {
 			req.Header.Add(codersdk.CLITelemetryHeader, value)
 		}
+		return transport.RoundTrip(req)
+	})
+}
+
+// wrapTransportWithUserAgentHeader sets a User-Agent header for all CLI requests
+// that includes the CLI version, os/arch, and the specific command being run.
+func wrapTransportWithUserAgentHeader(transport http.RoundTripper, inv *serpent.Invocation) http.RoundTripper {
+	var (
+		userAgent string
+		once      sync.Once
+	)
+	return roundTripper(func(req *http.Request) (*http.Response, error) {
+		once.Do(func() {
+			userAgent = fmt.Sprintf("coder-cli/%s (%s/%s; %s)", buildinfo.Version(), runtime.GOOS, runtime.GOARCH, inv.Command.FullName())
+		})
+		req.Header.Set("User-Agent", userAgent)
 		return transport.RoundTrip(req)
 	})
 }

@@ -1,22 +1,23 @@
 import type { Interpolation, Theme } from "@emotion/react";
-import { workspaceResolveAutostart } from "api/queries/workspaceQuota";
+import dayjs from "dayjs";
+import relativeTime from "dayjs/plugin/relativeTime";
+import { InfoIcon, TriangleAlertIcon } from "lucide-react";
+import { type FC, useEffect, useState } from "react";
+import { workspaceResolveAutostart } from "#/api/queries/workspaceQuota";
 import type {
 	Template,
 	TemplateVersion,
 	Workspace,
 	WorkspaceBuild,
-} from "api/typesGenerated";
-import { MemoizedInlineMarkdown } from "components/Markdown/Markdown";
-import dayjs from "dayjs";
-import relativeTime from "dayjs/plugin/relativeTime";
-import { InfoIcon, TriangleAlertIcon } from "lucide-react";
-import { useDashboard } from "modules/dashboard/useDashboard";
-import { TemplateUpdateMessage } from "modules/templates/TemplateUpdateMessage";
-import { type FC, useEffect, useState } from "react";
+} from "#/api/typesGenerated";
+import { MemoizedInlineMarkdown } from "#/components/Markdown/InlineMarkdown";
+import { useDashboard } from "#/modules/dashboard/useDashboard";
+import { TemplateUpdateMessage } from "#/modules/templates/TemplateUpdateMessage";
 
 dayjs.extend(relativeTime);
 
 import { useQuery } from "react-query";
+import { formatDate } from "#/utils/time";
 import type { WorkspacePermissions } from "../../../modules/workspaces/permissions";
 import {
 	NotificationActionButton,
@@ -91,19 +92,10 @@ export const WorkspaceNotifications: FC<WorkspaceNotificationsProps> = ({
 	) {
 		const troubleshootingURL = findTroubleshootingURL(workspace.latest_build);
 		const hasActions = permissions.updateWorkspace || troubleshootingURL;
-
 		notifications.push({
-			title: "Workspace is unhealthy",
+			title: "One or more workspace agents need attention",
 			severity: "warning",
-			detail: (
-				<>
-					Your workspace is running but{" "}
-					{workspace.health.failing_agents.length > 1
-						? `${workspace.health.failing_agents.length} agents are unhealthy`
-						: "1 agent is unhealthy"}
-					.
-				</>
-			),
+			detail: "Expand an agent's logs to view per-agent health details.",
 			actions: hasActions ? (
 				<>
 					{permissions.updateWorkspace && (
@@ -128,9 +120,9 @@ export const WorkspaceNotifications: FC<WorkspaceNotificationsProps> = ({
 	const advancedSchedulingEnabled =
 		entitlements.features.advanced_template_scheduling.enabled;
 	if (advancedSchedulingEnabled && workspace.dormant_at) {
-		const formatDate = (dateStr: string, timestamp: boolean): string => {
+		const formatDateTime = (dateStr: string, timestamp: boolean): string => {
 			const date = new Date(dateStr);
-			return date.toLocaleDateString(undefined, {
+			return formatDate(date, {
 				month: "long",
 				day: "numeric",
 				year: "numeric",
@@ -150,17 +142,17 @@ export const WorkspaceNotifications: FC<WorkspaceNotificationsProps> = ({
 				<>
 					This workspace has not been used for{" "}
 					{dayjs(workspace.last_used_at).fromNow(true)} and was marked dormant
-					on {formatDate(workspace.dormant_at, false)}. It is scheduled to be
-					deleted on {formatDate(workspace.deleting_at, true)}. To keep it you
-					must activate the workspace.
+					on {formatDateTime(workspace.dormant_at, false)}. It is scheduled to
+					be deleted on {formatDateTime(workspace.deleting_at, true)}. To keep
+					it you must activate the workspace.
 				</>
 			) : (
 				<>
 					This workspace has not been used for{" "}
 					{dayjs(workspace.last_used_at).fromNow(true)} and was marked dormant
-					on {formatDate(workspace.dormant_at, false)}. It is not scheduled for
-					auto-deletion but will become a candidate if auto-deletion is enabled
-					on this template. To keep it you must activate the workspace.
+					on {formatDateTime(workspace.dormant_at, false)}. It is not scheduled
+					for auto-deletion but will become a candidate if auto-deletion is
+					enabled on this template. To keep it you must activate the workspace.
 				</>
 			),
 		});
@@ -213,7 +205,7 @@ export const WorkspaceNotifications: FC<WorkspaceNotificationsProps> = ({
 					This workspace build job is waiting for a provisioner to become
 					available. If you have been waiting for an extended period of time,
 					please contact your administrator for assistance.
-					<span css={{ display: "block", marginTop: 12 }}>
+					<span className="block mt-3">
 						Position in queue:{" "}
 						<strong>{workspace.latest_build.job.queue_position}</strong>
 					</span>
@@ -275,7 +267,7 @@ const styles = {
 	},
 } satisfies Record<string, Interpolation<Theme>>;
 
-export const findTroubleshootingURL = (
+const findTroubleshootingURL = (
 	workspaceBuild: WorkspaceBuild,
 ): string | undefined => {
 	for (const resource of workspaceBuild.resources) {

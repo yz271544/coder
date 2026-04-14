@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -40,13 +41,19 @@ func OAuth2(r *http.Request) OAuth2State {
 // a "code" URL parameter will be redirected.
 // AuthURLOpts are passed to the AuthCodeURL function. If this is nil,
 // the default option oauth2.AccessTypeOffline will be used.
-func ExtractOAuth2(config promoauth.OAuth2Config, client *http.Client, cookieCfg codersdk.HTTPCookieConfig, authURLOpts map[string]string) func(http.Handler) http.Handler {
+//
+// pkceMethods should be a list like ['S256', 'plain'] indicating
+// which PKCE methods are supported by the OAuth2 provider. If empty,
+// PKCE will not be used.
+func ExtractOAuth2(config promoauth.OAuth2Config, client *http.Client, cookieCfg codersdk.HTTPCookieConfig, authURLOpts map[string]string, pkceMethods []promoauth.Oauth2PKCEChallengeMethod) func(http.Handler) http.Handler {
 	opts := make([]oauth2.AuthCodeOption, 0, len(authURLOpts)+1)
 	opts = append(opts, oauth2.AccessTypeOffline)
 	for k, v := range authURLOpts {
 		opts = append(opts, oauth2.SetAuthURLParam(k, v))
 	}
 
+	// Only S256 PKCE is currently supported.
+	sha256PKCESupported := slices.Contains(pkceMethods, promoauth.PKCEChallengeMethodSha256)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
@@ -133,7 +140,20 @@ func ExtractOAuth2(config promoauth.OAuth2Config, client *http.Client, cookieCfg
 					HttpOnly: true,
 				}))
 
-				http.Redirect(rw, r, config.AuthCodeURL(state, opts...), http.StatusTemporaryRedirect)
+				authOpts := slices.Clone(opts)
+				if sha256PKCESupported {
+					verifier := oauth2.GenerateVerifier()
+					authOpts = append(authOpts, oauth2.S256ChallengeOption(verifier))
+
+					http.SetCookie(rw, cookieCfg.Apply(&http.Cookie{
+						Name:     codersdk.OAuth2PKCEVerifier,
+						Value:    verifier,
+						Path:     "/",
+						HttpOnly: true,
+					}))
+				}
+
+				http.Redirect(rw, r, config.AuthCodeURL(state, authOpts...), http.StatusTemporaryRedirect)
 				return
 			}
 
@@ -163,7 +183,19 @@ func ExtractOAuth2(config promoauth.OAuth2Config, client *http.Client, cookieCfg
 				redirect = stateRedirect.Value
 			}
 
-			oauthToken, err := config.Exchange(ctx, code)
+			exchangeOpts := make([]oauth2.AuthCodeOption, 0)
+			if sha256PKCESupported {
+				pkceVerifier, err := r.Cookie(codersdk.OAuth2PKCEVerifier)
+				if err != nil {
+					httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
+						Message: "PKCE challenge must be provided.",
+					})
+					return
+				}
+				exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(pkceVerifier.Value))
+			}
+
+			oauthToken, err := config.Exchange(ctx, code, exchangeOpts...)
 			if err != nil {
 				errorCode := http.StatusInternalServerError
 				detail := err.Error()
@@ -258,15 +290,15 @@ func (*codersdkErrorWriter) writeClientNotFound(ctx context.Context, rw http.Res
 type oauth2ErrorWriter struct{}
 
 func (*oauth2ErrorWriter) writeMissingClientID(ctx context.Context, rw http.ResponseWriter) {
-	httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, "invalid_request", "Missing client_id parameter")
+	httpapi.WriteOAuth2Error(ctx, rw, http.StatusBadRequest, codersdk.OAuth2ErrorCodeInvalidRequest, "Missing client_id parameter")
 }
 
 func (*oauth2ErrorWriter) writeInvalidClientID(ctx context.Context, rw http.ResponseWriter, _ error) {
-	httpapi.WriteOAuth2Error(ctx, rw, http.StatusUnauthorized, "invalid_client", "The client credentials are invalid")
+	httpapi.WriteOAuth2Error(ctx, rw, http.StatusUnauthorized, codersdk.OAuth2ErrorCodeInvalidClient, "The client credentials are invalid")
 }
 
 func (*oauth2ErrorWriter) writeClientNotFound(ctx context.Context, rw http.ResponseWriter) {
-	httpapi.WriteOAuth2Error(ctx, rw, http.StatusUnauthorized, "invalid_client", "The client credentials are invalid")
+	httpapi.WriteOAuth2Error(ctx, rw, http.StatusUnauthorized, codersdk.OAuth2ErrorCodeInvalidClient, "The client credentials are invalid")
 }
 
 // extractOAuth2ProviderAppBase is the internal implementation that uses the strategy pattern
@@ -295,6 +327,13 @@ func extractOAuth2ProviderAppBase(db database.Store, errWriter errorWriter) func
 					// Check the form params!
 					if r.ParseForm() == nil {
 						paramAppID = r.Form.Get("client_id")
+					}
+				}
+				if paramAppID == "" {
+					// RFC 6749 §2.3.1: confidential clients may authenticate via
+					// HTTP Basic where the username is the client_id.
+					if user, _, ok := r.BasicAuth(); ok && user != "" {
+						paramAppID = user
 					}
 				}
 				if paramAppID == "" {

@@ -1,12 +1,18 @@
 terraform {
   required_providers {
     coderd = {
-      source = "coder/coderd"
+      source  = "coder/coderd"
+      version = ">= 0.0.13"
     }
   }
   backend "gcs" {
     bucket = "coder-dogfood-tf-state"
   }
+}
+
+import {
+  to = coderd_template.envbuilder_dogfood
+  id = "e75f1212-834c-4183-8bed-d6817cac60a5"
 }
 
 data "coderd_organization" "default" {

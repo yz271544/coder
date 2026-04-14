@@ -1,53 +1,67 @@
-import { useTheme } from "@emotion/react";
-import CircularProgress from "@mui/material/CircularProgress";
-import Tooltip from "@mui/material/Tooltip";
-import { Abbr } from "components/Abbr/Abbr";
 import { CircleHelpIcon } from "lucide-react";
 import type { FC } from "react";
-import { cn } from "utils/cn";
-import { getLatencyColor } from "utils/latency";
+import { Abbr } from "#/components/Abbr/Abbr";
+import { Spinner } from "#/components/Spinner/Spinner";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
+import { cn } from "#/utils/cn";
+import { getLatencyColor } from "#/utils/latency";
 
 interface LatencyProps {
 	latency?: number;
 	isLoading?: boolean;
 	className?: string;
-	iconClassName?: string;
 }
 
 export const Latency: FC<LatencyProps> = ({
 	latency,
 	isLoading,
 	className,
-	iconClassName,
 }) => {
-	const theme = useTheme();
 	// Always use the no latency color for loading.
-	const color = getLatencyColor(theme, isLoading ? undefined : latency);
+	const latencyColor = getLatencyColor(isLoading ? undefined : latency);
 
 	if (isLoading) {
 		return (
-			<Tooltip title="Loading latency..." className={className}>
-				<CircularProgress
-					className={cn("!size-icon-xs", iconClassName)}
-					style={{ color }}
-				/>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					{/**
+					 * Spinning progress icon must be placed inside a fixed-size container,
+					 * to ensure tooltip remains stationary when opened
+					 */}
+					<div
+						className={cn(
+							"size-4 flex flex-wrap place-content-center",
+							className,
+						)}
+					>
+						<Spinner loading className={cn("!size-icon-xs", latencyColor)} />
+					</div>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">Loading latency...</TooltipContent>
 			</Tooltip>
 		);
 	}
 
 	if (!latency) {
 		return (
-			<Tooltip title="Latency not available" className={className}>
-				<CircleHelpIcon
-					className={cn("!size-icon-sm", iconClassName)}
-					style={{ color }}
-				/>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<CircleHelpIcon
+						aria-label="Latency not available"
+						className={cn("!size-icon-sm", latencyColor, className)}
+					/>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">Latency not available</TooltipContent>
 			</Tooltip>
 		);
 	}
 
 	return (
-		<div className={cn("text-sm", className)} style={{ color }}>
+		<div className={cn("text-sm", latencyColor, className)}>
 			<span className="sr-only">Latency: </span>
 			{latency.toFixed(0)}
 			<Abbr title="milliseconds">ms</Abbr>

@@ -1,13 +1,12 @@
-import type { ProvisionerJob } from "api/typesGenerated";
-import { Button } from "components/Button/Button";
+import { BanIcon } from "lucide-react";
+import { type FC, useState } from "react";
+import type { ProvisionerJob } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
 import {
 	Tooltip,
 	TooltipContent,
-	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import { BanIcon } from "lucide-react";
-import { type FC, useState } from "react";
+} from "#/components/Tooltip/Tooltip";
 import { CancelJobConfirmationDialog } from "./CancelJobConfirmationDialog";
 
 const CANCELLABLE = ["pending", "running"];
@@ -22,24 +21,22 @@ export const CancelJobButton: FC<CancelJobButtonProps> = ({ job }) => {
 
 	return (
 		<>
-			<TooltipProvider>
-				<Tooltip>
-					<TooltipTrigger asChild>
-						<Button
-							disabled={!isCancellable}
-							aria-label="Cancel job"
-							size="icon"
-							variant="outline"
-							onClick={() => {
-								setIsDialogOpen(true);
-							}}
-						>
-							<BanIcon />
-						</Button>
-					</TooltipTrigger>
-					<TooltipContent>Cancel job</TooltipContent>
-				</Tooltip>
-			</TooltipProvider>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<Button
+						disabled={!isCancellable}
+						aria-label="Cancel job"
+						size="icon"
+						variant="outline"
+						onClick={() => {
+							setIsDialogOpen(true);
+						}}
+					>
+						<BanIcon />
+					</Button>
+				</TooltipTrigger>
+				<TooltipContent>Cancel job</TooltipContent>
+			</Tooltip>
 
 			<CancelJobConfirmationDialog
 				open={isDialogOpen}

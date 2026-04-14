@@ -16,11 +16,11 @@ import (
 	"github.com/pkg/browser"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/pretty"
-
 	"github.com/coder/coder/v2/cli/cliui"
+	"github.com/coder/coder/v2/cli/sessionstore"
 	"github.com/coder/coder/v2/coderd/userpassword"
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/pretty"
 	"github.com/coder/serpent"
 )
 
@@ -114,9 +114,11 @@ func (r *RootCmd) loginWithPassword(
 	}
 
 	sessionToken := resp.SessionToken
-	config := r.createConfig()
-	err = config.Session().Write(sessionToken)
+	err = r.ensureTokenBackend().Write(client.URL, sessionToken)
 	if err != nil {
+		if xerrors.Is(err, sessionstore.ErrNotImplemented) {
+			return errKeyringNotSupported
+		}
 		return xerrors.Errorf("write session token: %w", err)
 	}
 
@@ -149,11 +151,15 @@ func (r *RootCmd) login() *serpent.Command {
 		useTokenForSession bool
 	)
 	cmd := &serpent.Command{
-		Use:        "login [<url>]",
-		Short:      "Authenticate with Coder deployment",
+		Use:   "login [<url>]",
+		Short: "Authenticate with Coder deployment",
+		Long: "By default, the session token is stored in the operating system keyring on " +
+			"macOS and Windows and a plain text file on Linux. Use the --use-keyring flag " +
+			"or CODER_USE_KEYRING environment variable to change the storage mechanism.",
 		Middleware: serpent.RequireRangeArgs(0, 1),
 		Handler: func(inv *serpent.Invocation) error {
 			ctx := inv.Context()
+
 			rawURL := ""
 			var urlSource string
 
@@ -196,6 +202,15 @@ func (r *RootCmd) login() *serpent.Command {
 			client, err := r.createUnauthenticatedClient(ctx, serverURL, inv)
 			if err != nil {
 				return err
+			}
+
+			// Check keyring availability before prompting the user for a token to fail fast.
+			if r.useKeyring {
+				backend := r.ensureTokenBackend()
+				_, err := backend.Read(client.URL)
+				if err != nil && xerrors.Is(err, sessionstore.ErrNotImplemented) {
+					return errKeyringNotSupported
+				}
 			}
 
 			hasFirstUser, err := client.HasFirstUser(ctx)
@@ -342,6 +357,25 @@ func (r *RootCmd) login() *serpent.Command {
 			}
 
 			sessionToken, _ := inv.ParsedFlags().GetString(varToken)
+			tokenFlagProvided := inv.ParsedFlags().Changed(varToken)
+
+			// If CODER_SESSION_TOKEN is set in the environment, abort
+			// interactive login unless --use-token-as-session or --token
+			// is specified. The env var takes precedence over a token
+			// stored on disk, so even if we complete login and write a
+			// new token to the session file, subsequent CLI commands
+			// would still use the environment variable value. When
+			// --token is provided on the command line, the user
+			// explicitly wants to authenticate with that token (common
+			// in CI), so we skip this check.
+			if !tokenFlagProvided && inv.Environ.Get(envSessionToken) != "" && !useTokenForSession {
+				return xerrors.Errorf(
+					"%s is set. This environment variable takes precedence over any session token stored on disk.\n\n"+
+						"To log in, unset the environment variable and re-run this command:\n\n"+
+						"\tunset %s",
+					envSessionToken, envSessionToken,
+				)
+			}
 			if sessionToken == "" {
 				authURL := *serverURL
 				// Don't use filepath.Join, we don't want to use the os separator
@@ -394,8 +428,11 @@ func (r *RootCmd) login() *serpent.Command {
 			}
 
 			config := r.createConfig()
-			err = config.Session().Write(sessionToken)
+			err = r.ensureTokenBackend().Write(client.URL, sessionToken)
 			if err != nil {
+				if xerrors.Is(err, sessionstore.ErrNotImplemented) {
+					return errKeyringNotSupported
+				}
 				return xerrors.Errorf("write session token: %w", err)
 			}
 			err = config.URL().Write(serverURL.String())
@@ -444,7 +481,55 @@ func (r *RootCmd) login() *serpent.Command {
 			Value:       serpent.BoolOf(&useTokenForSession),
 		},
 	}
+	cmd.Children = []*serpent.Command{
+		r.loginToken(),
+	}
 	return cmd
+}
+
+func (r *RootCmd) loginToken() *serpent.Command {
+	return &serpent.Command{
+		Use:        "token",
+		Short:      "Print the current session token",
+		Long:       "Print the session token for use in scripts and automation.",
+		Middleware: serpent.RequireNArgs(0),
+		Handler: func(inv *serpent.Invocation) error {
+			if err := r.ensureClientURL(); err != nil {
+				return err
+			}
+			// When using the file storage, a session token is stored for a single
+			// deployment URL that the user is logged in to. They keyring can store
+			// multiple deployment session tokens. Error if the requested URL doesn't
+			// match the stored config URL when using file storage to avoid returning
+			// a token for the wrong deployment.
+			backend := r.ensureTokenBackend()
+			if _, ok := backend.(*sessionstore.File); ok {
+				conf := r.createConfig()
+				storedURL, err := conf.URL().Read()
+				if err == nil {
+					storedURL = strings.TrimSpace(storedURL)
+					if storedURL != r.clientURL.String() {
+						return xerrors.Errorf("file session token storage only supports one server at a time: requested %s but logged into %s", r.clientURL.String(), storedURL)
+					}
+				}
+			}
+			tok, err := backend.Read(r.clientURL)
+			if err != nil {
+				if xerrors.Is(err, os.ErrNotExist) {
+					return xerrors.New("no session token found - run 'coder login' first")
+				}
+				if xerrors.Is(err, sessionstore.ErrNotImplemented) {
+					return errKeyringNotSupported
+				}
+				return xerrors.Errorf("read session token: %w", err)
+			}
+			if tok == "" {
+				return xerrors.New("no session token found - run 'coder login' first")
+			}
+			_, err = fmt.Fprintln(inv.Stdout, tok)
+			return err
+		},
+	}
 }
 
 // isWSL determines if coder-cli is running within Windows Subsystem for Linux

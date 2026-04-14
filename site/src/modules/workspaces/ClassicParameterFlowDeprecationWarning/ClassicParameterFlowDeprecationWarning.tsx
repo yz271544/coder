@@ -1,7 +1,7 @@
-import { Alert } from "components/Alert/Alert";
-import { Link } from "components/Link/Link";
 import type { FC } from "react";
-import { docs } from "utils/docs";
+import { Alert } from "#/components/Alert/Alert";
+import { Link } from "#/components/Link/Link";
+import { docs } from "#/utils/docs";
 
 interface ClassicParameterFlowDeprecationWarningProps {
 	templateSettingsLink: string;
@@ -16,7 +16,7 @@ export const ClassicParameterFlowDeprecationWarning: FC<
 	}
 
 	return (
-		<Alert severity="warning" className="mb-2">
+		<Alert severity="warning" className="mb-2" prominent>
 			<div>
 				This template is using the classic parameter flow, which will be{" "}
 				<strong>deprecated</strong> and removed in a future release. Please

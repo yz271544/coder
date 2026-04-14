@@ -3,6 +3,7 @@
 .eslintcache
 .gitpod.yml
 .idea
+.run
 **/*.swp
 gotests.coverage
 gotests.xml
@@ -11,6 +12,9 @@ gotests.json
 node_modules/
 vendor/
 yarn-error.log
+
+# Test output files
+test-output/
 
 # VSCode settings.
 **/.vscode/*
@@ -34,6 +38,7 @@ site/.swc
 
 # Make target for updating generated/golden files (any dir).
 .gen
+/_gen/
 .gen-golden
 
 # Build
@@ -49,6 +54,7 @@ site/stats/
 *.tfstate.backup
 *.tfplan
 *.lock.hcl
+!provisioner/terraform/testdata/resources/.terraform.lock.hcl
 .terraform/
 !coderd/testdata/parameters/modules/.terraform/
 !provisioner/terraform/testdata/modules-source-caching/.terraform/
@@ -86,3 +92,17 @@ result
 __debug_bin*
 
 **/.claude/settings.local.json
+
+# Local agent configuration
+AGENTS.local.md
+
+/.env
+
+# Ignore plans written by AI agents.
+PLAN.md
+
+# Ignore any dev licenses
+license.txt
+
+# Agent planning documents (local working files).
+docs/plans/

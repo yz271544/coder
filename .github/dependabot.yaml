@@ -6,6 +6,8 @@ updates:
       interval: "weekly"
       time: "06:00"
       timezone: "America/Chicago"
+    cooldown:
+      default-days: 7
     labels: []
     commit-message:
       prefix: "ci"
@@ -68,8 +70,8 @@ updates:
       interval: "monthly"
       time: "06:00"
       timezone: "America/Chicago"
-    reviewers:
-      - "coder/ts"
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "chore"
     labels: []
@@ -80,9 +82,6 @@ updates:
       mui:
         patterns:
           - "@mui*"
-      radix:
-        patterns:
-          - "@radix-ui/*"
       react:
         patterns:
           - "react"
@@ -92,12 +91,6 @@ updates:
       emotion:
         patterns:
           - "@emotion*"
-        exclude-patterns:
-          - "jest-runner-eslint"
-      jest:
-        patterns:
-          - "jest"
-          - "@types/jest"
       vite:
         patterns:
           - "vite*"
@@ -119,9 +112,9 @@ updates:
     commit-message:
       prefix: "chore"
     groups:
-      coder:
+      coder-modules:
         patterns:
-          - "registry.coder.com/coder/*/coder"
+          - "coder/*/coder"
     labels: []
     ignore:
       - dependency-name: "*"

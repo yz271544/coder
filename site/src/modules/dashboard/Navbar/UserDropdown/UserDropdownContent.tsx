@@ -1,40 +1,30 @@
 import {
-	type CSSObject,
-	css,
-	type Interpolation,
-	type Theme,
-} from "@emotion/react";
-import Divider from "@mui/material/Divider";
-import MenuItem from "@mui/material/MenuItem";
-import type { SvgIconProps } from "@mui/material/SvgIcon";
-import Tooltip from "@mui/material/Tooltip";
-import { PopoverClose } from "@radix-ui/react-popover";
-import type * as TypesGen from "api/typesGenerated";
-import { CopyButton } from "components/CopyButton/CopyButton";
-import { ExternalImage } from "components/ExternalImage/ExternalImage";
-import { Stack } from "components/Stack/Stack";
-import {
-	BookOpenTextIcon,
-	BugIcon,
 	CircleUserIcon,
+	CopyIcon,
 	LogOutIcon,
-	MessageSquareIcon,
 	MonitorDownIcon,
 	SquareArrowOutUpRightIcon,
 } from "lucide-react";
-import type { FC, JSX } from "react";
+import type { FC } from "react";
 import { Link } from "react-router";
-
-export const Language = {
-	accountLabel: "Account",
-	signOutLabel: "Sign Out",
-	copyrightText: `\u00a9 ${new Date().getFullYear()} Coder Technologies, Inc.`,
-};
+import type * as TypesGen from "#/api/typesGenerated";
+import { CheckIcon } from "#/components/AnimatedIcons/Check";
+import {
+	DropdownMenuItem,
+	DropdownMenuSeparator,
+} from "#/components/DropdownMenu/DropdownMenu";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
+import { useClipboard } from "#/hooks/useClipboard";
+import { SupportIcon } from "../SupportIcon";
 
 interface UserDropdownContentProps {
 	user: TypesGen.User;
 	buildInfo?: TypesGen.BuildInfoResponse;
-	supportLinks?: readonly TypesGen.LinkConfig[];
+	supportLinks: readonly TypesGen.LinkConfig[];
 	onSignOut: () => void;
 }
 
@@ -44,180 +34,94 @@ export const UserDropdownContent: FC<UserDropdownContentProps> = ({
 	supportLinks,
 	onSignOut,
 }) => {
-	const renderMenuIcon = (icon: string): JSX.Element => {
-		switch (icon) {
-			case "bug":
-				return <BugIcon css={styles.menuItemIcon} />;
-			case "chat":
-				return <MessageSquareIcon css={styles.menuItemIcon} />;
-			case "docs":
-				return <BookOpenTextIcon css={styles.menuItemIcon} />;
-			case "star":
-				return <GithubStar css={styles.menuItemIcon} />;
-			default:
-				return (
-					<ExternalImage
-						src={icon}
-						css={{ maxWidth: "20px", maxHeight: "20px" }}
-					/>
-				);
-		}
-	};
+	const { showCopiedSuccess, copyToClipboard } = useClipboard();
 
 	return (
-		<div>
-			<Stack css={styles.info} spacing={0}>
-				<span css={styles.userName}>{user.username}</span>
-				<span css={styles.userEmail}>{user.email}</span>
-			</Stack>
-
-			<Divider css={{ marginBottom: 8 }} />
-
-			<Link to="/install" css={styles.link}>
-				<PopoverClose asChild>
-					<MenuItem css={styles.menuItem}>
-						<MonitorDownIcon css={styles.menuItemIcon} />
-						<span css={styles.menuItemText}>Install CLI</span>
-					</MenuItem>
-				</PopoverClose>
-			</Link>
-
-			<Link to="/settings/account" css={styles.link}>
-				<PopoverClose asChild>
-					<MenuItem css={styles.menuItem}>
-						<CircleUserIcon css={styles.menuItemIcon} />
-						<span css={styles.menuItemText}>{Language.accountLabel}</span>
-					</MenuItem>
-				</PopoverClose>
-			</Link>
-
-			<MenuItem css={styles.menuItem} onClick={onSignOut}>
-				<LogOutIcon css={styles.menuItemIcon} />
-				<span css={styles.menuItemText}>{Language.signOutLabel}</span>
-			</MenuItem>
-
-			{supportLinks && (
+		<>
+			<DropdownMenuItem
+				className="flex items-center gap-3 [&_img]:w-full [&_img]:h-full"
+				asChild
+			>
+				<Link to="/settings/account">
+					<div className="flex flex-col">
+						<span className="text-content-primary">{user.username}</span>
+						<span className="text-xs font-semibold">{user.email}</span>
+					</div>
+				</Link>
+			</DropdownMenuItem>
+			<DropdownMenuSeparator />
+			<DropdownMenuItem asChild>
+				<Link to="/install">
+					<MonitorDownIcon />
+					<span>Install CLI</span>
+				</Link>
+			</DropdownMenuItem>
+			<DropdownMenuItem asChild>
+				<Link to="/settings/account">
+					<CircleUserIcon />
+					<span>Account</span>
+				</Link>
+			</DropdownMenuItem>
+			<DropdownMenuItem onClick={onSignOut}>
+				<LogOutIcon />
+				<span>Sign Out</span>
+			</DropdownMenuItem>
+			{supportLinks && supportLinks.length > 0 && (
 				<>
-					<Divider />
+					<DropdownMenuSeparator />
 					{supportLinks.map((link) => (
-						<a
-							href={link.target}
-							key={link.name}
-							target="_blank"
-							rel="noreferrer"
-							css={styles.link}
-						>
-							<PopoverClose asChild>
-								<MenuItem css={styles.menuItem}>
-									{renderMenuIcon(link.icon)}
-									<span css={styles.menuItemText}>{link.name}</span>
-								</MenuItem>
-							</PopoverClose>
-						</a>
+						<DropdownMenuItem key={link.name} asChild>
+							<a href={link.target} target="_blank" rel="noreferrer">
+								{link.icon && <SupportIcon icon={link.icon} />}
+								<span>{link.name}</span>
+							</a>
+						</DropdownMenuItem>
 					))}
 				</>
 			)}
-
-			<Divider css={{ marginBottom: "0 !important" }} />
-
-			<Stack css={styles.info} spacing={0}>
-				<Tooltip title="Browse the source code">
-					<a
-						css={[styles.footerText, styles.buildInfo]}
-						href={buildInfo?.external_url}
-						target="_blank"
-						rel="noreferrer"
-					>
-						{buildInfo?.version} <SquareArrowOutUpRightIcon />
-					</a>
+			<DropdownMenuSeparator />
+			<Tooltip disableHoverableContent>
+				<TooltipTrigger asChild>
+					<DropdownMenuItem className="text-xs" asChild>
+						<a
+							href={buildInfo?.external_url}
+							className="flex items-center gap-2"
+							target="_blank"
+							rel="noreferrer"
+						>
+							<span className="flex-1">{buildInfo?.version}</span>
+							<SquareArrowOutUpRightIcon className="!size-icon-xs" />
+						</a>
+					</DropdownMenuItem>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">Browse the source code</TooltipContent>
+			</Tooltip>
+			{buildInfo?.deployment_id && (
+				<Tooltip disableHoverableContent>
+					<TooltipTrigger asChild>
+						<DropdownMenuItem
+							className="text-xs"
+							onSelect={(e) => {
+								e.preventDefault();
+								copyToClipboard(buildInfo.deployment_id);
+							}}
+						>
+							<span className="truncate flex-1">{buildInfo.deployment_id}</span>
+							{showCopiedSuccess ? (
+								<CheckIcon className="!size-icon-xs ml-auto" />
+							) : (
+								<CopyIcon className="!size-icon-xs ml-auto" />
+							)}
+						</DropdownMenuItem>
+					</TooltipTrigger>
+					<TooltipContent side="bottom">
+						{showCopiedSuccess ? "Copied!" : "Copy deployment ID"}
+					</TooltipContent>
 				</Tooltip>
-
-				{buildInfo?.deployment_id && (
-					<div className="flex items-center text-xs">
-						<Tooltip title="Deployment Identifier">
-							<span className="whitespace-nowrap overflow-hidden text-ellipsis">
-								{buildInfo.deployment_id}
-							</span>
-						</Tooltip>
-						<CopyButton
-							text={buildInfo.deployment_id}
-							label="Copy deployment ID"
-						/>
-					</div>
-				)}
-
-				<div css={styles.footerText}>{Language.copyrightText}</div>
-			</Stack>
-		</div>
+			)}
+			<DropdownMenuItem className="text-xs" disabled>
+				<span>&copy; {new Date().getFullYear()} Coder Technologies, Inc.</span>
+			</DropdownMenuItem>
+		</>
 	);
 };
-
-const GithubStar: FC<SvgIconProps> = (props) => (
-	<svg
-		aria-hidden="true"
-		height="16"
-		viewBox="0 0 16 16"
-		version="1.1"
-		width="16"
-		data-view-component="true"
-		fill="currentColor"
-		{...props}
-	>
-		<path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z" />
-	</svg>
-);
-
-const styles = {
-	info: (theme) => [
-		theme.typography.body2 as CSSObject,
-		{
-			padding: 20,
-		},
-	],
-	userName: {
-		fontWeight: 600,
-	},
-	userEmail: (theme) => ({
-		color: theme.palette.text.secondary,
-		width: "100%",
-		textOverflow: "ellipsis",
-		overflow: "hidden",
-	}),
-	link: {
-		textDecoration: "none",
-		color: "inherit",
-	},
-	menuItem: (theme) => css`
-		gap: 20px;
-		padding: 8px 20px;
-
-		&:hover {
-			background-color: ${theme.palette.action.hover};
-			transition: background-color 0.3s ease;
-		}
-	`,
-	menuItemIcon: (theme) => ({
-		color: theme.palette.text.secondary,
-		width: 20,
-		height: 20,
-	}),
-	menuItemText: {
-		fontSize: 14,
-	},
-	footerText: (theme) => css`
-		font-size: 12px;
-		text-decoration: none;
-		color: ${theme.palette.text.secondary};
-		display: flex;
-		align-items: center;
-		gap: 4px;
-
-		& svg {
-			width: 12px;
-			height: 12px;
-		}
-	`,
-	buildInfo: (theme) => ({
-		color: theme.palette.text.primary,
-	}),
-} satisfies Record<string, Interpolation<Theme>>;

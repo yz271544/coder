@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-
 	"golang.org/x/xerrors"
 
 	"github.com/coder/coder/v2/coderd/database"
@@ -67,7 +66,7 @@ func AuditLogs(ctx context.Context, db database.Store, query string) (database.G
 	}
 
 	// Prepare the count filter, which uses the same parameters as the GetAuditLogsOffsetParams.
-	// nolint:exhaustruct // UserID is not obtained from the query parameters.
+	// nolint:exhaustruct // UserID and CountCap are not obtained from the query parameters.
 	countFilter := database.CountAuditLogsParams{
 		RequestID:      filter.RequestID,
 		ResourceID:     filter.ResourceID,
@@ -124,6 +123,7 @@ func ConnectionLogs(ctx context.Context, db database.Store, query string, apiKey
 	}
 
 	// This MUST be kept in sync with the above
+	// nolint:exhaustruct // CountCap is not obtained from the query parameters.
 	countFilter := database.CountConnectionLogsParams{
 		OrganizationID:      filter.OrganizationID,
 		WorkspaceOwner:      filter.WorkspaceOwner,
@@ -156,15 +156,17 @@ func Users(query string) (database.GetUsersParams, []codersdk.ValidationError) {
 
 	parser := httpapi.NewQueryParamParser()
 	filter := database.GetUsersParams{
-		Search:          parser.String(values, "", "search"),
-		Status:          httpapi.ParseCustomList(parser, values, []database.UserStatus{}, "status", httpapi.ParseEnum[database.UserStatus]),
-		RbacRole:        parser.Strings(values, []string{}, "role"),
-		LastSeenAfter:   parser.Time3339Nano(values, time.Time{}, "last_seen_after"),
-		LastSeenBefore:  parser.Time3339Nano(values, time.Time{}, "last_seen_before"),
-		CreatedAfter:    parser.Time3339Nano(values, time.Time{}, "created_after"),
-		CreatedBefore:   parser.Time3339Nano(values, time.Time{}, "created_before"),
-		GithubComUserID: parser.Int64(values, 0, "github_com_user_id"),
-		LoginType:       httpapi.ParseCustomList(parser, values, []database.LoginType{}, "login_type", httpapi.ParseEnum[database.LoginType]),
+		Search:           parser.String(values, "", "search"),
+		Name:             parser.String(values, "", "name"),
+		Status:           httpapi.ParseCustomList(parser, values, []database.UserStatus{}, "status", httpapi.ParseEnum[database.UserStatus]),
+		IsServiceAccount: parser.NullableBoolean(values, sql.NullBool{}, "service_account"),
+		RbacRole:         parser.Strings(values, []string{}, "role"),
+		LastSeenAfter:    parser.Time3339Nano(values, time.Time{}, "last_seen_after"),
+		LastSeenBefore:   parser.Time3339Nano(values, time.Time{}, "last_seen_before"),
+		CreatedAfter:     parser.Time3339Nano(values, time.Time{}, "created_after"),
+		CreatedBefore:    parser.Time3339Nano(values, time.Time{}, "created_before"),
+		GithubComUserID:  parser.Int64(values, 0, "github_com_user_id"),
+		LoginType:        httpapi.ParseCustomList(parser, values, []database.LoginType{}, "login_type", httpapi.ParseEnum[database.LoginType]),
 	}
 	parser.ErrorExcessParams(values)
 	return filter, parser.Errors
@@ -254,7 +256,7 @@ func Workspaces(ctx context.Context, db database.Store, query string, page coder
 	filter.TemplateName = parser.String(values, "", "template")
 	filter.Name = parser.String(values, "", "name")
 	filter.Status = string(httpapi.ParseCustom(parser, values, "", "status", httpapi.ParseEnum[database.WorkspaceStatus]))
-	filter.HasAgent = parser.String(values, "", "has-agent")
+	filter.HasAgentStatuses = parser.Strings(values, []string{}, "has-agent")
 	filter.Dormant = parser.Boolean(values, false, "dormant")
 	filter.LastUsedAfter = parser.Time3339Nano(values, time.Time{}, "last_used_after")
 	filter.LastUsedBefore = parser.Time3339Nano(values, time.Time{}, "last_used_before")
@@ -273,6 +275,15 @@ func Workspaces(ctx context.Context, db database.Store, query string, page coder
 	// TODO: support "me" by passing in the actorID
 	filter.SharedWithUserID = parseUser(ctx, db, parser, values, "shared_with_user", uuid.Nil)
 	filter.SharedWithGroupID = parseGroup(ctx, db, parser, values, "shared_with_group")
+	// Translate healthy filter to has-agent statuses
+	// healthy:true = connected, healthy:false = disconnected or timeout
+	if healthy := parser.NullableBoolean(values, sql.NullBool{}, "healthy"); healthy.Valid {
+		if healthy.Bool {
+			filter.HasAgentStatuses = append(filter.HasAgentStatuses, "connected")
+		} else {
+			filter.HasAgentStatuses = append(filter.HasAgentStatuses, "disconnected", "timeout")
+		}
+	}
 
 	type paramMatch struct {
 		name  string
@@ -355,6 +366,8 @@ func AIBridgeInterceptions(ctx context.Context, db database.Store, query string,
 		AfterID: page.AfterID,
 		// #nosec G115 - Safe conversion for pagination limit which is expected to be within int32 range
 		Limit: int32(page.Limit),
+		// #nosec G115 - Safe conversion for pagination offset which is expected to be within int32 range
+		Offset: int32(page.Offset),
 	}
 
 	if query == "" {
@@ -363,7 +376,7 @@ func AIBridgeInterceptions(ctx context.Context, db database.Store, query string,
 
 	values, errors := searchTerms(query, func(term string, values url.Values) error {
 		// Default to the initiating user
-		values.Add("user", term)
+		values.Add("initiator", term)
 		return nil
 	})
 	if len(errors) > 0 {
@@ -374,6 +387,7 @@ func AIBridgeInterceptions(ctx context.Context, db database.Store, query string,
 	filter.InitiatorID = parseUser(ctx, db, parser, values, "initiator", actorID)
 	filter.Provider = parser.String(values, "", "provider")
 	filter.Model = parser.String(values, "", "model")
+	filter.Client = parser.String(values, "", "client")
 
 	// Time must be between started_after and started_before.
 	filter.StartedAfter = parser.Time3339Nano(values, time.Time{}, "started_after")
@@ -384,6 +398,173 @@ func AIBridgeInterceptions(ctx context.Context, db database.Store, query string,
 			Detail: `Query param "started_before" has invalid value: "started_before" must be after "started_after" if set`,
 		})
 	}
+
+	parser.ErrorExcessParams(values)
+	return filter, parser.Errors
+}
+
+func AIBridgeSessions(ctx context.Context, db database.Store, query string, page codersdk.Pagination, actorID uuid.UUID, afterSessionID string) (database.ListAIBridgeSessionsParams, []codersdk.ValidationError) {
+	// nolint:exhaustruct // Empty values just means "don't filter by that field".
+	filter := database.ListAIBridgeSessionsParams{
+		AfterSessionID: afterSessionID,
+		// #nosec G115 - Safe conversion for pagination limit which is expected to be within int32 range
+		Limit: int32(page.Limit),
+		// #nosec G115 - Safe conversion for pagination offset which is expected to be within int32 range
+		Offset: int32(page.Offset),
+	}
+
+	if query == "" {
+		return filter, nil
+	}
+
+	values, errors := searchTerms(query, func(string, url.Values) error {
+		// Do not specify a default search key; let's be explicit to prevent user confusion.
+		return xerrors.New("no search key specified")
+	})
+	if len(errors) > 0 {
+		return filter, errors
+	}
+
+	parser := httpapi.NewQueryParamParser()
+	filter.InitiatorID = parseUser(ctx, db, parser, values, "initiator", actorID)
+	filter.Provider = parser.String(values, "", "provider")
+	filter.Model = parser.String(values, "", "model")
+	filter.Client = parser.String(values, "", "client")
+	filter.SessionID = parser.String(values, "", "session_id")
+
+	// Time must be between started_after and started_before.
+	filter.StartedAfter = parser.Time3339Nano(values, time.Time{}, "started_after")
+	filter.StartedBefore = parser.Time3339Nano(values, time.Time{}, "started_before")
+	if !filter.StartedBefore.IsZero() && !filter.StartedAfter.IsZero() && !filter.StartedBefore.After(filter.StartedAfter) {
+		parser.Errors = append(parser.Errors, codersdk.ValidationError{
+			Field:  "started_before",
+			Detail: `Query param "started_before" has invalid value: "started_before" must be after "started_after" if set`,
+		})
+	}
+
+	parser.ErrorExcessParams(values)
+	return filter, parser.Errors
+}
+
+func AIBridgeModels(query string, page codersdk.Pagination) (database.ListAIBridgeModelsParams, []codersdk.ValidationError) {
+	// nolint:exhaustruct // Empty values just means "don't filter by that field".
+	filter := database.ListAIBridgeModelsParams{
+		// #nosec G115 - Safe conversion for pagination offset which is expected to be within int32 range
+		Offset: int32(page.Offset),
+		// #nosec G115 - Safe conversion for pagination limit which is expected to be within int32 range
+		Limit: int32(page.Limit),
+	}
+
+	if query == "" {
+		return filter, nil
+	}
+
+	values, errors := searchTerms(query, func(term string, values url.Values) error {
+		// Defaults to the `model` if no `key:value` pair is provided.
+		values.Add("model", term)
+		return nil
+	})
+	if len(errors) > 0 {
+		return filter, errors
+	}
+
+	parser := httpapi.NewQueryParamParser()
+	filter.Model = parser.String(values, "", "model")
+
+	parser.ErrorExcessParams(values)
+	return filter, parser.Errors
+}
+
+func AIBridgeClients(query string, page codersdk.Pagination) (database.ListAIBridgeClientsParams, []codersdk.ValidationError) {
+	// nolint:exhaustruct // Empty values just means "don't filter by that field".
+	filter := database.ListAIBridgeClientsParams{
+		// #nosec G115 - Safe conversion for pagination offset which is expected to be within int32 range
+		Offset: int32(page.Offset),
+		// #nosec G115 - Safe conversion for pagination limit which is expected to be within int32 range
+		Limit: int32(page.Limit),
+	}
+
+	if query == "" {
+		return filter, nil
+	}
+
+	values, errors := searchTerms(query, func(term string, values url.Values) error {
+		values.Add("client", term)
+		return nil
+	})
+	if len(errors) > 0 {
+		return filter, errors
+	}
+
+	parser := httpapi.NewQueryParamParser()
+	filter.Client = parser.String(values, "", "client")
+
+	parser.ErrorExcessParams(values)
+	return filter, parser.Errors
+}
+
+// Tasks parses a search query for tasks.
+//
+// Supported query parameters:
+//   - owner: string (username, UUID, or 'me' for current user)
+//   - organization: string (organization UUID or name)
+//   - status: string (pending, initializing, active, paused, error, unknown)
+func Tasks(ctx context.Context, db database.Store, query string, actorID uuid.UUID) (database.ListTasksParams, []codersdk.ValidationError) {
+	filter := database.ListTasksParams{
+		OwnerID:        uuid.Nil,
+		OrganizationID: uuid.Nil,
+		Status:         "",
+	}
+
+	if query == "" {
+		return filter, nil
+	}
+
+	// Always lowercase for all searches.
+	query = strings.ToLower(query)
+	values, errors := searchTerms(query, func(term string, values url.Values) error {
+		// Default unqualified terms to owner
+		values.Add("owner", term)
+		return nil
+	})
+	if len(errors) > 0 {
+		return filter, errors
+	}
+
+	parser := httpapi.NewQueryParamParser()
+	filter.OwnerID = parseUser(ctx, db, parser, values, "owner", actorID)
+	filter.OrganizationID = parseOrganization(ctx, db, parser, values, "organization")
+	filter.Status = parser.String(values, "", "status")
+
+	parser.ErrorExcessParams(values)
+	return filter, parser.Errors
+}
+
+// Chats parses a search query for chats.
+//
+// Supported query parameters:
+//   - archived: boolean (default: false, excludes archived chats unless explicitly set)
+func Chats(query string) (database.GetChatsParams, []codersdk.ValidationError) {
+	filter := database.GetChatsParams{
+		// Default to hiding archived chats.
+		Archived: sql.NullBool{Bool: false, Valid: true},
+	}
+
+	if query == "" {
+		return filter, nil
+	}
+
+	// Always lowercase for all searches.
+	query = strings.ToLower(query)
+	values, errors := searchTerms(query, func(term string, _ url.Values) error {
+		return xerrors.Errorf("unsupported search term: %q", term)
+	})
+	if len(errors) > 0 {
+		return filter, errors
+	}
+
+	parser := httpapi.NewQueryParamParser()
+	filter.Archived = parser.NullableBoolean(values, filter.Archived, "archived")
 
 	parser.ErrorExcessParams(values)
 	return filter, parser.Errors

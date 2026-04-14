@@ -5,8 +5,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
@@ -66,7 +65,7 @@ func CreateAppSecret(db database.Store, auditor *audit.Auditor, logger slog.Logg
 			ID:           uuid.New(),
 			CreatedAt:    dbtime.Now(),
 			SecretPrefix: []byte(secret.Prefix),
-			HashedSecret: []byte(secret.Hashed),
+			HashedSecret: secret.Hashed,
 			// DisplaySecret is the last six characters of the original unhashed secret.
 			// This is done so they can be differentiated and it matches how GitHub
 			// displays their client secrets.

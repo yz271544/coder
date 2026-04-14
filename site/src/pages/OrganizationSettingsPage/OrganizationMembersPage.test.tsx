@@ -1,22 +1,22 @@
+import { fireEvent, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
+import type { SlimRole } from "#/api/typesGenerated";
 import {
 	MockEntitlementsWithMultiOrg,
 	MockOrganization,
 	MockOrganizationAuditorRole,
 	MockOrganizationPermissions,
 	MockUserOwner,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	renderWithOrganizationSettingsLayout,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { server } from "testHelpers/server";
-import { fireEvent, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import type { SlimRole } from "api/typesGenerated";
-import { HttpResponse, http } from "msw";
+} from "#/testHelpers/renderHelpers";
+import { server } from "#/testHelpers/server";
 import OrganizationMembersPage from "./OrganizationMembersPage";
 
-jest.spyOn(console, "error").mockImplementation(() => {});
+vi.spyOn(console, "error").mockImplementation(() => {});
 
 beforeEach(() => {
 	server.use(
@@ -92,7 +92,9 @@ describe("OrganizationMembersPage", () => {
 			it("shows a success message", async () => {
 				await renderPage();
 				await removeMember();
-				await screen.findByText("User removed from organization successfully!");
+				await screen.findByText(
+					/User "TestUser2" removed from organization "My Organization" successfully\./,
+				);
 			});
 		});
 	});
@@ -114,7 +116,7 @@ describe("OrganizationMembersPage", () => {
 
 				await renderPage();
 				await updateUserRole(MockOrganizationAuditorRole);
-				await screen.findByText("Roles updated successfully.");
+				await screen.findByText(/Roles of "TestUser" updated successfully\./);
 			});
 		});
 

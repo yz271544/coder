@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -19,12 +20,13 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/coderdtest/oidctest"
 	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbfake"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
@@ -556,13 +558,16 @@ func TestPatchCancelWorkspaceBuild(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse: echo.ParseComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionInit:  echo.InitComplete,
+			ProvisionGraph: echo.GraphComplete,
+			ProvisionPlan:  echo.PlanComplete,
+			// Echo will never applying since there is no complete message
 			ProvisionApply: []*proto.Response{{
 				Type: &proto.Response_Log{
 					Log: &proto.Log{},
 				},
 			}},
-			ProvisionPlan: echo.PlanComplete,
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
@@ -603,13 +608,16 @@ func TestPatchCancelWorkspaceBuild(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true, Logger: &logger})
 		owner := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, owner.OrganizationID, &echo.Responses{
-			Parse: echo.ParseComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionInit:  echo.InitComplete,
+			ProvisionGraph: echo.GraphComplete,
+			ProvisionPlan:  echo.PlanComplete,
+			// Echo will never applying
 			ProvisionApply: []*proto.Response{{
 				Type: &proto.Response_Log{
 					Log: &proto.Log{},
 				},
 			}},
-			ProvisionPlan: echo.PlanComplete,
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, owner.OrganizationID, version.ID)
@@ -634,9 +642,7 @@ func TestPatchCancelWorkspaceBuild(t *testing.T) {
 
 	t.Run("Cancel with expect_state=pending", func(t *testing.T) {
 		t.Parallel()
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("this test requires postgres")
-		}
+
 		// Given: a coderd instance with a provisioner daemon
 		store, ps, db := dbtestutil.NewDBWithSQLDB(t)
 		client, closeDaemon := coderdtest.NewWithProvisionerCloser(t, &coderdtest.Options{
@@ -696,13 +702,16 @@ func TestPatchCancelWorkspaceBuild(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse: echo.ParseComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionInit:  echo.InitComplete,
+			ProvisionGraph: echo.GraphComplete,
+			ProvisionPlan:  echo.PlanComplete,
+			// Echo will never applying
 			ProvisionApply: []*proto.Response{{
 				Type: &proto.Response_Log{
 					Log: &proto.Log{},
 				},
 			}},
-			ProvisionPlan: echo.PlanComplete,
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
@@ -732,9 +741,7 @@ func TestPatchCancelWorkspaceBuild(t *testing.T) {
 
 	t.Run("Cancel with expect_state=running when job is pending - should fail with 412", func(t *testing.T) {
 		t.Parallel()
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("this test requires postgres")
-		}
+
 		// Given: a coderd instance with a provisioner daemon
 		store, ps, db := dbtestutil.NewDBWithSQLDB(t)
 		client, closeDaemon := coderdtest.NewWithProvisionerCloser(t, &coderdtest.Options{
@@ -795,13 +802,16 @@ func TestPatchCancelWorkspaceBuild(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			Parse: echo.ParseComplete,
+			Parse:          echo.ParseComplete,
+			ProvisionInit:  echo.InitComplete,
+			ProvisionGraph: echo.GraphComplete,
+			ProvisionPlan:  echo.PlanComplete,
+			// Echo will never applying
 			ProvisionApply: []*proto.Response{{
 				Type: &proto.Response_Log{
 					Log: &proto.Log{},
 				},
 			}},
-			ProvisionPlan: echo.PlanComplete,
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
@@ -829,9 +839,9 @@ func TestWorkspaceBuildResources(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			ProvisionApply: []*proto.Response{{
-				Type: &proto.Response_Apply{
-					Apply: &proto.ApplyComplete{
+			ProvisionGraph: []*proto.Response{{
+				Type: &proto.Response_Graph{
+					Graph: &proto.GraphComplete{
 						Resources: []*proto.Resource{{
 							Name: "first_resource",
 							Type: "example",
@@ -1036,7 +1046,7 @@ func TestWorkspaceBuildLogs(t *testing.T) {
 	user := coderdtest.CreateFirstUser(t, client)
 	version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 		Parse: echo.ParseComplete,
-		ProvisionApply: []*proto.Response{{
+		ProvisionGraph: []*proto.Response{{
 			Type: &proto.Response_Log{
 				Log: &proto.Log{
 					Level:  proto.LogLevel_INFO,
@@ -1044,8 +1054,8 @@ func TestWorkspaceBuildLogs(t *testing.T) {
 				},
 			},
 		}, {
-			Type: &proto.Response_Apply{
-				Apply: &proto.ApplyComplete{
+			Type: &proto.Response_Graph{
+				Graph: &proto.GraphComplete{
 					Resources: []*proto.Resource{{
 						Name: "some",
 						Type: "example",
@@ -1082,6 +1092,96 @@ func TestWorkspaceBuildLogs(t *testing.T) {
 		}
 	}
 	require.Fail(t, "example message never happened")
+}
+
+func TestWorkspaceBuildLogsFormat(t *testing.T) {
+	t.Parallel()
+
+	// Setup: Create workspace build with logs using dbfake.
+	client, db := coderdtest.NewWithDatabase(t, nil)
+	user := coderdtest.CreateFirstUser(t, client)
+
+	r := dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{
+		OrganizationID: user.OrganizationID,
+		OwnerID:        user.UserID,
+	}).Do()
+
+	// Insert test log directly into database.
+	jl := dbgen.ProvisionerJobLog(t, db, database.ProvisionerJobLog{
+		JobID:  r.Build.JobID,
+		Stage:  "Planning",
+		Source: database.LogSourceProvisioner,
+		Level:  database.LogLevelInfo,
+		Output: "test log output",
+	})
+
+	tests := []struct {
+		name                string
+		queryParams         string
+		expectedStatus      int
+		expectedContentType string
+		checkBody           func(t *testing.T, body string)
+	}{
+		{
+			name:                "JSON",
+			queryParams:         "",
+			expectedStatus:      http.StatusOK,
+			expectedContentType: "application/json",
+			checkBody: func(t *testing.T, body string) {
+				require.NotEmpty(t, body)
+			},
+		},
+		{
+			name:                "Text",
+			queryParams:         "?format=text",
+			expectedStatus:      http.StatusOK,
+			expectedContentType: "text/plain",
+			checkBody: func(t *testing.T, body string) {
+				expected := db2sdk.ProvisionerJobLog(jl).Text()
+				require.Contains(t, body, expected)
+			},
+		},
+		{
+			name:           "InvalidFormat",
+			queryParams:    "?format=invalid",
+			expectedStatus: http.StatusBadRequest,
+			checkBody: func(t *testing.T, body string) {
+				require.Contains(t, body, "Invalid format")
+			},
+		},
+		{
+			name:           "TextWithFollowFails",
+			queryParams:    "?format=text&follow",
+			expectedStatus: http.StatusBadRequest,
+			checkBody: func(t *testing.T, body string) {
+				require.Contains(t, body, "not supported with follow mode")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := testutil.Context(t, testutil.WaitLong)
+
+			urlPath := fmt.Sprintf("/api/v2/workspacebuilds/%s/logs%s", r.Build.ID, tt.queryParams)
+
+			res, err := client.Request(ctx, http.MethodGet, urlPath, nil)
+			require.NoError(t, err)
+			defer res.Body.Close()
+
+			require.Equal(t, tt.expectedStatus, res.StatusCode)
+			if tt.expectedContentType != "" {
+				require.Contains(t, res.Header.Get("Content-Type"), tt.expectedContentType)
+			}
+
+			if assert.NotNil(t, tt.checkBody) {
+				body, err := io.ReadAll(res.Body)
+				require.NoError(t, err)
+				tt.checkBody(t, string(body))
+			}
+		})
+	}
 }
 
 func TestWorkspaceBuildState(t *testing.T) {
@@ -1212,9 +1312,9 @@ func TestWorkspaceDeleteSuspendedUser(t *testing.T) {
 	version := coderdtest.CreateTemplateVersion(t, client, first.OrganizationID, &echo.Responses{
 		Parse:          echo.ParseComplete,
 		ProvisionApply: echo.ApplyComplete,
-		ProvisionPlan: []*proto.Response{{
-			Type: &proto.Response_Plan{
-				Plan: &proto.PlanComplete{
+		ProvisionGraph: []*proto.Response{{
+			Type: &proto.Response_Graph{
+				Graph: &proto.GraphComplete{
 					Error:      "",
 					Resources:  nil,
 					Parameters: nil,
@@ -1492,10 +1592,18 @@ func TestPostWorkspaceBuild(t *testing.T) {
 		client := coderdtest.New(t, &coderdtest.Options{IncludeProvisionerDaemon: true})
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
-			ProvisionApply: []*proto.Response{{}},
+			ProvisionPlan: []*proto.Response{
+				{
+					Type: &proto.Response_Plan{
+						Plan: &proto.PlanComplete{
+							Error: "failed to plan",
+						},
+					},
+				},
+			},
 		})
 		template := coderdtest.CreateTemplate(t, client, user.OrganizationID, version.ID)
-		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
+		version = coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
@@ -1646,9 +1754,9 @@ func TestPostWorkspaceBuild(t *testing.T) {
 		user := coderdtest.CreateFirstUser(t, client)
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			ProvisionPlan: []*proto.Response{{
-				Type: &proto.Response_Plan{
-					Plan: &proto.PlanComplete{
+			ProvisionGraph: []*proto.Response{{
+				Type: &proto.Response_Graph{
+					Graph: &proto.GraphComplete{
 						Presets: []*proto.Preset{
 							{
 								Name: "autodetected",
@@ -1731,9 +1839,7 @@ func TestPostWorkspaceBuild(t *testing.T) {
 
 	t.Run("NoProvisionersAvailable", func(t *testing.T) {
 		t.Parallel()
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("this test requires postgres")
-		}
+
 		// Given: a coderd instance with a provisioner daemon
 		store, ps, db := dbtestutil.NewDBWithSQLDB(t)
 		client, closeDaemon := coderdtest.NewWithProvisionerCloser(t, &coderdtest.Options{
@@ -1777,9 +1883,7 @@ func TestPostWorkspaceBuild(t *testing.T) {
 
 	t.Run("AllProvisionersStale", func(t *testing.T) {
 		t.Parallel()
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("this test requires postgres")
-		}
+
 		// Given: a coderd instance with a provisioner daemon
 		store, ps, db := dbtestutil.NewDBWithSQLDB(t)
 		client, closeDaemon := coderdtest.NewWithProvisionerCloser(t, &coderdtest.Options{
@@ -1847,6 +1951,68 @@ func TestPostWorkspaceBuild(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, codersdk.BuildReasonDashboard, build.Reason)
+	})
+	t.Run("DeletedWorkspace", func(t *testing.T) {
+		t.Parallel()
+
+		// Given: a workspace that has already been deleted
+		var (
+			ctx             = testutil.Context(t, testutil.WaitShort)
+			logger          = slogtest.Make(t, &slogtest.Options{}).Leveled(slog.LevelError)
+			adminClient, db = coderdtest.NewWithDatabase(t, &coderdtest.Options{
+				Logger: &logger,
+			})
+			admin                         = coderdtest.CreateFirstUser(t, adminClient)
+			workspaceOwnerClient, member1 = coderdtest.CreateAnotherUser(t, adminClient, admin.OrganizationID)
+			otherMemberClient, _          = coderdtest.CreateAnotherUser(t, adminClient, admin.OrganizationID)
+			ws                            = dbfake.WorkspaceBuild(t, db, database.WorkspaceTable{OwnerID: member1.ID, OrganizationID: admin.OrganizationID}).
+							Seed(database.WorkspaceBuild{Transition: database.WorkspaceTransitionDelete}).
+							Do()
+		)
+
+		// This needs to be done separately as provisionerd handles marking the workspace as deleted
+		// and we're skipping provisionerd here for speed.
+		require.NoError(t, db.UpdateWorkspaceDeletedByID(dbauthz.AsProvisionerd(ctx), database.UpdateWorkspaceDeletedByIDParams{
+			ID:      ws.Workspace.ID,
+			Deleted: true,
+		}))
+
+		// Assert test invariant: Workspace should be deleted
+		dbWs, err := db.GetWorkspaceByID(dbauthz.AsProvisionerd(ctx), ws.Workspace.ID)
+		require.NoError(t, err)
+		require.True(t, dbWs.Deleted, "workspace should be deleted")
+
+		for _, tc := range []struct {
+			user         *codersdk.Client
+			tr           codersdk.WorkspaceTransition
+			expectStatus int
+		}{
+			// You should not be allowed to mess with a workspace you don't own, regardless of its deleted state.
+			{otherMemberClient, codersdk.WorkspaceTransitionStart, http.StatusNotFound},
+			{otherMemberClient, codersdk.WorkspaceTransitionStop, http.StatusNotFound},
+			{otherMemberClient, codersdk.WorkspaceTransitionDelete, http.StatusNotFound},
+			// Starting or stopping a workspace is not allowed when it is deleted.
+			{workspaceOwnerClient, codersdk.WorkspaceTransitionStart, http.StatusConflict},
+			{workspaceOwnerClient, codersdk.WorkspaceTransitionStop, http.StatusConflict},
+			// We allow a delete just in case a retry is required. In most cases, this will be a no-op.
+			// Note: this is the last test case because it will change the state of the workspace.
+			{workspaceOwnerClient, codersdk.WorkspaceTransitionDelete, http.StatusOK},
+		} {
+			// When: we create a workspace build with the given transition
+			_, err = tc.user.CreateWorkspaceBuild(ctx, ws.Workspace.ID, codersdk.CreateWorkspaceBuildRequest{
+				Transition: tc.tr,
+			})
+
+			// Then: we allow ONLY a delete build for a deleted workspace.
+			if tc.expectStatus < http.StatusBadRequest {
+				require.NoError(t, err, "creating a %s build for a deleted workspace should not error", tc.tr)
+			} else {
+				var apiError *codersdk.Error
+				require.Error(t, err, "creating a %s build for a deleted workspace should return an error", tc.tr)
+				require.ErrorAs(t, err, &apiError)
+				require.Equal(t, tc.expectStatus, apiError.StatusCode())
+			}
+		}
 	})
 }
 

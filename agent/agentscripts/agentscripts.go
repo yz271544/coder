@@ -20,8 +20,7 @@ import (
 	"golang.org/x/xerrors"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/agent/agentssh"
 	"github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
@@ -399,11 +398,11 @@ func (r *Runner) run(ctx context.Context, script codersdk.WorkspaceAgentScript, 
 				},
 			})
 			if err != nil {
-				logger.Error(ctx, fmt.Sprintf("reporting script completed: %s", err.Error()))
+				logger.Warn(ctx, "reporting script completed", slog.Error(err))
 			}
 		})
 		if err != nil {
-			logger.Error(ctx, fmt.Sprintf("reporting script completed: track command goroutine: %s", err.Error()))
+			logger.Warn(ctx, "reporting script completed: track command goroutine", slog.Error(err))
 		}
 	}()
 

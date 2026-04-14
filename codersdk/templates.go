@@ -32,6 +32,7 @@ type Template struct {
 	Description        string                 `json:"description"`
 	Deprecated         bool                   `json:"deprecated"`
 	DeprecationMessage string                 `json:"deprecation_message"`
+	Deleted            bool                   `json:"deleted"`
 	Icon               string                 `json:"icon"`
 	DefaultTTLMillis   int64                  `json:"default_ttl_ms"`
 	ActivityBumpMillis int64                  `json:"activity_bump_ms"`
@@ -64,6 +65,10 @@ type Template struct {
 	CORSBehavior         CORSBehavior                 `json:"cors_behavior"`
 
 	UseClassicParameterFlow bool `json:"use_classic_parameter_flow"`
+
+	// DisableModuleCache disables the use of cached Terraform modules during
+	// provisioning.
+	DisableModuleCache bool `json:"disable_module_cache"`
 }
 
 // WeekdaysToBitmap converts a list of weekdays to a bitmap in accordance with
@@ -263,6 +268,9 @@ type UpdateTemplateMeta struct {
 	// made the default.
 	// An "opt-out" is present in case the new feature breaks some existing templates.
 	UseClassicParameterFlow *bool `json:"use_classic_parameter_flow,omitempty"`
+	// DisableModuleCache disables the using of cached Terraform modules during
+	// provisioning. It is recommended not to disable this.
+	DisableModuleCache *bool `json:"disable_module_cache,omitempty"`
 }
 
 type TemplateExample struct {
@@ -506,4 +514,35 @@ func (c *Client) StarterTemplates(ctx context.Context) ([]TemplateExample, error
 	}
 	var templateExamples []TemplateExample
 	return templateExamples, json.NewDecoder(res.Body).Decode(&templateExamples)
+}
+
+type InvalidatePresetsResponse struct {
+	Invalidated []InvalidatedPreset `json:"invalidated"`
+}
+
+type InvalidatedPreset struct {
+	TemplateName        string `json:"template_name"`
+	TemplateVersionName string `json:"template_version_name"`
+	PresetName          string `json:"preset_name"`
+}
+
+// InvalidateTemplatePresets invalidates all presets for the
+// template's active version by setting last_invalidated_at timestamp.
+// The reconciler will then mark these prebuilds as expired and create new ones.
+func (c *Client) InvalidateTemplatePresets(ctx context.Context, template uuid.UUID) (InvalidatePresetsResponse, error) {
+	res, err := c.Request(ctx, http.MethodPost,
+		fmt.Sprintf("/api/v2/templates/%s/prebuilds/invalidate", template),
+		nil,
+	)
+	if err != nil {
+		return InvalidatePresetsResponse{}, err
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return InvalidatePresetsResponse{}, ReadBodyAsError(res)
+	}
+
+	var response InvalidatePresetsResponse
+	return response, json.NewDecoder(res.Body).Decode(&response)
 }

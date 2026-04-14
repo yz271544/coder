@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -293,12 +294,18 @@ type UserStatusChangeCount struct {
 }
 
 type GetUserStatusCountsRequest struct {
-	Offset time.Time `json:"offset" format:"date-time"`
+	Timezone string `json:"timezone" example:"America/St_Johns"`
+	// Deprecated: Use Timezone instead. Offset is ignored when Timezone is provided.
+	Offset int `json:"offset,omitempty" example:"-2"`
 }
 
 func (c *Client) GetUserStatusCounts(ctx context.Context, req GetUserStatusCountsRequest) (GetUserStatusCountsResponse, error) {
 	qp := url.Values{}
-	qp.Add("offset", req.Offset.Format(insightsTimeLayout))
+	if req.Timezone != "" {
+		qp.Add("timezone", req.Timezone)
+	} else {
+		qp.Add("tz_offset", strconv.Itoa(req.Offset))
+	}
 
 	reqURL := fmt.Sprintf("/api/v2/insights/user-status-counts?%s", qp.Encode())
 	resp, err := c.Request(ctx, http.MethodGet, reqURL, nil)

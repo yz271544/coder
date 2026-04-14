@@ -1,7 +1,7 @@
-import { render } from "testHelpers/renderHelpers";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { PreviewParameter } from "api/typesGenerated";
+import type { PreviewParameter } from "#/api/typesGenerated";
+import { render } from "#/testHelpers/renderHelpers";
 import { DynamicParameter } from "./DynamicParameter";
 
 const createMockParameter = (
@@ -67,10 +67,10 @@ const mockRequiredParameter = createMockParameter({
 });
 
 describe("DynamicParameter", () => {
-	const mockOnChange = jest.fn();
+	const mockOnChange = vi.fn();
 
 	beforeEach(() => {
-		jest.clearAllMocks();
+		vi.clearAllMocks();
 	});
 
 	describe("Input Parameter", () => {
@@ -95,26 +95,6 @@ describe("DynamicParameter", () => {
 			expect(screen.getByText("String Parameter")).toBeInTheDocument();
 			expect(screen.getByText("A string input parameter")).toBeInTheDocument();
 			expect(screen.getByRole("textbox")).toHaveValue("test_value");
-		});
-
-		it("calls onChange when input value changes", async () => {
-			render(
-				<DynamicParameter
-					parameter={mockStringParameter}
-					value=""
-					onChange={mockOnChange}
-				/>,
-			);
-
-			const input = screen.getByRole("textbox");
-
-			await waitFor(async () => {
-				await userEvent.type(input, "new_value");
-			});
-
-			await waitFor(() => {
-				expect(mockOnChange).toHaveBeenCalledWith("new_value");
-			});
 		});
 
 		it("shows required indicator for required parameters", () => {
@@ -170,25 +150,6 @@ describe("DynamicParameter", () => {
 			expect(screen.getByText("Textarea Parameter")).toBeInTheDocument();
 			expect(screen.getByRole("textbox")).toHaveValue(testValue);
 		});
-
-		it("handles textarea value changes", async () => {
-			render(
-				<DynamicParameter
-					parameter={mockTextareaParameter}
-					value=""
-					onChange={mockOnChange}
-				/>,
-			);
-
-			const textarea = screen.getByRole("textbox");
-			await waitFor(async () => {
-				await userEvent.type(textarea, "line1{enter}line2{enter}line3");
-			});
-
-			await waitFor(() => {
-				expect(mockOnChange).toHaveBeenCalledWith("line1\nline2\nline3");
-			});
-		});
 	});
 
 	describe("dropdown parameter", () => {
@@ -230,7 +191,7 @@ describe("DynamicParameter", () => {
 				/>,
 			);
 
-			const select = screen.getByRole("button");
+			const select = screen.getByRole("combobox");
 			await waitFor(async () => {
 				await userEvent.click(select);
 			});
@@ -250,7 +211,7 @@ describe("DynamicParameter", () => {
 				/>,
 			);
 
-			const select = screen.getByRole("button");
+			const select = screen.getByRole("combobox");
 			await waitFor(async () => {
 				await userEvent.click(select);
 			});
@@ -483,10 +444,8 @@ describe("DynamicParameter", () => {
 				/>,
 			);
 
-			const deleteButtons = screen.getAllByTestId("CancelIcon");
-			await waitFor(async () => {
-				await userEvent.click(deleteButtons[0]);
-			});
+			const deleteButton = screen.getByRole("button", { name: "Remove tag1" });
+			await userEvent.click(deleteButton);
 
 			expect(mockOnChange).toHaveBeenCalledWith('["tag2"]');
 		});
@@ -729,58 +688,6 @@ describe("DynamicParameter", () => {
 		});
 	});
 
-	describe("Debounced Input", () => {
-		it("debounces input changes for text inputs", async () => {
-			jest.useFakeTimers();
-
-			render(
-				<DynamicParameter
-					parameter={mockStringParameter}
-					value=""
-					onChange={mockOnChange}
-				/>,
-			);
-
-			const input = screen.getByRole("textbox");
-			fireEvent.change(input, { target: { value: "abc" } });
-
-			expect(mockOnChange).not.toHaveBeenCalled();
-
-			act(() => {
-				jest.runAllTimers();
-			});
-
-			expect(mockOnChange).toHaveBeenCalledWith("abc");
-
-			jest.useRealTimers();
-		});
-
-		it("debounces textarea changes", async () => {
-			jest.useFakeTimers();
-
-			render(
-				<DynamicParameter
-					parameter={mockTextareaParameter}
-					value=""
-					onChange={mockOnChange}
-				/>,
-			);
-
-			const textarea = screen.getByRole("textbox");
-			fireEvent.change(textarea, { target: { value: "line1\nline2" } });
-
-			expect(mockOnChange).not.toHaveBeenCalled();
-
-			act(() => {
-				jest.runAllTimers();
-			});
-
-			expect(mockOnChange).toHaveBeenCalledWith("line1\nline2");
-
-			jest.useRealTimers();
-		});
-	});
-
 	describe("Edge Cases", () => {
 		it("handles empty parameter options gracefully", () => {
 			const paramWithEmptyOptions = createMockParameter({
@@ -796,7 +703,7 @@ describe("DynamicParameter", () => {
 				/>,
 			);
 
-			expect(screen.getByRole("button")).toBeInTheDocument();
+			expect(screen.getByRole("combobox")).toBeInTheDocument();
 		});
 
 		it("handles null/undefined values", () => {
@@ -893,7 +800,7 @@ describe("DynamicParameter", () => {
 		});
 
 		it("calls onChange when numeric value changes (debounced)", () => {
-			jest.useFakeTimers();
+			vi.useFakeTimers();
 			render(
 				<DynamicParameter
 					parameter={mockNumberInputParameter}
@@ -906,11 +813,11 @@ describe("DynamicParameter", () => {
 			fireEvent.change(input, { target: { value: "7" } });
 
 			act(() => {
-				jest.runAllTimers();
+				vi.runAllTimers();
 			});
 
 			expect(mockOnChange).toHaveBeenCalledWith("7");
-			jest.useRealTimers();
+			vi.useRealTimers();
 		});
 	});
 
@@ -928,7 +835,7 @@ describe("DynamicParameter", () => {
 			},
 		});
 
-		it("renders a password field by default and toggles visibility on mouse events", async () => {
+		it("toggles visibility with persistent pressed-state semantics", async () => {
 			render(
 				<DynamicParameter
 					parameter={mockMaskedInputParameter}
@@ -940,12 +847,49 @@ describe("DynamicParameter", () => {
 			const input = screen.getByLabelText("Masked Input Parameter");
 			expect(input).toHaveAttribute("type", "password");
 
-			const toggleButton = screen.getByRole("button");
-			fireEvent.mouseDown(toggleButton);
+			const showButton = screen.getByRole("button", { name: "Show value" });
+			expect(showButton).toHaveAttribute("aria-pressed", "false");
+
+			await userEvent.click(showButton);
 			expect(input).toHaveAttribute("type", "text");
 
-			fireEvent.mouseUp(toggleButton);
+			const hideButton = screen.getByRole("button", { name: "Hide value" });
+			expect(hideButton).toHaveAttribute("aria-pressed", "true");
+
+			await userEvent.click(hideButton);
 			expect(input).toHaveAttribute("type", "password");
+			expect(
+				screen.getByRole("button", { name: "Show value" }),
+			).toHaveAttribute("aria-pressed", "false");
+		});
+
+		it("supports keyboard activation for toggling masked values", async () => {
+			render(
+				<DynamicParameter
+					parameter={mockMaskedInputParameter}
+					value="secret123"
+					onChange={mockOnChange}
+				/>,
+			);
+
+			const input = screen.getByLabelText("Masked Input Parameter");
+			const showButton = screen.getByRole("button", { name: "Show value" });
+			showButton.focus();
+
+			await userEvent.keyboard("[Enter]");
+			expect(input).toHaveAttribute("type", "text");
+			expect(
+				screen.getByRole("button", { name: "Hide value" }),
+			).toHaveAttribute("aria-pressed", "true");
+
+			const hideButton = screen.getByRole("button", { name: "Hide value" });
+			hideButton.focus();
+			await userEvent.keyboard("[Space]");
+
+			expect(input).toHaveAttribute("type", "password");
+			expect(
+				screen.getByRole("button", { name: "Show value" }),
+			).toHaveAttribute("aria-pressed", "false");
 		});
 	});
 

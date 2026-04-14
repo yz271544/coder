@@ -1,28 +1,31 @@
-import { API } from "api/api";
-import type {
-	AuthorizationRequest,
-	GenerateAPIKeyResponse,
-	GetUsersResponse,
-	RequestOneTimePasscodeRequest,
-	UpdateUserAppearanceSettingsRequest,
-	UpdateUserPasswordRequest,
-	UpdateUserProfileRequest,
-	User,
-	UserAppearanceSettings,
-	UsersRequest,
-} from "api/typesGenerated";
-import {
-	defaultMetadataManager,
-	type MetadataState,
-} from "hooks/useEmbeddedMetadata";
-import type { UsePaginatedQueryOptions } from "hooks/usePaginatedQuery";
 import type {
 	MutationOptions,
 	QueryClient,
 	UseMutationOptions,
 	UseQueryOptions,
 } from "react-query";
-import { prepareQuery } from "utils/filters";
+import { API } from "#/api/api";
+import type {
+	AuthorizationRequest,
+	GenerateAPIKeyResponse,
+	GetUsersResponse,
+	MinimalUser,
+	RequestOneTimePasscodeRequest,
+	UpdateUserAppearanceSettingsRequest,
+	UpdateUserPasswordRequest,
+	UpdateUserPreferenceSettingsRequest,
+	UpdateUserProfileRequest,
+	User,
+	UserAppearanceSettings,
+	UserPreferenceSettings,
+	UsersRequest,
+} from "#/api/typesGenerated";
+import {
+	defaultMetadataManager,
+	type MetadataState,
+} from "#/hooks/useEmbeddedMetadata";
+import type { UsePaginatedQueryOptions } from "#/hooks/usePaginatedQuery";
+import { prepareQuery } from "#/utils/filters";
 import { getAuthorizationKey } from "./authCheck";
 import { cachedQuery } from "./util";
 
@@ -52,6 +55,18 @@ export const users = (req: UsersRequest): UseQueryOptions<GetUsersResponse> => {
 	return {
 		queryKey: usersKey(req),
 		queryFn: ({ signal }) => API.getUsers(req, signal),
+		gcTime: 5 * 1000 * 60,
+	};
+};
+
+export const workspaceAvailableUsers = (
+	organizationId: string,
+	req: UsersRequest,
+): UseQueryOptions<MinimalUser[]> => {
+	return {
+		queryKey: ["workspaceAvailableUsers", organizationId, req],
+		queryFn: ({ signal }) =>
+			API.getWorkspaceAvailableUsers(organizationId, req, signal),
 		gcTime: 5 * 1000 * 60,
 	};
 };
@@ -139,6 +154,15 @@ export const me = (metadata: MetadataState<User>) => {
 	});
 };
 
+const userKey = (usernameOrId: string) => ["user", usernameOrId];
+
+export const user = (usernameOrId: string) => {
+	return {
+		queryKey: userKey(usernameOrId),
+		queryFn: () => API.getUser(usernameOrId),
+	};
+};
+
 export function apiKey(): UseQueryOptions<GenerateAPIKeyResponse> {
 	return {
 		queryKey: [...meKey, "apiKey"],
@@ -164,7 +188,7 @@ export const login = (
 		mutationFn: async (credentials: { email: string; password: string }) =>
 			loginFn({ ...credentials, authorization }),
 		onSuccess: async (data: Awaited<ReturnType<typeof loginFn>>) => {
-			queryClient.setQueryData(["me"], data.user);
+			queryClient.setQueryData(meKey, data.user);
 			queryClient.setQueryData(
 				getAuthorizationKey(authorization),
 				data.permissions,
@@ -273,6 +297,33 @@ export const updateAppearanceSettings = (
 			// `theme_preference` for the `me` query.
 			await queryClient.invalidateQueries({
 				queryKey: myAppearanceKey,
+			}),
+	};
+};
+
+const myPreferencesKey = ["me", "preferences"];
+
+export const preferenceSettings =
+	(): UseQueryOptions<UserPreferenceSettings> => {
+		return {
+			queryKey: myPreferencesKey,
+			queryFn: () => API.getUserPreferenceSettings(),
+		};
+	};
+
+export const updatePreferenceSettings = (
+	queryClient: QueryClient,
+): UseMutationOptions<
+	UserPreferenceSettings,
+	unknown,
+	UpdateUserPreferenceSettingsRequest,
+	unknown
+> => {
+	return {
+		mutationFn: (req) => API.updateUserPreferenceSettings(req),
+		onSuccess: async () =>
+			await queryClient.invalidateQueries({
+				queryKey: myPreferencesKey,
 			}),
 	};
 };

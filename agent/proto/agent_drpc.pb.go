@@ -55,6 +55,8 @@ type DRPCAgentClient interface {
 	CreateSubAgent(ctx context.Context, in *CreateSubAgentRequest) (*CreateSubAgentResponse, error)
 	DeleteSubAgent(ctx context.Context, in *DeleteSubAgentRequest) (*DeleteSubAgentResponse, error)
 	ListSubAgents(ctx context.Context, in *ListSubAgentsRequest) (*ListSubAgentsResponse, error)
+	ReportBoundaryLogs(ctx context.Context, in *ReportBoundaryLogsRequest) (*ReportBoundaryLogsResponse, error)
+	UpdateAppStatus(ctx context.Context, in *UpdateAppStatusRequest) (*UpdateAppStatusResponse, error)
 }
 
 type drpcAgentClient struct {
@@ -211,6 +213,24 @@ func (c *drpcAgentClient) ListSubAgents(ctx context.Context, in *ListSubAgentsRe
 	return out, nil
 }
 
+func (c *drpcAgentClient) ReportBoundaryLogs(ctx context.Context, in *ReportBoundaryLogsRequest) (*ReportBoundaryLogsResponse, error) {
+	out := new(ReportBoundaryLogsResponse)
+	err := c.cc.Invoke(ctx, "/coder.agent.v2.Agent/ReportBoundaryLogs", drpcEncoding_File_agent_proto_agent_proto{}, in, out)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *drpcAgentClient) UpdateAppStatus(ctx context.Context, in *UpdateAppStatusRequest) (*UpdateAppStatusResponse, error) {
+	out := new(UpdateAppStatusResponse)
+	err := c.cc.Invoke(ctx, "/coder.agent.v2.Agent/UpdateAppStatus", drpcEncoding_File_agent_proto_agent_proto{}, in, out)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 type DRPCAgentServer interface {
 	GetManifest(context.Context, *GetManifestRequest) (*Manifest, error)
 	GetServiceBanner(context.Context, *GetServiceBannerRequest) (*ServiceBanner, error)
@@ -228,6 +248,8 @@ type DRPCAgentServer interface {
 	CreateSubAgent(context.Context, *CreateSubAgentRequest) (*CreateSubAgentResponse, error)
 	DeleteSubAgent(context.Context, *DeleteSubAgentRequest) (*DeleteSubAgentResponse, error)
 	ListSubAgents(context.Context, *ListSubAgentsRequest) (*ListSubAgentsResponse, error)
+	ReportBoundaryLogs(context.Context, *ReportBoundaryLogsRequest) (*ReportBoundaryLogsResponse, error)
+	UpdateAppStatus(context.Context, *UpdateAppStatusRequest) (*UpdateAppStatusResponse, error)
 }
 
 type DRPCAgentUnimplementedServer struct{}
@@ -296,9 +318,17 @@ func (s *DRPCAgentUnimplementedServer) ListSubAgents(context.Context, *ListSubAg
 	return nil, drpcerr.WithCode(errors.New("Unimplemented"), drpcerr.Unimplemented)
 }
 
+func (s *DRPCAgentUnimplementedServer) ReportBoundaryLogs(context.Context, *ReportBoundaryLogsRequest) (*ReportBoundaryLogsResponse, error) {
+	return nil, drpcerr.WithCode(errors.New("Unimplemented"), drpcerr.Unimplemented)
+}
+
+func (s *DRPCAgentUnimplementedServer) UpdateAppStatus(context.Context, *UpdateAppStatusRequest) (*UpdateAppStatusResponse, error) {
+	return nil, drpcerr.WithCode(errors.New("Unimplemented"), drpcerr.Unimplemented)
+}
+
 type DRPCAgentDescription struct{}
 
-func (DRPCAgentDescription) NumMethods() int { return 16 }
+func (DRPCAgentDescription) NumMethods() int { return 18 }
 
 func (DRPCAgentDescription) Method(n int) (string, drpc.Encoding, drpc.Receiver, interface{}, bool) {
 	switch n {
@@ -446,6 +476,24 @@ func (DRPCAgentDescription) Method(n int) (string, drpc.Encoding, drpc.Receiver,
 						in1.(*ListSubAgentsRequest),
 					)
 			}, DRPCAgentServer.ListSubAgents, true
+	case 16:
+		return "/coder.agent.v2.Agent/ReportBoundaryLogs", drpcEncoding_File_agent_proto_agent_proto{},
+			func(srv interface{}, ctx context.Context, in1, in2 interface{}) (drpc.Message, error) {
+				return srv.(DRPCAgentServer).
+					ReportBoundaryLogs(
+						ctx,
+						in1.(*ReportBoundaryLogsRequest),
+					)
+			}, DRPCAgentServer.ReportBoundaryLogs, true
+	case 17:
+		return "/coder.agent.v2.Agent/UpdateAppStatus", drpcEncoding_File_agent_proto_agent_proto{},
+			func(srv interface{}, ctx context.Context, in1, in2 interface{}) (drpc.Message, error) {
+				return srv.(DRPCAgentServer).
+					UpdateAppStatus(
+						ctx,
+						in1.(*UpdateAppStatusRequest),
+					)
+			}, DRPCAgentServer.UpdateAppStatus, true
 	default:
 		return "", nil, nil, nil, false
 	}
@@ -705,6 +753,38 @@ type drpcAgent_ListSubAgentsStream struct {
 }
 
 func (x *drpcAgent_ListSubAgentsStream) SendAndClose(m *ListSubAgentsResponse) error {
+	if err := x.MsgSend(m, drpcEncoding_File_agent_proto_agent_proto{}); err != nil {
+		return err
+	}
+	return x.CloseSend()
+}
+
+type DRPCAgent_ReportBoundaryLogsStream interface {
+	drpc.Stream
+	SendAndClose(*ReportBoundaryLogsResponse) error
+}
+
+type drpcAgent_ReportBoundaryLogsStream struct {
+	drpc.Stream
+}
+
+func (x *drpcAgent_ReportBoundaryLogsStream) SendAndClose(m *ReportBoundaryLogsResponse) error {
+	if err := x.MsgSend(m, drpcEncoding_File_agent_proto_agent_proto{}); err != nil {
+		return err
+	}
+	return x.CloseSend()
+}
+
+type DRPCAgent_UpdateAppStatusStream interface {
+	drpc.Stream
+	SendAndClose(*UpdateAppStatusResponse) error
+}
+
+type drpcAgent_UpdateAppStatusStream struct {
+	drpc.Stream
+}
+
+func (x *drpcAgent_UpdateAppStatusStream) SendAndClose(m *UpdateAppStatusResponse) error {
 	if err := x.MsgSend(m, drpcEncoding_File_agent_proto_agent_proto{}); err != nil {
 		return err
 	}

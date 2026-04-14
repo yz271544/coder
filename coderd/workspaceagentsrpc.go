@@ -14,7 +14,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/agentapi"
 	"github.com/coder/coder/v2/coderd/database"
@@ -58,6 +58,17 @@ func (api *API) workspaceAgentRPC(rw http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// The role parameter distinguishes the real workspace agent from
+	// other clients using the same agent token (e.g. coder-logstream-kube).
+	// Only connections with the "agent" role trigger connection monitoring
+	// that updates first_connected_at/last_connected_at/disconnected_at.
+	// For backward compatibility, we default to monitoring when the role
+	// is omitted, since older agents don't send this parameter. In a
+	// future release, once all agents include role=agent, we can change
+	// this default to skip monitoring for unspecified roles.
+	role := r.URL.Query().Get("role")
+	monitorConnection := role == "" || role == "agent"
 
 	api.WebsocketWaitMutex.Lock()
 	api.WebsocketWaitGroup.Add(1)
@@ -121,18 +132,24 @@ func (api *API) workspaceAgentRPC(rw http.ResponseWriter, r *http.Request) {
 		slog.F("agent_api_version", workspaceAgent.APIVersion),
 		slog.F("agent_resource_id", workspaceAgent.ResourceID))
 
-	closeCtx, closeCtxCancel := context.WithCancel(ctx)
-	defer closeCtxCancel()
-	monitor := api.startAgentYamuxMonitor(closeCtx, workspace, workspaceAgent, build, mux)
-	defer monitor.close()
+	if monitorConnection {
+		closeCtx, closeCtxCancel := context.WithCancel(ctx)
+		defer closeCtxCancel()
+		monitor := api.startAgentYamuxMonitor(closeCtx, workspace, workspaceAgent, build, mux)
+		defer monitor.close()
+	} else {
+		logger.Debug(ctx, "skipping agent connection monitoring",
+			slog.F("role", role))
+	}
 
 	agentAPI := agentapi.New(agentapi.Options{
-		AgentID:        workspaceAgent.ID,
-		OwnerID:        workspace.OwnerID,
-		WorkspaceID:    workspace.ID,
-		OrganizationID: workspace.OrganizationID,
+		AgentID:           workspaceAgent.ID,
+		OwnerID:           workspace.OwnerID,
+		WorkspaceID:       workspace.ID,
+		OrganizationID:    workspace.OrganizationID,
+		TemplateVersionID: build.TemplateVersionID,
 
-		Ctx:                               api.ctx,
+		AuthenticatedCtx:                  ctx,
 		Log:                               logger,
 		Clock:                             api.Clock,
 		Database:                          api.Database,
@@ -143,9 +160,11 @@ func (api *API) workspaceAgentRPC(rw http.ResponseWriter, r *http.Request) {
 		TailnetCoordinator:                &api.TailnetCoordinator,
 		AppearanceFetcher:                 &api.AppearanceFetcher,
 		StatsReporter:                     api.statsReporter,
+		MetadataBatcher:                   api.metadataBatcher,
 		PublishWorkspaceUpdateFn:          api.publishWorkspaceUpdate,
 		PublishWorkspaceAgentLogsUpdateFn: api.publishWorkspaceAgentLogsUpdate,
 		NetworkTelemetryHandler:           api.NetworkTelemetryBatcher.Handler,
+		BoundaryUsageTracker:              api.BoundaryUsageTracker,
 
 		AccessURL:                 api.AccessURL,
 		AppHostname:               api.AppHostname,
@@ -155,10 +174,11 @@ func (api *API) workspaceAgentRPC(rw http.ResponseWriter, r *http.Request) {
 		DerpMapUpdateFrequency:    api.Options.DERPMapUpdateFrequency,
 		ExternalAuthConfigs:       api.ExternalAuthConfigs,
 		Experiments:               api.Experiments,
+		LifecycleMetrics:          api.lifecycleMetrics,
 
 		// Optional:
 		UpdateAgentMetricsFn: api.UpdateAgentMetrics,
-	})
+	}, workspace, workspaceAgent)
 
 	streamID := tailnet.StreamID{
 		Name: fmt.Sprintf("%s-%s-%s", workspace.OwnerUsername, workspace.Name, workspaceAgent.Name),
@@ -227,10 +247,11 @@ func (api *API) startAgentYamuxMonitor(ctx context.Context,
 	mux *yamux.Session,
 ) *agentConnectionMonitor {
 	monitor := &agentConnectionMonitor{
-		apiCtx:            api.ctx,
-		workspace:         workspace,
-		workspaceAgent:    workspaceAgent,
-		workspaceBuild:    workspaceBuild,
+		apiCtx:         api.ctx,
+		workspace:      workspace,
+		workspaceAgent: workspaceAgent,
+		workspaceBuild: workspaceBuild,
+
 		conn:              &yamuxPingerCloser{mux: mux},
 		pingPeriod:        api.AgentConnectionUpdateFrequency,
 		db:                api.Database,
@@ -358,7 +379,16 @@ func (m *agentConnectionMonitor) start(ctx context.Context) {
 }
 
 func (m *agentConnectionMonitor) monitor(ctx context.Context) {
+	reason := "disconnect"
 	defer func() {
+		m.logger.Debug(ctx, "agent connection monitor is closing connection",
+			slog.F("reason", reason))
+		_ = m.conn.Close(websocket.StatusGoingAway, reason)
+		m.disconnectedAt = sql.NullTime{
+			Time:  dbtime.Now(),
+			Valid: true,
+		}
+
 		// If connection closed then context will be canceled, try to
 		// ensure our final update is sent. By waiting at most the agent
 		// inactive disconnect timeout we ensure that we don't block but
@@ -371,13 +401,6 @@ func (m *agentConnectionMonitor) monitor(ctx context.Context) {
 		finalCtx, cancel := context.WithTimeout(dbauthz.AsSystemRestricted(m.apiCtx), m.disconnectTimeout)
 		defer cancel()
 
-		// Only update timestamp if the disconnect is new.
-		if !m.disconnectedAt.Valid {
-			m.disconnectedAt = sql.NullTime{
-				Time:  dbtime.Now(),
-				Valid: true,
-			}
-		}
 		err := m.updateConnectionTimes(finalCtx)
 		if err != nil {
 			// This is a bug with unit tests that cancel the app context and
@@ -396,12 +419,6 @@ func (m *agentConnectionMonitor) monitor(ctx context.Context) {
 			WorkspaceID: m.workspaceBuild.WorkspaceID,
 			AgentID:     &m.workspaceAgent.ID,
 		})
-	}()
-	reason := "disconnect"
-	defer func() {
-		m.logger.Debug(ctx, "agent connection monitor is closing connection",
-			slog.F("reason", reason))
-		_ = m.conn.Close(websocket.StatusGoingAway, reason)
 	}()
 
 	err := m.updateConnectionTimes(ctx)
@@ -431,8 +448,7 @@ func (m *agentConnectionMonitor) monitor(ctx context.Context) {
 			m.logger.Warn(ctx, "connection to agent timed out")
 			return
 		}
-		connectionStatusChanged := m.disconnectedAt.Valid
-		m.disconnectedAt = sql.NullTime{}
+
 		m.lastConnectedAt = sql.NullTime{
 			Time:  dbtime.Now(),
 			Valid: true,
@@ -446,12 +462,15 @@ func (m *agentConnectionMonitor) monitor(ctx context.Context) {
 			}
 			return
 		}
-		if connectionStatusChanged {
-			m.updater.publishWorkspaceUpdate(ctx, m.workspace.OwnerID, wspubsub.WorkspaceEvent{
-				Kind:        wspubsub.WorkspaceEventKindAgentConnectionUpdate,
-				WorkspaceID: m.workspaceBuild.WorkspaceID,
-				AgentID:     &m.workspaceAgent.ID,
-			})
+		// we don't need to publish a workspace update here because we published an update when the workspace first
+		// connected. Since all we've done is updated lastConnectedAt, the workspace is still connected and hasn't
+		// changed status. We don't expect to get updates just for the times changing.
+
+		ctx, err := dbauthz.WithWorkspaceRBAC(ctx, m.workspace.RBACObject())
+		if err != nil {
+			// Don't error level log here, will exit the function. We want to fall back to GetWorkspaceByAgentID.
+			//nolint:gocritic
+			m.logger.Debug(ctx, "Cached workspace was present but RBAC object was invalid", slog.F("err", err))
 		}
 		err = checkBuildIsLatest(ctx, m.db, m.workspaceBuild)
 		if err != nil {

@@ -269,6 +269,17 @@ URL to fetch a DERP mapping on startup. See: https://tailscale.com/kb/1118/custo
 
 Path to read a DERP mapping from. See: https://tailscale.com/kb/1118/custom-derp-servers/.
 
+### --stats-collection-usage-stats-enable
+
+|             |                                                              |
+|-------------|--------------------------------------------------------------|
+| Type        | <code>bool</code>                                            |
+| Environment | <code>$CODER_STATS_COLLECTION_USAGE_STATS_ENABLE</code>      |
+| YAML        | <code>introspection.statsCollection.usageStats.enable</code> |
+| Default     | <code>true</code>                                            |
+
+Enable the collection of application and workspace usage along with the associated API endpoints and the template insights page. Disabling this will also disable traffic and connection insights in the deployment stats shown to admins in the bottom bar of the Coder UI, and will prevent Prometheus collection of these values.
+
 ### --prometheus-enable
 
 |             |                                              |
@@ -1004,6 +1015,28 @@ URL of a PostgreSQL database. If empty, PostgreSQL binaries will be downloaded f
 
 Type of auth to use when connecting to postgres. For AWS RDS, using IAM authentication (awsiamrds) is recommended.
 
+### --postgres-conn-max-open
+
+|             |                                      |
+|-------------|--------------------------------------|
+| Type        | <code>int</code>                     |
+| Environment | <code>$CODER_PG_CONN_MAX_OPEN</code> |
+| YAML        | <code>pgConnMaxOpen</code>           |
+| Default     | <code>10</code>                      |
+
+Maximum number of open connections to the database. Defaults to 10.
+
+### --postgres-conn-max-idle
+
+|             |                                      |
+|-------------|--------------------------------------|
+| Type        | <code>string</code>                  |
+| Environment | <code>$CODER_PG_CONN_MAX_IDLE</code> |
+| YAML        | <code>pgConnMaxIdle</code>           |
+| Default     | <code>auto</code>                    |
+
+Maximum number of idle connections to the database. Set to "auto" (the default) to use max open / 3. Value must be greater or equal to 0; 0 means explicitly no idle connections.
+
 ### --secure-auth-cookie
 
 |             |                                          |
@@ -1024,6 +1057,17 @@ Controls if the 'Secure' property is set on browser session cookies.
 | Default     | <code>lax</code>                           |
 
 Controls the 'SameSite' property is set on browser session cookies.
+
+### --host-prefix-cookie
+
+|             |                                          |
+|-------------|------------------------------------------|
+| Type        | <code>bool</code>                        |
+| Environment | <code>$CODER_HOST_PREFIX_COOKIE</code>   |
+| YAML        | <code>networking.hostPrefixCookie</code> |
+| Default     | <code>false</code>                       |
+
+Recommended to be enabled. Enables `__Host-` prefix for cookies to guarantee they are only set by the right domain. This change is disruptive to any workspaces built before release 2.31, requiring a workspace restart.
 
 ### --terms-of-service-url
 
@@ -1115,6 +1159,16 @@ Disable workspace apps that are not served from subdomains. Path-based apps can 
 
 Remove the permission for the 'owner' role to have workspace execution on all workspaces. This prevents the 'owner' from ssh, apps, and terminal access based on the 'owner' role. They still have their user permissions to access their own workspaces.
 
+### --disable-workspace-sharing
+
+|             |                                               |
+|-------------|-----------------------------------------------|
+| Type        | <code>bool</code>                             |
+| Environment | <code>$CODER_DISABLE_WORKSPACE_SHARING</code> |
+| YAML        | <code>disableWorkspaceSharing</code>          |
+
+Disable workspace sharing. Workspace ACL checking is disabled and only owners can have ssh, apps and terminal access to workspaces. Access based on the 'owner' role is also allowed unless disabled via --disable-owner-workspace-access.
+
 ### --session-duration
 
 |             |                                              |
@@ -1154,17 +1208,6 @@ Disable password authentication. This is recommended for security purposes in pr
 | Environment | <code>$CODER_CONFIG_PATH</code> |
 
 Specify a YAML file to load configuration from.
-
-### --ssh-hostname-prefix
-
-|             |                                         |
-|-------------|-----------------------------------------|
-| Type        | <code>string</code>                     |
-| Environment | <code>$CODER_SSH_HOSTNAME_PREFIX</code> |
-| YAML        | <code>client.sshHostnamePrefix</code>   |
-| Default     | <code>coder.</code>                     |
-
-The SSH deployment prefix is used in the Host of the ssh config.
 
 ### --workspace-hostname-suffix
 
@@ -1214,6 +1257,17 @@ The upgrade message to display to users when a client/server mismatch is detecte
 | YAML        | <code>supportLinks</code>                  |
 
 Support links to display in the top right drop down menu.
+
+### --external-auth-github-default-provider-enable
+
+|             |                                                                  |
+|-------------|------------------------------------------------------------------|
+| Type        | <code>bool</code>                                                |
+| Environment | <code>$CODER_EXTERNAL_AUTH_GITHUB_DEFAULT_PROVIDER_ENABLE</code> |
+| YAML        | <code>externalAuthGithubDefaultProviderEnable</code>             |
+| Default     | <code>true</code>                                                |
+
+Enable the default GitHub external auth provider managed by Coder.
 
 ### --proxy-health-interval
 
@@ -1268,7 +1322,7 @@ The renderer to use when opening a web terminal. Valid values are 'canvas', 'web
 | YAML        | <code>allowWorkspaceRenames</code>          |
 | Default     | <code>false</code>                          |
 
-DEPRECATED: Allow users to rename their workspaces. Use only for temporary compatibility reasons, this will be removed in a future release.
+Allow users to rename their workspaces. WARNING: Renaming a workspace can cause Terraform resources that depend on the workspace name to be destroyed and recreated, potentially causing data loss. Only enable this if your templates do not use workspace names in resource identifiers, or if you understand the risks.
 
 ### --health-check-refresh
 
@@ -1647,3 +1701,327 @@ How often to reconcile workspace prebuilds state.
 | Default     | <code>false</code>                |
 
 Hide AI tasks from the dashboard.
+
+### --chat-debug-logging-enabled
+
+|             |                                                |
+|-------------|------------------------------------------------|
+| Type        | <code>bool</code>                              |
+| Environment | <code>$CODER_CHAT_DEBUG_LOGGING_ENABLED</code> |
+| YAML        | <code>chat.debugLoggingEnabled</code>          |
+| Default     | <code>false</code>                             |
+
+Force chat debug logging on for every chat, bypassing the runtime admin and user opt-in settings.
+
+### --aibridge-enabled
+
+|             |                                      |
+|-------------|--------------------------------------|
+| Type        | <code>bool</code>                    |
+| Environment | <code>$CODER_AIBRIDGE_ENABLED</code> |
+| YAML        | <code>aibridge.enabled</code>        |
+| Default     | <code>false</code>                   |
+
+Whether to start an in-memory aibridged instance.
+
+### --aibridge-openai-base-url
+
+|             |                                              |
+|-------------|----------------------------------------------|
+| Type        | <code>string</code>                          |
+| Environment | <code>$CODER_AIBRIDGE_OPENAI_BASE_URL</code> |
+| YAML        | <code>aibridge.openai_base_url</code>        |
+| Default     | <code>https://api.openai.com/v1/</code>      |
+
+The base URL of the OpenAI API.
+
+### --aibridge-openai-key
+
+|             |                                         |
+|-------------|-----------------------------------------|
+| Type        | <code>string</code>                     |
+| Environment | <code>$CODER_AIBRIDGE_OPENAI_KEY</code> |
+
+The key to authenticate against the OpenAI API.
+
+### --aibridge-anthropic-base-url
+
+|             |                                                 |
+|-------------|-------------------------------------------------|
+| Type        | <code>string</code>                             |
+| Environment | <code>$CODER_AIBRIDGE_ANTHROPIC_BASE_URL</code> |
+| YAML        | <code>aibridge.anthropic_base_url</code>        |
+| Default     | <code>https://api.anthropic.com/</code>         |
+
+The base URL of the Anthropic API.
+
+### --aibridge-anthropic-key
+
+|             |                                            |
+|-------------|--------------------------------------------|
+| Type        | <code>string</code>                        |
+| Environment | <code>$CODER_AIBRIDGE_ANTHROPIC_KEY</code> |
+
+The key to authenticate against the Anthropic API.
+
+### --aibridge-bedrock-base-url
+
+|             |                                               |
+|-------------|-----------------------------------------------|
+| Type        | <code>string</code>                           |
+| Environment | <code>$CODER_AIBRIDGE_BEDROCK_BASE_URL</code> |
+| YAML        | <code>aibridge.bedrock_base_url</code>        |
+
+The base URL to use for the AWS Bedrock API. Use this setting to specify an exact URL to use. Takes precedence over CODER_AIBRIDGE_BEDROCK_REGION.
+
+### --aibridge-bedrock-region
+
+|             |                                             |
+|-------------|---------------------------------------------|
+| Type        | <code>string</code>                         |
+| Environment | <code>$CODER_AIBRIDGE_BEDROCK_REGION</code> |
+| YAML        | <code>aibridge.bedrock_region</code>        |
+
+The AWS Bedrock API region to use. Constructs a base URL to use for the AWS Bedrock API in the form of 'https://bedrock-runtime.<region>.amazonaws.com'.
+
+### --aibridge-bedrock-access-key
+
+|             |                                                 |
+|-------------|-------------------------------------------------|
+| Type        | <code>string</code>                             |
+| Environment | <code>$CODER_AIBRIDGE_BEDROCK_ACCESS_KEY</code> |
+
+The access key to authenticate against the AWS Bedrock API.
+
+### --aibridge-bedrock-access-key-secret
+
+|             |                                                        |
+|-------------|--------------------------------------------------------|
+| Type        | <code>string</code>                                    |
+| Environment | <code>$CODER_AIBRIDGE_BEDROCK_ACCESS_KEY_SECRET</code> |
+
+The access key secret to use with the access key to authenticate against the AWS Bedrock API.
+
+### --aibridge-bedrock-model
+
+|             |                                                               |
+|-------------|---------------------------------------------------------------|
+| Type        | <code>string</code>                                           |
+| Environment | <code>$CODER_AIBRIDGE_BEDROCK_MODEL</code>                    |
+| YAML        | <code>aibridge.bedrock_model</code>                           |
+| Default     | <code>global.anthropic.claude-sonnet-4-5-20250929-v1:0</code> |
+
+The model to use when making requests to the AWS Bedrock API.
+
+### --aibridge-bedrock-small-fastmodel
+
+|             |                                                              |
+|-------------|--------------------------------------------------------------|
+| Type        | <code>string</code>                                          |
+| Environment | <code>$CODER_AIBRIDGE_BEDROCK_SMALL_FAST_MODEL</code>        |
+| YAML        | <code>aibridge.bedrock_small_fast_model</code>               |
+| Default     | <code>global.anthropic.claude-haiku-4-5-20251001-v1:0</code> |
+
+The small fast model to use when making requests to the AWS Bedrock API. Claude Code uses Haiku-class models to perform background tasks. See https://docs.claude.com/en/docs/claude-code/settings#environment-variables.
+
+### --aibridge-retention
+
+|             |                                        |
+|-------------|----------------------------------------|
+| Type        | <code>duration</code>                  |
+| Environment | <code>$CODER_AIBRIDGE_RETENTION</code> |
+| YAML        | <code>aibridge.retention</code>        |
+| Default     | <code>60d</code>                       |
+
+Length of time to retain data such as interceptions and all related records (token, prompt, tool use).
+
+### --aibridge-max-concurrency
+
+|             |                                              |
+|-------------|----------------------------------------------|
+| Type        | <code>int</code>                             |
+| Environment | <code>$CODER_AIBRIDGE_MAX_CONCURRENCY</code> |
+| YAML        | <code>aibridge.max_concurrency</code>        |
+| Default     | <code>0</code>                               |
+
+Maximum number of concurrent AI Bridge requests per replica. Set to 0 to disable (unlimited).
+
+### --aibridge-rate-limit
+
+|             |                                         |
+|-------------|-----------------------------------------|
+| Type        | <code>int</code>                        |
+| Environment | <code>$CODER_AIBRIDGE_RATE_LIMIT</code> |
+| YAML        | <code>aibridge.rate_limit</code>        |
+| Default     | <code>0</code>                          |
+
+Maximum number of AI Bridge requests per second per replica. Set to 0 to disable (unlimited).
+
+### --aibridge-structured-logging
+
+|             |                                                 |
+|-------------|-------------------------------------------------|
+| Type        | <code>bool</code>                               |
+| Environment | <code>$CODER_AIBRIDGE_STRUCTURED_LOGGING</code> |
+| YAML        | <code>aibridge.structured_logging</code>        |
+| Default     | <code>false</code>                              |
+
+Emit structured logs for AI Bridge interception records. Use this for exporting these records to external SIEM or observability systems.
+
+### --aibridge-send-actor-headers
+
+|             |                                                 |
+|-------------|-------------------------------------------------|
+| Type        | <code>bool</code>                               |
+| Environment | <code>$CODER_AIBRIDGE_SEND_ACTOR_HEADERS</code> |
+| YAML        | <code>aibridge.send_actor_headers</code>        |
+| Default     | <code>false</code>                              |
+
+Once enabled, extra headers will be added to upstream requests to identify the user (actor) making requests to AI Bridge. This is only needed if you are using a proxy between AI Bridge and an upstream AI provider. This will send X-Ai-Bridge-Actor-Id (the ID of the user making the request) and X-Ai-Bridge-Actor-Metadata-Username (their username).
+
+### --aibridge-circuit-breaker-enabled
+
+|             |                                                      |
+|-------------|------------------------------------------------------|
+| Type        | <code>bool</code>                                    |
+| Environment | <code>$CODER_AIBRIDGE_CIRCUIT_BREAKER_ENABLED</code> |
+| YAML        | <code>aibridge.circuit_breaker_enabled</code>        |
+| Default     | <code>false</code>                                   |
+
+Enable the circuit breaker to protect against cascading failures from upstream AI provider rate limits (429, 503, 529 overloaded).
+
+### --aibridge-proxy-enabled
+
+|             |                                            |
+|-------------|--------------------------------------------|
+| Type        | <code>bool</code>                          |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_ENABLED</code> |
+| YAML        | <code>aibridgeproxy.enabled</code>         |
+| Default     | <code>false</code>                         |
+
+Enable the AI Bridge MITM Proxy for intercepting and decrypting AI provider requests.
+
+### --aibridge-proxy-listen-addr
+
+|             |                                                |
+|-------------|------------------------------------------------|
+| Type        | <code>string</code>                            |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_LISTEN_ADDR</code> |
+| YAML        | <code>aibridgeproxy.listen_addr</code>         |
+| Default     | <code>:8888</code>                             |
+
+The address the AI Bridge Proxy will listen on.
+
+### --aibridge-proxy-tls-cert-file
+
+|             |                                                  |
+|-------------|--------------------------------------------------|
+| Type        | <code>string</code>                              |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_TLS_CERT_FILE</code> |
+| YAML        | <code>aibridgeproxy.tls_cert_file</code>         |
+
+Path to the TLS certificate file for the AI Bridge Proxy listener. Must be set together with AI Bridge Proxy TLS Key File.
+
+### --aibridge-proxy-tls-key-file
+
+|             |                                                 |
+|-------------|-------------------------------------------------|
+| Type        | <code>string</code>                             |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_TLS_KEY_FILE</code> |
+| YAML        | <code>aibridgeproxy.tls_key_file</code>         |
+
+Path to the TLS private key file for the AI Bridge Proxy listener. Must be set together with AI Bridge Proxy TLS Certificate File.
+
+### --aibridge-proxy-cert-file
+
+|             |                                              |
+|-------------|----------------------------------------------|
+| Type        | <code>string</code>                          |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_CERT_FILE</code> |
+| YAML        | <code>aibridgeproxy.cert_file</code>         |
+
+Path to the CA certificate file used to intercept (MITM) HTTPS traffic from AI clients. This CA must be trusted by AI clients for the proxy to decrypt their requests.
+
+### --aibridge-proxy-key-file
+
+|             |                                             |
+|-------------|---------------------------------------------|
+| Type        | <code>string</code>                         |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_KEY_FILE</code> |
+| YAML        | <code>aibridgeproxy.key_file</code>         |
+
+Path to the CA private key file used to intercept (MITM) HTTPS traffic from AI clients.
+
+### --aibridge-proxy-upstream
+
+|             |                                             |
+|-------------|---------------------------------------------|
+| Type        | <code>string</code>                         |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_UPSTREAM</code> |
+| YAML        | <code>aibridgeproxy.upstream_proxy</code>   |
+
+URL of an upstream HTTP proxy to chain tunneled (non-allowlisted) requests through. Format: http://[user:pass@]host:port or https://[user:pass@]host:port.
+
+### --aibridge-proxy-upstream-ca
+
+|             |                                                |
+|-------------|------------------------------------------------|
+| Type        | <code>string</code>                            |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_UPSTREAM_CA</code> |
+| YAML        | <code>aibridgeproxy.upstream_proxy_ca</code>   |
+
+Path to a PEM-encoded CA certificate to trust for the upstream proxy's TLS connection. Only needed for HTTPS upstream proxies with certificates not trusted by the system. If not provided, the system certificate pool is used.
+
+### --aibridge-proxy-allowed-private-cidrs
+
+|             |                                                          |
+|-------------|----------------------------------------------------------|
+| Type        | <code>string-array</code>                                |
+| Environment | <code>$CODER_AIBRIDGE_PROXY_ALLOWED_PRIVATE_CIDRS</code> |
+| YAML        | <code>aibridgeproxy.allowed_private_cidrs</code>         |
+
+Comma-separated list of CIDR ranges that are permitted even though they fall within blocked private/reserved IP ranges. By default all private ranges are blocked to prevent SSRF attacks. Use this to allow access to specific internal networks.
+
+### --audit-logs-retention
+
+|             |                                          |
+|-------------|------------------------------------------|
+| Type        | <code>duration</code>                    |
+| Environment | <code>$CODER_AUDIT_LOGS_RETENTION</code> |
+| YAML        | <code>retention.audit_logs</code>        |
+| Default     | <code>0</code>                           |
+
+How long audit log entries are retained. Set to 0 to disable (keep indefinitely). We advise keeping audit logs for at least a year, and in accordance with your compliance requirements.
+
+### --connection-logs-retention
+
+|             |                                               |
+|-------------|-----------------------------------------------|
+| Type        | <code>duration</code>                         |
+| Environment | <code>$CODER_CONNECTION_LOGS_RETENTION</code> |
+| YAML        | <code>retention.connection_logs</code>        |
+| Default     | <code>0</code>                                |
+
+How long connection log entries are retained. Set to 0 to disable (keep indefinitely).
+
+### --api-keys-retention
+
+|             |                                        |
+|-------------|----------------------------------------|
+| Type        | <code>duration</code>                  |
+| Environment | <code>$CODER_API_KEYS_RETENTION</code> |
+| YAML        | <code>retention.api_keys</code>        |
+| Default     | <code>7d</code>                        |
+
+How long expired API keys are retained before being deleted. Keeping expired keys allows the backend to return a more helpful error when a user tries to use an expired key. Set to 0 to disable automatic deletion of expired keys.
+
+### --workspace-agent-logs-retention
+
+|             |                                                    |
+|-------------|----------------------------------------------------|
+| Type        | <code>duration</code>                              |
+| Environment | <code>$CODER_WORKSPACE_AGENT_LOGS_RETENTION</code> |
+| YAML        | <code>retention.workspace_agent_logs</code>        |
+| Default     | <code>7d</code>                                    |
+
+How long workspace agent logs are retained. Logs from non-latest builds are deleted if the agent hasn't connected within this period. Logs from the latest build are always retained. Set to 0 to disable automatic deletion.

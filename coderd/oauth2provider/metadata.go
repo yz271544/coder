@@ -18,11 +18,12 @@ func GetAuthorizationServerMetadata(accessURL *url.URL) http.HandlerFunc {
 			AuthorizationEndpoint:             accessURL.JoinPath("/oauth2/authorize").String(),
 			TokenEndpoint:                     accessURL.JoinPath("/oauth2/tokens").String(),
 			RegistrationEndpoint:              accessURL.JoinPath("/oauth2/register").String(), // RFC 7591
-			ResponseTypesSupported:            []string{"code"},
-			GrantTypesSupported:               []string{"authorization_code", "refresh_token"},
-			CodeChallengeMethodsSupported:     []string{"S256"},
+			RevocationEndpoint:                accessURL.JoinPath("/oauth2/revoke").String(),   // RFC 7009
+			ResponseTypesSupported:            []codersdk.OAuth2ProviderResponseType{codersdk.OAuth2ProviderResponseTypeCode},
+			GrantTypesSupported:               []codersdk.OAuth2ProviderGrantType{codersdk.OAuth2ProviderGrantTypeAuthorizationCode, codersdk.OAuth2ProviderGrantTypeRefreshToken},
+			CodeChallengeMethodsSupported:     []codersdk.OAuth2PKCECodeChallengeMethod{codersdk.OAuth2PKCECodeChallengeMethodS256},
 			ScopesSupported:                   rbac.ExternalScopeNames(),
-			TokenEndpointAuthMethodsSupported: []string{"client_secret_post"},
+			TokenEndpointAuthMethodsSupported: []codersdk.OAuth2TokenEndpointAuthMethod{codersdk.OAuth2TokenEndpointAuthMethodClientSecretBasic, codersdk.OAuth2TokenEndpointAuthMethodClientSecretPost},
 		}
 		httpapi.Write(ctx, rw, http.StatusOK, metadata)
 	}

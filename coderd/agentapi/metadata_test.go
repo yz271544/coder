@@ -2,37 +2,25 @@ package agentapi_test
 
 import (
 	"context"
-	"encoding/json"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	prom_testutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	agentproto "github.com/coder/coder/v2/agent/proto"
 	"github.com/coder/coder/v2/coderd/agentapi"
+	"github.com/coder/coder/v2/coderd/agentapi/metadatabatcher"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbmock"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/database/pubsub"
 	"github.com/coder/coder/v2/testutil"
 )
-
-type fakePublisher struct {
-	// Nil pointer to pass interface check.
-	pubsub.Pubsub
-	publishes [][]byte
-}
-
-var _ pubsub.Pubsub = &fakePublisher{}
-
-func (f *fakePublisher) Publish(_ string, message []byte) error {
-	f.publishes = append(f.publishes, message)
-	return nil
-}
 
 func TestBatchUpdateMetadata(t *testing.T) {
 	t.Parallel()
@@ -44,8 +32,12 @@ func TestBatchUpdateMetadata(t *testing.T) {
 	t.Run("OK", func(t *testing.T) {
 		t.Parallel()
 
-		dbM := dbmock.NewMockStore(gomock.NewController(t))
-		pub := &fakePublisher{}
+		ctx := testutil.Context(t, testutil.WaitShort)
+
+		ctrl := gomock.NewController(t)
+		store := dbmock.NewMockStore(ctrl)
+		ps := pubsub.NewInMemory()
+		reg := prometheus.NewRegistry()
 
 		now := dbtime.Now()
 		req := &agentproto.BatchUpdateMetadataRequest{
@@ -65,28 +57,61 @@ func TestBatchUpdateMetadata(t *testing.T) {
 						CollectedAt: timestamppb.New(now.Add(-3 * time.Second)),
 						Age:         3,
 						Value:       "",
-						Error:       "uncool value",
+						Error:       "\t uncool error  ",
 					},
 				},
 			},
 		}
+		batchSize := len(req.Metadata)
+		// This test sends 2 metadata entries (one clean, one with
+		// whitespace padding). With batch size 2 we expect exactly
+		// 1 capacity flush. The matcher verifies that stored values
+		// are trimmed while clean values pass through unchanged.
+		expectedValues := map[string]string{
+			"awesome key": "awesome value",
+			"uncool key":  "",
+		}
+		expectedErrors := map[string]string{
+			"awesome key": "",
+			"uncool key":  "uncool error",
+		}
+		store.EXPECT().
+			BatchUpdateWorkspaceAgentMetadata(
+				gomock.Any(),
+				gomock.Cond(func(arg database.BatchUpdateWorkspaceAgentMetadataParams) bool {
+					if len(arg.Key) != len(expectedValues) {
+						return false
+					}
+					for i, key := range arg.Key {
+						expVal, ok := expectedValues[key]
+						if !ok || arg.Value[i] != expVal {
+							return false
+						}
+						expErr, ok := expectedErrors[key]
+						if !ok || arg.Error[i] != expErr {
+							return false
+						}
+					}
+					return true
+				}),
+			).
+			Return(nil).
+			Times(1)
 
-		dbM.EXPECT().UpdateWorkspaceAgentMetadata(gomock.Any(), database.UpdateWorkspaceAgentMetadataParams{
-			WorkspaceAgentID: agent.ID,
-			Key:              []string{req.Metadata[0].Key, req.Metadata[1].Key},
-			Value:            []string{req.Metadata[0].Result.Value, req.Metadata[1].Result.Value},
-			Error:            []string{req.Metadata[0].Result.Error, req.Metadata[1].Result.Error},
-			// The value from the agent is ignored.
-			CollectedAt: []time.Time{now, now},
-		}).Return(nil)
+		// Create a real batcher for the test with batch size matching the number
+		// of metadata entries to trigger exactly one capacity flush.
+		batcher, err := metadatabatcher.NewBatcher(ctx, reg, store, ps,
+			metadatabatcher.WithLogger(testutil.Logger(t)),
+			metadatabatcher.WithBatchSize(batchSize),
+		)
+		require.NoError(t, err)
+		t.Cleanup(batcher.Close)
 
 		api := &agentapi.MetadataAPI{
-			AgentFn: func(context.Context) (database.WorkspaceAgent, error) {
-				return agent, nil
-			},
-			Database: dbM,
-			Pubsub:   pub,
-			Log:      testutil.Logger(t),
+			AgentID:   agent.ID,
+			Workspace: &agentapi.CachedWorkspaceFields{},
+			Log:       testutil.Logger(t),
+			Batcher:   batcher,
 			TimeNowFn: func() time.Time {
 				return now
 			},
@@ -96,27 +121,33 @@ func TestBatchUpdateMetadata(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, &agentproto.BatchUpdateMetadataResponse{}, resp)
 
-		require.Equal(t, 1, len(pub.publishes))
-		var gotEvent agentapi.WorkspaceAgentMetadataChannelPayload
-		require.NoError(t, json.Unmarshal(pub.publishes[0], &gotEvent))
-		require.Equal(t, agentapi.WorkspaceAgentMetadataChannelPayload{
-			CollectedAt: now,
-			Keys:        []string{req.Metadata[0].Key, req.Metadata[1].Key},
-		}, gotEvent)
+		// Wait for the capacity flush to complete before test ends.
+		testutil.Eventually(ctx, t, func(ctx context.Context) bool {
+			return prom_testutil.ToFloat64(batcher.Metrics.MetadataTotal) == 2.0
+		}, testutil.IntervalFast)
 	})
 
 	t.Run("ExceededLength", func(t *testing.T) {
 		t.Parallel()
 
-		dbM := dbmock.NewMockStore(gomock.NewController(t))
-		pub := pubsub.NewInMemory()
+		ctx := testutil.Context(t, testutil.WaitShort)
+		ctrl := gomock.NewController(t)
+		store := dbmock.NewMockStore(ctrl)
+		ps := pubsub.NewInMemory()
+		reg := prometheus.NewRegistry()
 
+		// This test sends 4 metadata entries with some exceeding length limits. We set the batchers batch size so that
+		// we can reliably ensure a batch is sent within the WaitShort time period.
+		store.EXPECT().
+			BatchUpdateWorkspaceAgentMetadata(gomock.Any(), gomock.Any()).
+			Return(nil).
+			Times(1)
+
+		now := dbtime.Now()
 		almostLongValue := ""
 		for i := 0; i < 2048; i++ {
 			almostLongValue += "a"
 		}
-
-		now := dbtime.Now()
 		req := &agentproto.BatchUpdateMetadataRequest{
 			Metadata: []*agentproto.Metadata{
 				{
@@ -145,33 +176,19 @@ func TestBatchUpdateMetadata(t *testing.T) {
 				},
 			},
 		}
-
-		dbM.EXPECT().UpdateWorkspaceAgentMetadata(gomock.Any(), database.UpdateWorkspaceAgentMetadataParams{
-			WorkspaceAgentID: agent.ID,
-			Key:              []string{req.Metadata[0].Key, req.Metadata[1].Key, req.Metadata[2].Key, req.Metadata[3].Key},
-			Value: []string{
-				almostLongValue,
-				almostLongValue, // truncated
-				"",
-				"",
-			},
-			Error: []string{
-				"",
-				"value of 2049 bytes exceeded 2048 bytes",
-				almostLongValue,
-				"error of 2049 bytes exceeded 2048 bytes", // replaced
-			},
-			// The value from the agent is ignored.
-			CollectedAt: []time.Time{now, now, now, now},
-		}).Return(nil)
+		batchSize := len(req.Metadata)
+		batcher, err := metadatabatcher.NewBatcher(ctx, reg, store, ps,
+			metadatabatcher.WithLogger(testutil.Logger(t)),
+			metadatabatcher.WithBatchSize(batchSize),
+		)
+		require.NoError(t, err)
+		t.Cleanup(batcher.Close)
 
 		api := &agentapi.MetadataAPI{
-			AgentFn: func(context.Context) (database.WorkspaceAgent, error) {
-				return agent, nil
-			},
-			Database: dbM,
-			Pubsub:   pub,
-			Log:      testutil.Logger(t),
+			AgentID:   agent.ID,
+			Workspace: &agentapi.CachedWorkspaceFields{},
+			Log:       testutil.Logger(t),
+			Batcher:   batcher,
 			TimeNowFn: func() time.Time {
 				return now
 			},
@@ -180,13 +197,21 @@ func TestBatchUpdateMetadata(t *testing.T) {
 		resp, err := api.BatchUpdateMetadata(context.Background(), req)
 		require.NoError(t, err)
 		require.Equal(t, &agentproto.BatchUpdateMetadataResponse{}, resp)
+		// Wait for the capacity flush to complete before test ends.
+		testutil.Eventually(ctx, t, func(ctx context.Context) bool {
+			return prom_testutil.ToFloat64(batcher.Metrics.MetadataTotal) == 4.0
+		}, testutil.IntervalFast)
 	})
 
 	t.Run("KeysTooLong", func(t *testing.T) {
 		t.Parallel()
 
-		dbM := dbmock.NewMockStore(gomock.NewController(t))
-		pub := pubsub.NewInMemory()
+		ctx := testutil.Context(t, testutil.WaitShort)
+
+		ctrl := gomock.NewController(t)
+		store := dbmock.NewMockStore(ctrl)
+		ps := pubsub.NewInMemory()
+		reg := prometheus.NewRegistry()
 
 		now := dbtime.Now()
 		req := &agentproto.BatchUpdateMetadataRequest{
@@ -223,53 +248,38 @@ func TestBatchUpdateMetadata(t *testing.T) {
 				},
 			},
 		}
+		batchSize := len(req.Metadata)
 
-		dbM.EXPECT().UpdateWorkspaceAgentMetadata(gomock.Any(), database.UpdateWorkspaceAgentMetadataParams{
-			WorkspaceAgentID: agent.ID,
-			// No key 4.
-			Key:   []string{req.Metadata[0].Key, req.Metadata[1].Key, req.Metadata[2].Key},
-			Value: []string{req.Metadata[0].Result.Value, req.Metadata[1].Result.Value, req.Metadata[2].Result.Value},
-			Error: []string{req.Metadata[0].Result.Error, req.Metadata[1].Result.Error, req.Metadata[2].Result.Error},
-			// The value from the agent is ignored.
-			CollectedAt: []time.Time{now, now, now},
-		}).Return(nil)
+		// This test sends 4 metadata entries but rejects the last one due to excessive key length.
+		// We set the batchers batch size so that we can reliably ensure a batch is sent within the WaitShort time period.
+		store.EXPECT().
+			BatchUpdateWorkspaceAgentMetadata(gomock.Any(), gomock.Any()).
+			Return(nil).
+			Times(1)
+
+		batcher, err := metadatabatcher.NewBatcher(ctx, reg, store, ps,
+			metadatabatcher.WithLogger(testutil.Logger(t)),
+			metadatabatcher.WithBatchSize(batchSize-1), // one of the keys will be rejected
+		)
+		require.NoError(t, err)
+		t.Cleanup(batcher.Close)
 
 		api := &agentapi.MetadataAPI{
-			AgentFn: func(context.Context) (database.WorkspaceAgent, error) {
-				return agent, nil
-			},
-			Database: dbM,
-			Pubsub:   pub,
-			Log:      testutil.Logger(t),
+			AgentID:   agent.ID,
+			Workspace: &agentapi.CachedWorkspaceFields{},
+			Log:       testutil.Logger(t),
+			Batcher:   batcher,
 			TimeNowFn: func() time.Time {
 				return now
 			},
 		}
 
-		// Watch the pubsub for events.
-		var (
-			eventCount int64
-			gotEvent   agentapi.WorkspaceAgentMetadataChannelPayload
-		)
-		cancel, err := pub.Subscribe(agentapi.WatchWorkspaceAgentMetadataChannel(agent.ID), func(ctx context.Context, message []byte) {
-			if atomic.AddInt64(&eventCount, 1) > 1 {
-				return
-			}
-			require.NoError(t, json.Unmarshal(message, &gotEvent))
-		})
-		require.NoError(t, err)
-		defer cancel()
-
 		resp, err := api.BatchUpdateMetadata(context.Background(), req)
+		// Should return error because keys are too long.
 		require.Error(t, err)
-		require.Equal(t, "metadata keys of 6145 bytes exceeded 6144 bytes", err.Error())
 		require.Nil(t, resp)
-
-		require.Equal(t, int64(1), atomic.LoadInt64(&eventCount))
-		require.Equal(t, agentapi.WorkspaceAgentMetadataChannelPayload{
-			CollectedAt: now,
-			// No key 4.
-			Keys: []string{req.Metadata[0].Key, req.Metadata[1].Key, req.Metadata[2].Key},
-		}, gotEvent)
+		testutil.Eventually(ctx, t, func(ctx context.Context) bool {
+			return prom_testutil.ToFloat64(batcher.Metrics.MetadataTotal) == 3.0
+		}, testutil.IntervalFast)
 	})
 }

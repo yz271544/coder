@@ -1,12 +1,20 @@
 package oauth2providertest_test
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/oauth2"
 
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/oauth2provider/oauth2providertest"
+	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/coder/v2/testutil"
 )
 
 func TestOAuth2AuthorizationServerMetadata(t *testing.T) {
@@ -40,6 +48,12 @@ func TestOAuth2AuthorizationServerMetadata(t *testing.T) {
 	challengeMethods, ok := metadata["code_challenge_methods_supported"].([]any)
 	require.True(t, ok, "code_challenge_methods_supported should be an array")
 	require.Contains(t, challengeMethods, "S256", "should support S256 PKCE method")
+
+	// Verify token endpoint auth methods
+	authMethods, ok := metadata["token_endpoint_auth_methods_supported"].([]any)
+	require.True(t, ok, "token_endpoint_auth_methods_supported should be an array")
+	require.Contains(t, authMethods, "client_secret_basic", "should support client_secret_basic token auth")
+	require.Contains(t, authMethods, "client_secret_post", "should support client_secret_post token auth")
 
 	// Verify endpoints are proper URLs
 	authEndpoint, ok := metadata["authorization_endpoint"].(string)
@@ -144,7 +158,149 @@ func TestOAuth2InvalidPKCE(t *testing.T) {
 	)
 }
 
-func TestOAuth2WithoutPKCE(t *testing.T) {
+// TestOAuth2WithoutPKCEIsRejected verifies that authorization requests without
+// a code_challenge are rejected now that PKCE is mandatory.
+func TestOAuth2WithoutPKCEIsRejected(t *testing.T) {
+	t.Parallel()
+
+	client := coderdtest.New(t, &coderdtest.Options{
+		IncludeProvisionerDaemon: false,
+	})
+	_ = coderdtest.CreateFirstUser(t, client)
+
+	// Create OAuth2 app.
+	app, _ := oauth2providertest.CreateTestOAuth2App(t, client)
+	t.Cleanup(func() {
+		oauth2providertest.CleanupOAuth2App(t, client, app.ID)
+	})
+
+	state := oauth2providertest.GenerateState(t)
+
+	// Authorization without code_challenge should be rejected.
+	authParams := oauth2providertest.AuthorizeParams{
+		ClientID:     app.ID.String(),
+		ResponseType: "code",
+		RedirectURI:  oauth2providertest.TestRedirectURI,
+		State:        state,
+	}
+
+	oauth2providertest.AuthorizeOAuth2AppExpectingError(
+		t, client, client.URL.String(), authParams, http.StatusBadRequest,
+	)
+}
+
+func TestOAuth2TokenExchangeClientSecretBasic(t *testing.T) {
+	t.Parallel()
+
+	client := coderdtest.New(t, &coderdtest.Options{
+		IncludeProvisionerDaemon: false,
+	})
+	_ = coderdtest.CreateFirstUser(t, client)
+
+	app, clientSecret := oauth2providertest.CreateTestOAuth2App(t, client)
+	t.Cleanup(func() {
+		oauth2providertest.CleanupOAuth2App(t, client, app.ID)
+	})
+
+	codeVerifier, codeChallenge := oauth2providertest.GeneratePKCE(t)
+	state := oauth2providertest.GenerateState(t)
+
+	authParams := oauth2providertest.AuthorizeParams{
+		ClientID:            app.ID.String(),
+		ResponseType:        "code",
+		RedirectURI:         oauth2providertest.TestRedirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+	}
+
+	code := oauth2providertest.AuthorizeOAuth2App(t, client, client.URL.String(), authParams)
+	require.NotEmpty(t, code, "should receive authorization code")
+
+	ctx := testutil.Context(t, testutil.WaitLong)
+	data := url.Values{}
+	data.Set("grant_type", "authorization_code")
+	data.Set("code", code)
+	data.Set("redirect_uri", oauth2providertest.TestRedirectURI)
+	data.Set("code_verifier", codeVerifier)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", client.URL.String()+"/oauth2/tokens", strings.NewReader(data.Encode()))
+	require.NoError(t, err, "failed to create token request")
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(app.ID.String(), clientSecret)
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Do(req)
+	require.NoError(t, err, "failed to perform token request")
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusOK, resp.StatusCode, "unexpected status code")
+
+	var tokenResp oauth2.Token
+	err = json.NewDecoder(resp.Body).Decode(&tokenResp)
+	require.NoError(t, err, "failed to decode token response")
+
+	require.NotEmpty(t, tokenResp.AccessToken, "missing access token")
+	require.NotEmpty(t, tokenResp.RefreshToken, "missing refresh token")
+	require.Equal(t, "Bearer", tokenResp.TokenType, "unexpected token type")
+}
+
+func TestOAuth2TokenExchangeClientSecretBasicInvalidSecret(t *testing.T) {
+	t.Parallel()
+
+	client := coderdtest.New(t, &coderdtest.Options{
+		IncludeProvisionerDaemon: false,
+	})
+	_ = coderdtest.CreateFirstUser(t, client)
+
+	app, clientSecret := oauth2providertest.CreateTestOAuth2App(t, client)
+	t.Cleanup(func() {
+		oauth2providertest.CleanupOAuth2App(t, client, app.ID)
+	})
+
+	codeVerifier, codeChallenge := oauth2providertest.GeneratePKCE(t)
+	state := oauth2providertest.GenerateState(t)
+
+	authParams := oauth2providertest.AuthorizeParams{
+		ClientID:            app.ID.String(),
+		ResponseType:        "code",
+		RedirectURI:         oauth2providertest.TestRedirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+	}
+
+	code := oauth2providertest.AuthorizeOAuth2App(t, client, client.URL.String(), authParams)
+	require.NotEmpty(t, code, "should receive authorization code")
+
+	ctx := testutil.Context(t, testutil.WaitLong)
+	data := url.Values{}
+	data.Set("grant_type", "authorization_code")
+	data.Set("code", code)
+	data.Set("redirect_uri", oauth2providertest.TestRedirectURI)
+	data.Set("code_verifier", codeVerifier)
+
+	wrongSecret := clientSecret + "x"
+
+	req, err := http.NewRequestWithContext(ctx, "POST", client.URL.String()+"/oauth2/tokens", strings.NewReader(data.Encode()))
+	require.NoError(t, err, "failed to create token request")
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(app.ID.String(), wrongSecret)
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	resp, err := httpClient.Do(req)
+	require.NoError(t, err, "failed to perform token request")
+	defer resp.Body.Close()
+
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "expected 401 status code")
+	require.Equal(t, `Basic realm="coder"`, resp.Header.Get("WWW-Authenticate"), "missing WWW-Authenticate header")
+
+	oauth2providertest.RequireOAuth2Error(t, resp, oauth2providertest.OAuth2ErrorTypes.InvalidClient)
+}
+
+func TestOAuth2PKCEPlainMethodRejected(t *testing.T) {
 	t.Parallel()
 
 	client := coderdtest.New(t, &coderdtest.Options{
@@ -153,36 +309,27 @@ func TestOAuth2WithoutPKCE(t *testing.T) {
 	_ = coderdtest.CreateFirstUser(t, client)
 
 	// Create OAuth2 app
-	app, clientSecret := oauth2providertest.CreateTestOAuth2App(t, client)
+	app, _ := oauth2providertest.CreateTestOAuth2App(t, client)
 	t.Cleanup(func() {
 		oauth2providertest.CleanupOAuth2App(t, client, app.ID)
 	})
 
+	// Generate PKCE parameters but use "plain" method (should be rejected)
+	_, codeChallenge := oauth2providertest.GeneratePKCE(t)
 	state := oauth2providertest.GenerateState(t)
 
-	// Perform authorization without PKCE
+	// Attempt authorization with plain method - should fail
 	authParams := oauth2providertest.AuthorizeParams{
-		ClientID:     app.ID.String(),
-		ResponseType: "code",
-		RedirectURI:  oauth2providertest.TestRedirectURI,
-		State:        state,
+		ClientID:            app.ID.String(),
+		ResponseType:        string(codersdk.OAuth2ProviderResponseTypeCode),
+		RedirectURI:         oauth2providertest.TestRedirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: string(codersdk.OAuth2PKCECodeChallengeMethodPlain),
 	}
 
-	code := oauth2providertest.AuthorizeOAuth2App(t, client, client.URL.String(), authParams)
-	require.NotEmpty(t, code, "should receive authorization code")
-
-	// Exchange code for token without PKCE
-	tokenParams := oauth2providertest.TokenExchangeParams{
-		GrantType:    "authorization_code",
-		Code:         code,
-		ClientID:     app.ID.String(),
-		ClientSecret: clientSecret,
-		RedirectURI:  oauth2providertest.TestRedirectURI,
-	}
-
-	token := oauth2providertest.ExchangeCodeForToken(t, client.URL.String(), tokenParams)
-	require.NotEmpty(t, token.AccessToken, "should receive access token")
-	require.NotEmpty(t, token.RefreshToken, "should receive refresh token")
+	// Should get a 400 Bad Request
+	oauth2providertest.AuthorizeOAuth2AppExpectingError(t, client, client.URL.String(), authParams, 400)
 }
 
 func TestOAuth2ResourceParameter(t *testing.T) {
@@ -200,26 +347,30 @@ func TestOAuth2ResourceParameter(t *testing.T) {
 	})
 
 	state := oauth2providertest.GenerateState(t)
+	codeVerifier, codeChallenge := oauth2providertest.GeneratePKCE(t)
 
-	// Perform authorization with resource parameter
+	// Perform authorization with resource parameter.
 	authParams := oauth2providertest.AuthorizeParams{
-		ClientID:     app.ID.String(),
-		ResponseType: "code",
-		RedirectURI:  oauth2providertest.TestRedirectURI,
-		State:        state,
-		Resource:     oauth2providertest.TestResourceURI,
+		ClientID:            app.ID.String(),
+		ResponseType:        "code",
+		RedirectURI:         oauth2providertest.TestRedirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
+		Resource:            oauth2providertest.TestResourceURI,
 	}
 
 	code := oauth2providertest.AuthorizeOAuth2App(t, client, client.URL.String(), authParams)
 	require.NotEmpty(t, code, "should receive authorization code")
 
-	// Exchange code for token with resource parameter
+	// Exchange code for token with resource parameter.
 	tokenParams := oauth2providertest.TokenExchangeParams{
 		GrantType:    "authorization_code",
 		Code:         code,
 		ClientID:     app.ID.String(),
 		ClientSecret: clientSecret,
 		RedirectURI:  oauth2providertest.TestRedirectURI,
+		CodeVerifier: codeVerifier,
 		Resource:     oauth2providertest.TestResourceURI,
 	}
 
@@ -243,13 +394,16 @@ func TestOAuth2TokenRefresh(t *testing.T) {
 	})
 
 	state := oauth2providertest.GenerateState(t)
+	codeVerifier, codeChallenge := oauth2providertest.GeneratePKCE(t)
 
-	// Get initial token
+	// Get initial token.
 	authParams := oauth2providertest.AuthorizeParams{
-		ClientID:     app.ID.String(),
-		ResponseType: "code",
-		RedirectURI:  oauth2providertest.TestRedirectURI,
-		State:        state,
+		ClientID:            app.ID.String(),
+		ResponseType:        "code",
+		RedirectURI:         oauth2providertest.TestRedirectURI,
+		State:               state,
+		CodeChallenge:       codeChallenge,
+		CodeChallengeMethod: "S256",
 	}
 
 	code := oauth2providertest.AuthorizeOAuth2App(t, client, client.URL.String(), authParams)
@@ -260,6 +414,7 @@ func TestOAuth2TokenRefresh(t *testing.T) {
 		ClientID:     app.ID.String(),
 		ClientSecret: clientSecret,
 		RedirectURI:  oauth2providertest.TestRedirectURI,
+		CodeVerifier: codeVerifier,
 	}
 
 	initialToken := oauth2providertest.ExchangeCodeForToken(t, client.URL.String(), tokenParams)

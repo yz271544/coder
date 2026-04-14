@@ -9,33 +9,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/coder/coder/v2/cli"
-
-	"github.com/coder/coder/v2/coderd/wsbuilder"
-
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/trace/noop"
 
+	"github.com/coder/coder/v2/cli"
+	"github.com/coder/coder/v2/cli/clitest"
+	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
 	"github.com/coder/coder/v2/coderd/files"
 	"github.com/coder/coder/v2/coderd/notifications"
 	agplprebuilds "github.com/coder/coder/v2/coderd/prebuilds"
-	"github.com/coder/coder/v2/enterprise/coderd/prebuilds"
-	"github.com/coder/coder/v2/provisioner/echo"
-	"github.com/coder/coder/v2/provisionersdk/proto"
-	"github.com/coder/coder/v2/testutil"
-	"github.com/coder/quartz"
-
-	"github.com/coder/coder/v2/cli/clitest"
-	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/wsbuilder"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/enterprise/coderd/coderdenttest"
 	"github.com/coder/coder/v2/enterprise/coderd/license"
+	"github.com/coder/coder/v2/enterprise/coderd/prebuilds"
+	"github.com/coder/coder/v2/provisioner/echo"
+	"github.com/coder/coder/v2/provisionersdk/proto"
 	"github.com/coder/coder/v2/pty/ptytest"
+	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/quartz"
 )
 
 func TestEnterpriseCreate(t *testing.T) {
@@ -188,6 +186,41 @@ func TestEnterpriseCreate(t *testing.T) {
 		require.NoError(t, err)
 
 		ws, err := member.WorkspaceByOwnerAndName(context.Background(), codersdk.Me, "my-workspace", codersdk.WorkspaceOptions{})
+		if assert.NoError(t, err, "expected workspace to be created") {
+			assert.Equal(t, ws.TemplateName, templateName)
+			assert.Equal(t, ws.OrganizationName, setup.second.Name, "workspace in second organization")
+		}
+	})
+
+	// Site-wide admins (Owners) can create workspaces in organizations they
+	// are not a member of by using the --org flag.
+	t.Run("OwnerCanCreateInNonMemberOrg", func(t *testing.T) {
+		t.Parallel()
+
+		const templateName = "ownertemplate"
+		setup := setupMultipleOrganizations(t, setupArgs{
+			secondTemplates: []string{templateName},
+		})
+
+		// Create a new Owner user who is NOT a member of the second org.
+		// The setup.owner created the second org and is auto-added as member,
+		// so we need a different Owner to test the RBAC-only path.
+		newOwner, _ := coderdtest.CreateAnotherUser(t, setup.owner, setup.firstResponse.OrganizationID, rbac.RoleOwner())
+
+		args := []string{
+			"create",
+			"owner-workspace",
+			"-y",
+			"--template", templateName,
+			"--org", setup.second.Name,
+		}
+		inv, root := clitest.New(t, args...)
+		clitest.SetupConfig(t, newOwner, root)
+		_ = ptytest.New(t).Attach(inv)
+		err := inv.Run()
+		require.NoError(t, err)
+
+		ws, err := newOwner.WorkspaceByOwnerAndName(context.Background(), codersdk.Me, "owner-workspace", codersdk.WorkspaceOptions{})
 		if assert.NoError(t, err, "expected workspace to be created") {
 			assert.Equal(t, ws.TemplateName, templateName)
 			assert.Equal(t, ws.OrganizationName, setup.second.Name, "workspace in second organization")
@@ -370,8 +403,11 @@ func TestEnterpriseCreateWithPreset(t *testing.T) {
 			prometheus.NewRegistry(),
 			notifications.NewNoopEnqueuer(),
 			newNoopUsageCheckerPtr(),
+			noop.NewTracerProvider(),
+			10,
+			nil,
 		)
-		var claimer agplprebuilds.Claimer = prebuilds.NewEnterpriseClaimer(db)
+		var claimer agplprebuilds.Claimer = prebuilds.NewEnterpriseClaimer()
 		api.AGPL.PrebuildsClaimer.Store(&claimer)
 
 		// Given: a template and a template version where the preset defines values for all required parameters,
@@ -481,8 +517,11 @@ func TestEnterpriseCreateWithPreset(t *testing.T) {
 			prometheus.NewRegistry(),
 			notifications.NewNoopEnqueuer(),
 			newNoopUsageCheckerPtr(),
+			noop.NewTracerProvider(),
+			10,
+			nil,
 		)
-		var claimer agplprebuilds.Claimer = prebuilds.NewEnterpriseClaimer(db)
+		var claimer agplprebuilds.Claimer = prebuilds.NewEnterpriseClaimer()
 		api.AGPL.PrebuildsClaimer.Store(&claimer)
 
 		// Given: a template and a template version where the preset defines values for all required parameters,
@@ -560,20 +599,12 @@ func TestEnterpriseCreateWithPreset(t *testing.T) {
 func prepareEchoResponses(parameters []*proto.RichParameter, presets ...*proto.Preset) *echo.Responses {
 	return &echo.Responses{
 		Parse: echo.ParseComplete,
-		ProvisionPlan: []*proto.Response{
+		ProvisionGraph: []*proto.Response{
 			{
-				Type: &proto.Response_Plan{
-					Plan: &proto.PlanComplete{
+				Type: &proto.Response_Graph{
+					Graph: &proto.GraphComplete{
 						Parameters: parameters,
 						Presets:    presets,
-					},
-				},
-			},
-		},
-		ProvisionApply: []*proto.Response{
-			{
-				Type: &proto.Response_Apply{
-					Apply: &proto.ApplyComplete{
 						Resources: []*proto.Resource{
 							{
 								Type: "compute",

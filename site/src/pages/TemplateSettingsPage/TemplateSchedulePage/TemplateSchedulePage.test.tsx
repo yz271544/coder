@@ -1,14 +1,14 @@
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { API } from "#/api/api";
 import {
 	MockEntitlementsWithScheduling,
 	MockTemplate,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	renderWithTemplateSettingsLayout,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { API } from "api/api";
+} from "#/testHelpers/renderHelpers";
 import {
 	getValidationSchema,
 	type TemplateScheduleFormValues,
@@ -75,27 +75,24 @@ const fillAndSubmitForm = async ({
 	}
 
 	if (failure_ttl_ms) {
-		const failureTtlField = screen.getByRole("checkbox", {
+		const failureTtlField = screen.getByRole("switch", {
 			name: /Failure Cleanup/i,
 		});
-		await user.type(failureTtlField, failure_ttl_ms.toString());
+		await user.click(failureTtlField);
 	}
 
 	if (time_til_dormant_ms) {
-		const inactivityTtlField = screen.getByRole("checkbox", {
+		const inactivityTtlField = screen.getByRole("switch", {
 			name: /Dormancy Threshold/i,
 		});
-		await user.type(inactivityTtlField, time_til_dormant_ms.toString());
+		await user.click(inactivityTtlField);
 	}
 
 	if (time_til_dormant_autodelete_ms) {
-		const dormancyAutoDeletionField = screen.getByRole("checkbox", {
+		const dormancyAutoDeletionField = screen.getByRole("switch", {
 			name: /Dormancy Auto-Deletion/i,
 		});
-		await user.type(
-			dormancyAutoDeletionField,
-			time_til_dormant_autodelete_ms.toString(),
-		);
+		await user.click(dormancyAutoDeletionField);
 	}
 
 	const submitButton = screen.getByRole("button", {
@@ -110,29 +107,27 @@ const fillAndSubmitForm = async ({
 	await user.click(confirmButton);
 };
 
-// One problem with the waitFor function is that if no additional config options
-// are passed in, it will hang indefinitely as it keeps retrying an assertion.
-// Even if Jest runs out of time and kills the test, you won't get a good error
-// message. Adding options to force test to give up before test timeout
+// By default, waitFor will lock until it succeeds or the test times out, and
+// won't give a very informative error if the test times out. Setting a timeout
+// slightly shorter than the test timeout helps give a more informative error
+// because Vitest will act as if something specific went wrong rather than
+// vaguely handwaving about something taking too long.
 function waitForWithCutoff(callback: () => void | Promise<void>) {
 	return waitFor(callback, {
-		// Defined to end 500ms before global cut-off time of 20s. Wanted to define
-		// this in terms of an exported constant from jest.config, but since Jest
-		// is CJS-based, that would've involved weird CJS-ESM interop issues
-		timeout: 19_500,
+		timeout: 4_500,
 	});
 }
 
 describe("TemplateSchedulePage", () => {
 	beforeEach(() => {
-		jest
-			.spyOn(API, "getEntitlements")
-			.mockResolvedValue(MockEntitlementsWithScheduling);
+		vi.spyOn(API, "getEntitlements").mockResolvedValue(
+			MockEntitlementsWithScheduling,
+		);
 	});
 
 	it("Calls the API when user fills in and submits a form", async () => {
 		await renderTemplateSchedulePage();
-		jest.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
+		vi.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
 			...MockTemplate,
 			...validFormValues,
 		});
@@ -141,12 +136,12 @@ describe("TemplateSchedulePage", () => {
 		await waitForWithCutoff(() =>
 			expect(API.updateTemplateMeta).toBeCalledTimes(1),
 		);
-	});
+	}, 15_000);
 
 	test("default is converted to and from hours", async () => {
 		await renderTemplateSchedulePage();
 
-		jest.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
+		vi.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
 			...MockTemplate,
 			...validFormValues,
 		});
@@ -169,7 +164,7 @@ describe("TemplateSchedulePage", () => {
 	test("failure, dormancy, and dormancy auto-deletion converted to and from days", async () => {
 		await renderTemplateSchedulePage();
 
-		jest.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
+		vi.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
 			...MockTemplate,
 			...validFormValues,
 		});
@@ -353,5 +348,65 @@ describe("TemplateSchedulePage", () => {
 		};
 		const validate = () => getValidationSchema().validateSync(values);
 		expect(validate).toThrowError();
+	});
+
+	it("disables activity bump field when default TTL is 0", async () => {
+		await renderTemplateSchedulePage();
+		const user = userEvent.setup();
+
+		const defaultTtlField = await screen.findByLabelText(
+			"Default autostop (hours)",
+		);
+		const activityBumpField = screen.getByLabelText("Activity bump (hours)");
+
+		// Activity bump should be enabled when default TTL is non-zero.
+		expect(activityBumpField).not.toBeDisabled();
+
+		// Set default TTL to 0.
+		await user.clear(defaultTtlField);
+		await user.type(defaultTtlField, "0");
+
+		// Activity bump should now be disabled.
+		expect(activityBumpField).toBeDisabled();
+	});
+
+	it("shows helper text on activity bump when default TTL is 0", async () => {
+		await renderTemplateSchedulePage();
+		const user = userEvent.setup();
+
+		const defaultTtlField = await screen.findByLabelText(
+			"Default autostop (hours)",
+		);
+
+		// Set default TTL to 0.
+		await user.clear(defaultTtlField);
+		await user.type(defaultTtlField, "0");
+
+		// Should show the explanatory helper text.
+		expect(
+			screen.getByText(
+				/activity bump only applies when a default TTL is configured/i,
+			),
+		).toBeInTheDocument();
+	});
+
+	it("re-enables activity bump field when default TTL is set back to non-zero", async () => {
+		await renderTemplateSchedulePage();
+		const user = userEvent.setup();
+
+		const defaultTtlField = await screen.findByLabelText(
+			"Default autostop (hours)",
+		);
+		const activityBumpField = screen.getByLabelText("Activity bump (hours)");
+
+		// Set default TTL to 0.
+		await user.clear(defaultTtlField);
+		await user.type(defaultTtlField, "0");
+		expect(activityBumpField).toBeDisabled();
+
+		// Set default TTL back to a non-zero value.
+		await user.clear(defaultTtlField);
+		await user.type(defaultTtlField, "8");
+		expect(activityBumpField).not.toBeDisabled();
 	});
 });

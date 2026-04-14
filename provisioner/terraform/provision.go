@@ -3,6 +3,7 @@ package terraform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -12,16 +13,16 @@ import (
 	"strings"
 	"time"
 
+	tfjson "github.com/hashicorp/terraform-json"
 	"github.com/spf13/afero"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"github.com/coder/terraform-provider-coder/v2/provider"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/provisionersdk"
 	"github.com/coder/coder/v2/provisionersdk/proto"
+	"github.com/coder/terraform-provider-coder/v2/provider"
 )
 
 const staleTerraformPluginRetention = 30 * 24 * time.Hour
@@ -67,55 +68,37 @@ func (s *server) setupContexts(parent context.Context, canceledOrComplete <-chan
 	return ctx, cancel, killCtx, kill
 }
 
-func (s *server) Plan(
-	sess *provisionersdk.Session, request *proto.PlanRequest, canceledOrComplete <-chan struct{},
-) *proto.PlanComplete {
+func (s *server) Init(
+	sess *provisionersdk.Session, request *provisionersdk.InitRequest, canceledOrComplete <-chan struct{},
+) *proto.InitComplete {
 	ctx, span := s.startTrace(sess.Context(), tracing.FuncName())
 	defer span.End()
 	ctx, cancel, killCtx, kill := s.setupContexts(ctx, canceledOrComplete)
 	defer cancel()
 	defer kill()
 
-	e := s.executor(sess.WorkDirectory, database.ProvisionerJobTimingStagePlan)
+	e := s.executor(sess.Files, database.ProvisionerJobTimingStageInit)
 	if err := e.checkMinVersion(ctx); err != nil {
-		return provisionersdk.PlanErrorf("%s", err.Error())
+		return provisionersdk.InitErrorf("%s", err.Error())
 	}
 	logTerraformEnvVars(sess)
 
-	// If we're destroying, exit early if there's no state. This is necessary to
-	// avoid any cases where a workspace is "locked out" of terraform due to
-	// e.g. bad template param values and cannot be deleted. This is just for
-	// contingency, in the future we will try harder to prevent workspaces being
-	// broken this hard.
-	if request.Metadata.GetWorkspaceTransition() == proto.WorkspaceTransition_DESTROY && len(sess.Config.State) == 0 {
-		sess.ProvisionLog(proto.LogLevel_INFO, "The terraform state does not exist, there is nothing to do")
-		return &proto.PlanComplete{}
-	}
-
-	statefilePath := getStateFilePath(sess.WorkDirectory)
-	if len(sess.Config.State) > 0 {
-		err := os.WriteFile(statefilePath, sess.Config.State, 0o600)
-		if err != nil {
-			return provisionersdk.PlanErrorf("write statefile %q: %s", statefilePath, err)
-		}
-	}
-
-	err := CleanStaleTerraformPlugins(sess.Context(), s.cachePath, afero.NewOsFs(), time.Now(), s.logger)
+	// TODO: These logs should probably be streamed back to the provisioner runner.
+	err := sess.Files.ExtractArchive(ctx, s.logger, afero.NewOsFs(), request.GetTemplateSourceArchive(), request.ModuleArchive)
 	if err != nil {
-		return provisionersdk.PlanErrorf("unable to clean stale Terraform plugins: %s", err)
+		return provisionersdk.InitErrorf("extract template archive: %s", err)
 	}
 
-	s.logger.Debug(ctx, "running initialization")
+	err = CleanStaleTerraformPlugins(sess.Context(), s.cachePath, afero.NewOsFs(), time.Now(), s.logger)
+	if err != nil {
+		return provisionersdk.InitErrorf("unable to clean stale Terraform plugins: %s", err)
+	}
 
-	// The JSON output of `terraform init` doesn't include discrete fields for capturing timings of each plugin,
-	// so we capture the whole init process.
-	initTimings := newTimingAggregator(database.ProvisionerJobTimingStageInit)
-	initTimings.ingest(createInitTimingsEvent(timingInitStart))
-
+	s.logger.Debug(ctx, "running terraform initialization")
+	endStage := e.timings.startStage(database.ProvisionerJobTimingStageInit)
 	err = e.init(ctx, killCtx, sess)
+	endStage(err)
 	if err != nil {
-		initTimings.ingest(createInitTimingsEvent(timingInitErrored))
-
 		s.logger.Debug(ctx, "init failed", slog.Error(err))
 
 		// Special handling for "text file busy" c.f. https://github.com/coder/coder/issues/14726
@@ -138,19 +121,82 @@ func (s *server) Plan(
 				slog.F("provider_coder_stacktrace", stacktrace),
 			)
 		}
-		return provisionersdk.PlanErrorf("initialize terraform: %s", err)
+		return provisionersdk.InitErrorf("initialize terraform: %s", err)
 	}
 
-	modules, err := getModules(sess.WorkDirectory)
+	modules, err := getModules(sess.Files)
 	if err != nil {
 		// We allow getModules to fail, as the result is used only
 		// for telemetry purposes now.
 		s.logger.Error(ctx, "failed to get modules from disk", slog.Error(err))
 	}
 
-	initTimings.ingest(createInitTimingsEvent(timingInitComplete))
+	var moduleFiles []byte
+	// Skipping modules archiving is useful if the caller does not need it, eg during
+	// a workspace build. This removes some added costs of sending the modules
+	// payload back to coderd if coderd is just going to ignore it.
+	if !request.OmitModuleFiles {
+		var skipped []string
+		moduleFiles, skipped, err = GetModulesArchive(os.DirFS(e.files.WorkDirectory()))
+		if err != nil {
+			// Making this a fatal error would block the template from functioning. This
+			// error means the template has some reduced functionality, which will be raised
+			// on the workspace create page. This is not ideal, but it is better to have
+			// limited functionality, then none.
+			e.logger.Error(ctx, "failed to archive modules: %v", slog.Error(err))
+		}
+
+		if len(skipped) > 0 {
+			// TODO: This information needs to be raised on the template page somehow.
+			// Essentially some of the modules were not archived because they were too large.
+			e.logger.Warn(ctx, "some (or all) terraform modules were not archived, template will have reduced function",
+				slog.F("skipped_modules", strings.Join(skipped, ", ")),
+			)
+		}
+	}
 
 	s.logger.Debug(ctx, "ran initialization")
+
+	return &proto.InitComplete{
+		Timings:         e.timings.aggregate(),
+		Modules:         modules,
+		ModuleFiles:     moduleFiles,
+		ModuleFilesHash: nil,
+	}
+}
+
+func (s *server) Plan(
+	sess *provisionersdk.Session, request *proto.PlanRequest, canceledOrComplete <-chan struct{},
+) *proto.PlanComplete {
+	ctx, span := s.startTrace(sess.Context(), tracing.FuncName())
+	defer span.End()
+	ctx, cancel, killCtx, kill := s.setupContexts(ctx, canceledOrComplete)
+	defer cancel()
+	defer kill()
+
+	e := s.executor(sess.Files, database.ProvisionerJobTimingStagePlan)
+	if err := e.checkMinVersion(ctx); err != nil {
+		return provisionersdk.PlanErrorf("%s", err.Error())
+	}
+	logTerraformEnvVars(sess)
+
+	// If we're destroying, exit early if there's no state. This is necessary to
+	// avoid any cases where a workspace is "locked out" of terraform due to
+	// e.g. bad template param values and cannot be deleted. This is just for
+	// contingency, in the future we will try harder to prevent workspaces being
+	// broken this hard.
+	if request.Metadata.GetWorkspaceTransition() == proto.WorkspaceTransition_DESTROY && len(request.GetState()) == 0 {
+		sess.ProvisionLog(proto.LogLevel_INFO, "The terraform state does not exist, there is nothing to do")
+		return &proto.PlanComplete{}
+	}
+
+	statefilePath := sess.Files.StateFilePath()
+	if len(request.GetState()) > 0 {
+		err := os.WriteFile(statefilePath, request.GetState(), 0o600)
+		if err != nil {
+			return provisionersdk.PlanErrorf("write statefile %q: %s", statefilePath, err)
+		}
+	}
 
 	env, err := provisionEnv(sess.Config, request.Metadata, request.PreviousParameterValues, request.RichParameterValues, request.ExternalAuthProviders)
 	if err != nil {
@@ -163,16 +209,76 @@ func (s *server) Plan(
 		return provisionersdk.PlanErrorf("plan vars: %s", err)
 	}
 
+	endStage := e.timings.startStage(database.ProvisionerJobTimingStagePlan)
 	resp, err := e.plan(ctx, killCtx, env, vars, sess, request)
+	endStage(err)
 	if err != nil {
 		return provisionersdk.PlanErrorf("%s", err.Error())
 	}
 
-	// Prepend init timings since they occur prior to plan timings.
-	// Order is irrelevant; this is merely indicative.
-	resp.Timings = append(initTimings.aggregate(), resp.Timings...)
-	resp.Modules = modules
+	resp.Timings = e.timings.aggregate()
 	return resp
+}
+
+func (s *server) Graph(
+	sess *provisionersdk.Session, request *proto.GraphRequest, canceledOrComplete <-chan struct{},
+) *proto.GraphComplete {
+	ctx, span := s.startTrace(sess.Context(), tracing.FuncName())
+	defer span.End()
+	ctx, cancel, killCtx, kill := s.setupContexts(ctx, canceledOrComplete)
+	defer cancel()
+	defer kill()
+
+	e := s.executor(sess.Files, database.ProvisionerJobTimingStageGraph)
+	if err := e.checkMinVersion(ctx); err != nil {
+		return provisionersdk.GraphError("%s", err.Error())
+	}
+	logTerraformEnvVars(sess)
+
+	modules := []*tfjson.StateModule{}
+	switch request.Source {
+	case proto.GraphSource_SOURCE_PLAN:
+		plan, err := e.parsePlan(ctx, killCtx, e.files.PlanFilePath())
+		if err != nil {
+			return provisionersdk.GraphError("parse plan for graph: %s", err)
+		}
+
+		modules = planModules(plan)
+	case proto.GraphSource_SOURCE_STATE:
+		tfState, err := e.state(ctx, killCtx)
+		if err != nil {
+			return provisionersdk.GraphError("load tfstate for graph: %s", err)
+		}
+		if tfState.Values != nil {
+			modules = []*tfjson.StateModule{tfState.Values.RootModule}
+		}
+	default:
+		return provisionersdk.GraphError("unknown graph source: %q", request.Source.String())
+	}
+
+	endStage := e.timings.startStage(database.ProvisionerJobTimingStageGraph)
+	rawGraph, err := e.graph(ctx, killCtx)
+	endStage(err)
+	if err != nil {
+		return provisionersdk.GraphError("generate graph: %s", err)
+	}
+
+	state, err := ConvertState(ctx, modules, rawGraph, e.server.logger)
+	if err != nil {
+		return provisionersdk.GraphError("convert state for graph: %s", err)
+	}
+
+	return &proto.GraphComplete{
+		Error:                 "",
+		Timings:               e.timings.aggregate(),
+		Resources:             state.Resources,
+		Parameters:            state.Parameters,
+		ExternalAuthProviders: state.ExternalAuthProviders,
+		Presets:               state.Presets,
+		HasAiTasks:            state.HasAITasks,
+		AiTasks:               state.AITasks,
+		HasExternalAgents:     state.HasExternalAgents,
+	}
 }
 
 func (s *server) Apply(
@@ -184,42 +290,49 @@ func (s *server) Apply(
 	defer cancel()
 	defer kill()
 
-	e := s.executor(sess.WorkDirectory, database.ProvisionerJobTimingStageApply)
+	e := s.executor(sess.Files, database.ProvisionerJobTimingStageApply)
 	if err := e.checkMinVersion(ctx); err != nil {
 		return provisionersdk.ApplyErrorf("%s", err.Error())
 	}
 	logTerraformEnvVars(sess)
 
-	// Exit early if there is no plan file. This is necessary to
+	// Earlier in the session, Plan() will have written the state file and the plan file.
+	statefilePath := sess.Files.StateFilePath()
+
+	// Exit early if there is no state file. This is necessary to
 	// avoid any cases where a workspace is "locked out" of terraform due to
 	// e.g. bad template param values and cannot be deleted. This is just for
 	// contingency, in the future we will try harder to prevent workspaces being
 	// broken this hard.
-	if request.Metadata.GetWorkspaceTransition() == proto.WorkspaceTransition_DESTROY && len(sess.Config.State) == 0 {
-		sess.ProvisionLog(proto.LogLevel_INFO, "The terraform plan does not exist, there is nothing to do")
-		return &proto.ApplyComplete{}
+	if request.Metadata.GetWorkspaceTransition() == proto.WorkspaceTransition_DESTROY {
+		if _, err := os.Stat(statefilePath); errors.Is(err, os.ErrNotExist) {
+			sess.ProvisionLog(proto.LogLevel_INFO, "The terraform state does not exist, there is nothing to do")
+			return &proto.ApplyComplete{}
+		}
 	}
 
-	// Earlier in the session, Plan() will have written the state file and the plan file.
-	statefilePath := getStateFilePath(sess.WorkDirectory)
 	env, err := provisionEnv(sess.Config, request.Metadata, nil, nil, nil)
 	if err != nil {
 		return provisionersdk.ApplyErrorf("provision env: %s", err)
 	}
 	env = otelEnvInject(ctx, env)
+	endStage := e.timings.startStage(database.ProvisionerJobTimingStageApply)
 	resp, err := e.apply(
 		ctx, killCtx, env, sess,
 	)
+	endStage(err)
 	if err != nil {
 		errorMessage := err.Error()
 		// Terraform can fail and apply and still need to store it's state.
 		// In this case, we return Complete with an explicit error message.
 		stateData, _ := os.ReadFile(statefilePath)
 		return &proto.ApplyComplete{
-			State: stateData,
-			Error: errorMessage,
+			State:   stateData,
+			Error:   errorMessage,
+			Timings: e.timings.aggregate(),
 		}
 	}
+	resp.Timings = e.timings.aggregate()
 	return resp
 }
 
@@ -268,6 +381,7 @@ func provisionEnv(
 		"CODER_WORKSPACE_BUILD_ID="+metadata.GetWorkspaceBuildId(),
 		"CODER_TASK_ID="+metadata.GetTaskId(),
 		"CODER_TASK_PROMPT="+metadata.GetTaskPrompt(),
+		"AWS_SDK_UA_APP_ID=APN_1.1/pc_cdfmjwn8i6u8l9fwz8h82e4w3$",
 	)
 	if metadata.GetPrebuiltWorkspaceBuildStage().IsPrebuild() {
 		env = append(env, provider.IsPrebuildEnvironmentVariable()+"=true")
@@ -348,7 +462,7 @@ func logTerraformEnvVars(sink logSink) {
 // shipped in v1.0.4.  It will return the stacktraces of the provider, which will hopefully allow us
 // to figure out why it hasn't exited.
 func tryGettingCoderProviderStacktrace(sess *provisionersdk.Session) string {
-	path := filepath.Clean(filepath.Join(sess.WorkDirectory, "../.coder/pprof"))
+	path := filepath.Clean(filepath.Join(sess.Files.WorkDirectory(), "../.coder/pprof"))
 	sess.Logger.Info(sess.Context(), "attempting to get stack traces", slog.F("path", path))
 	c := http.Client{
 		Transport: &http.Transport{

@@ -1,13 +1,13 @@
-import { API } from "api/api";
-import { getErrorMessage } from "api/errors";
-import { entitlements, refreshEntitlements } from "api/queries/entitlements";
-import { insightsUserStatusCounts } from "api/queries/insights";
-import { displayError, displaySuccess } from "components/GlobalSnackbar/utils";
-import { useEmbeddedMetadata } from "hooks/useEmbeddedMetadata";
 import { type FC, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "react-query";
 import { useSearchParams } from "react-router";
-import { pageTitle } from "utils/page";
+import { toast } from "sonner";
+import { API } from "#/api/api";
+import { getErrorDetail, getErrorMessage } from "#/api/errors";
+import { entitlements, refreshEntitlements } from "#/api/queries/entitlements";
+import { insightsUserStatusCounts } from "#/api/queries/insights";
+import { useEmbeddedMetadata } from "#/hooks/useEmbeddedMetadata";
+import { pageTitle } from "#/utils/page";
 import LicensesSettingsPageView from "./LicensesSettingsPageView";
 
 const LicensesSettingsPage: FC = () => {
@@ -27,11 +27,14 @@ const LicensesSettingsPage: FC = () => {
 
 	useEffect(() => {
 		if (entitlementsQuery.error) {
-			displayError(
+			toast.error(
 				getErrorMessage(
 					entitlementsQuery.error,
-					"Failed to fetch entitlements",
+					"Failed to fetch entitlements.",
 				),
+				{
+					description: getErrorDetail(entitlementsQuery.error),
+				},
 			);
 		}
 	}, [entitlementsQuery.error]);
@@ -40,11 +43,13 @@ const LicensesSettingsPage: FC = () => {
 		useMutation({
 			mutationFn: API.removeLicense,
 			onSuccess: () => {
-				displaySuccess("Successfully removed license");
+				toast.success("Successfully removed license.");
 				void queryClient.invalidateQueries({ queryKey: ["licenses"] });
 			},
-			onError: () => {
-				displayError("Failed to remove license");
+			onError: (error) => {
+				toast.error("Failed to remove license.", {
+					description: getErrorDetail(error),
+				});
 			},
 		});
 
@@ -77,8 +82,11 @@ const LicensesSettingsPage: FC = () => {
 				showConfetti={confettiOn}
 				isLoading={isLoading}
 				isRefreshing={refreshEntitlementsMutation.isPending}
-				userLimitActual={entitlementsQuery.data?.features.user_limit.actual}
-				userLimitLimit={entitlementsQuery.data?.features.user_limit.limit}
+				hasUserLimitEntitlementData={
+					entitlementsQuery.data?.features.user_limit !== undefined
+				}
+				userLimitActual={entitlementsQuery.data?.features.user_limit?.actual}
+				userLimitLimit={entitlementsQuery.data?.features.user_limit?.limit}
 				licenses={licenses}
 				isRemovingLicense={isRemovingLicense}
 				removeLicense={(licenseId: number) => removeLicenseApi(licenseId)}
@@ -86,12 +94,17 @@ const LicensesSettingsPage: FC = () => {
 				managedAgentFeature={
 					entitlementsQuery.data?.features.managed_agent_limit
 				}
+				aiGovernanceUserFeature={
+					entitlementsQuery.data?.features.ai_governance_user_limit
+				}
 				refreshEntitlements={async () => {
 					try {
 						await refreshEntitlementsMutation.mutateAsync();
-						displaySuccess("Successfully removed license");
+						toast.success("Successfully removed license.");
 					} catch (error) {
-						displayError(getErrorMessage(error, "Failed to remove license"));
+						toast.error(getErrorMessage(error, "Failed to remove license."), {
+							description: getErrorDetail(error),
+						});
 					}
 				}}
 			/>

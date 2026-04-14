@@ -66,6 +66,9 @@ export default defineConfig({
 	},
 	webServer: {
 		url: `http://localhost:${coderPort}/api/v2/deployment/config`,
+		// The default timeout is 60s, but `go run` compilation with the
+		// embed tag can take longer on CI.
+		timeout: 120_000,
 		command: [
 			`go run -tags embed ${path.join(__dirname, "../../enterprise/cmd/coder")}`,
 			"server",
@@ -81,9 +84,12 @@ export default defineConfig({
 			"--provisioner-daemons=10",
 			"--web-terminal-renderer=dom",
 			"--pprof-enable",
+			"--log-filter=.*",
+			`--log-human=${path.join(__dirname, "test-results/debug.log")}`,
 		]
 			.filter(Boolean)
 			.join(" "),
+		stdout: "pipe",
 		env: {
 			...process.env,
 			// Otherwise, the runner fails on Mac with: could not determine kind of name for C.uuid_string_t

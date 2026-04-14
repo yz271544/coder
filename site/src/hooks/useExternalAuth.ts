@@ -1,6 +1,6 @@
-import { templateVersionExternalAuth } from "api/queries/templates";
 import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "react-query";
+import { templateVersionExternalAuth } from "#/api/queries/templates";
 
 export type ExternalAuthPollingState = "idle" | "polling" | "abandoned";
 
@@ -18,7 +18,7 @@ export const useExternalAuth = (versionId: string | undefined) => {
 		error,
 	} = useQuery({
 		...templateVersionExternalAuth(versionId ?? ""),
-		enabled: !!versionId,
+		enabled: Boolean(versionId),
 		refetchInterval: externalAuthPollingState === "polling" ? 1000 : false,
 	});
 

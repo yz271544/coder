@@ -5,14 +5,13 @@ import (
 	"context"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/agent"
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/httpapi"
@@ -60,27 +59,11 @@ func Test_Runner(t *testing.T) {
 		authToken := uuid.NewString()
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			ProvisionPlan: []*proto.Response{
+			ProvisionGraph: []*proto.Response{
 				{
-					Type: &proto.Response_Plan{
-						Plan: &proto.PlanComplete{
+					Type: &proto.Response_Graph{
+						Graph: &proto.GraphComplete{
 							Parameters: testParameters,
-						},
-					},
-				},
-			},
-			ProvisionApply: []*proto.Response{
-				{
-					Type: &proto.Response_Log{
-						Log: &proto.Log{
-							Level:  proto.LogLevel_INFO,
-							Output: "hello from logs",
-						},
-					},
-				},
-				{
-					Type: &proto.Response_Apply{
-						Apply: &proto.ApplyComplete{
 							Resources: []*proto.Resource{
 								{
 									Name: "example",
@@ -98,6 +81,21 @@ func Test_Runner(t *testing.T) {
 								},
 							},
 						},
+					},
+				},
+			},
+			ProvisionApply: []*proto.Response{
+				{
+					Type: &proto.Response_Log{
+						Log: &proto.Log{
+							Level:  proto.LogLevel_INFO,
+							Output: "hello from logs",
+						},
+					},
+				},
+				{
+					Type: &proto.Response_Apply{
+						Apply: &proto.ApplyComplete{},
 					},
 				},
 			},
@@ -209,10 +207,10 @@ func Test_Runner(t *testing.T) {
 
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			ProvisionPlan: []*proto.Response{
+			ProvisionGraph: []*proto.Response{
 				{
-					Type: &proto.Response_Plan{
-						Plan: &proto.PlanComplete{
+					Type: &proto.Response_Graph{
+						Graph: &proto.GraphComplete{
 							Parameters: testParameters,
 						},
 					},
@@ -341,27 +339,11 @@ func Test_Runner(t *testing.T) {
 		authToken := uuid.NewString()
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			ProvisionPlan: []*proto.Response{
+			ProvisionGraph: []*proto.Response{
 				{
-					Type: &proto.Response_Plan{
-						Plan: &proto.PlanComplete{
+					Type: &proto.Response_Graph{
+						Graph: &proto.GraphComplete{
 							Parameters: testParameters,
-						},
-					},
-				},
-			},
-			ProvisionApply: []*proto.Response{
-				{
-					Type: &proto.Response_Log{
-						Log: &proto.Log{
-							Level:  proto.LogLevel_INFO,
-							Output: "hello from logs",
-						},
-					},
-				},
-				{
-					Type: &proto.Response_Apply{
-						Apply: &proto.ApplyComplete{
 							Resources: []*proto.Resource{
 								{
 									Name: "example",
@@ -379,6 +361,21 @@ func Test_Runner(t *testing.T) {
 								},
 							},
 						},
+					},
+				},
+			},
+			ProvisionApply: []*proto.Response{
+				{
+					Type: &proto.Response_Log{
+						Log: &proto.Log{
+							Level:  proto.LogLevel_INFO,
+							Output: "hello from logs",
+						},
+					},
+				},
+				{
+					Type: &proto.Response_Apply{
+						Apply: &proto.ApplyComplete{},
 					},
 				},
 			},
@@ -484,10 +481,10 @@ func Test_Runner(t *testing.T) {
 
 		version := coderdtest.CreateTemplateVersion(t, client, user.OrganizationID, &echo.Responses{
 			Parse: echo.ParseComplete,
-			ProvisionPlan: []*proto.Response{
+			ProvisionGraph: []*proto.Response{
 				{
-					Type: &proto.Response_Plan{
-						Plan: &proto.PlanComplete{
+					Type: &proto.Response_Graph{
+						Graph: &proto.GraphComplete{
 							Parameters: testParameters,
 						},
 					},
@@ -543,19 +540,18 @@ func goEventuallyStartFakeAgent(ctx context.Context, t *testing.T, client *coder
 	go func() {
 		defer close(ch)
 		var workspace codersdk.Workspace
-		for {
+		if !assert.Eventually(t, func() bool {
 			res, err := client.Workspaces(ctx, codersdk.WorkspaceFilter{})
-			if !assert.NoError(t, err) {
-				return
+			if err != nil {
+				return false
 			}
-			workspaces := res.Workspaces
-
-			if len(workspaces) == 1 {
-				workspace = workspaces[0]
-				break
+			if len(res.Workspaces) == 1 {
+				workspace = res.Workspaces[0]
+				return true
 			}
-
-			time.Sleep(testutil.IntervalMedium)
+			return false
+		}, testutil.WaitShort, testutil.IntervalMedium) {
+			return
 		}
 
 		coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, workspace.LatestBuild.ID)

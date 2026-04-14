@@ -6,26 +6,22 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
+	"golang.org/x/xerrors"
 	"tailscale.com/tailcfg"
 	"tailscale.com/wgengine/capture"
 
-	"github.com/google/uuid"
-	"golang.org/x/xerrors"
-
-	"cdr.dev/slog"
-
-	"github.com/coder/quartz"
-	"github.com/coder/websocket"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/tailnet"
 	"github.com/coder/coder/v2/tailnet/proto"
+	"github.com/coder/quartz"
+	"github.com/coder/websocket"
 )
 
 var ErrSkipClose = xerrors.New("skip tailnet close")
@@ -366,26 +362,23 @@ func (c *Client) AgentReconnectingPTY(ctx context.Context, opts WorkspaceAgentRe
 	}
 	serverURL.RawQuery = q.Encode()
 
-	// If we're not using a signed token, we need to set the session token as a
-	// cookie.
-	httpClient := c.client.HTTPClient
+	// Shallow-clone the HTTP client so we never inherit a caller-provided
+	// cookie jar. Non-browser websocket auth uses the Coder-Session-Token
+	// header or a signed-token query param — never cookies. A stale jar
+	// cookie would take precedence on the server (cookies are checked
+	// before headers) and cause spurious 401s.
+	wsHTTPClient := *c.client.HTTPClient
+	wsHTTPClient.Jar = nil
+
+	headers := http.Header{}
+	// If we're not using a signed token, set the session token header.
 	if opts.SignedToken == "" {
-		jar, err := cookiejar.New(nil)
-		if err != nil {
-			return nil, xerrors.Errorf("create cookie jar: %w", err)
-		}
-		jar.SetCookies(serverURL, []*http.Cookie{{
-			Name:  codersdk.SessionTokenCookie,
-			Value: c.client.SessionToken(),
-		}})
-		httpClient = &http.Client{
-			Jar:       jar,
-			Transport: c.client.HTTPClient.Transport,
-		}
+		headers.Set(codersdk.SessionTokenHeader, c.client.SessionToken())
 	}
 	//nolint:bodyclose
 	conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{
-		HTTPClient: httpClient,
+		HTTPClient: &wsHTTPClient,
+		HTTPHeader: headers,
 	})
 	if err != nil {
 		if res == nil {

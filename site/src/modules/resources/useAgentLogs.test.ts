@@ -1,14 +1,15 @@
-import { MockWorkspaceAgent } from "testHelpers/entities";
+import { renderHook, waitFor } from "@testing-library/react";
+import { act } from "react";
+import { toast } from "sonner";
+import type { MockInstance } from "vitest";
+import * as apiModule from "#/api/api";
+import type { WorkspaceAgentLog } from "#/api/typesGenerated";
+import { MockWorkspaceAgent } from "#/testHelpers/entities";
 import {
 	createMockWebSocket,
 	type MockWebSocketServer,
-} from "testHelpers/websockets";
-import { renderHook, waitFor } from "@testing-library/react";
-import * as apiModule from "api/api";
-import type { WorkspaceAgentLog } from "api/typesGenerated";
-import * as snackbarUtils from "components/GlobalSnackbar/utils";
-import { act } from "react";
-import { OneWayWebSocket } from "utils/OneWayWebSocket";
+} from "#/testHelpers/websockets";
+import { OneWayWebSocket } from "#/utils/OneWayWebSocket";
 import { useAgentLogs } from "./useAgentLogs";
 
 const millisecondsInOneMinute = 60_000;
@@ -45,7 +46,7 @@ type MountHookOptions = Readonly<{
 type MountHookResult = Readonly<{
 	serverResult: ServerResult;
 	rerender: (props: { agentId: string; enabled: boolean }) => void;
-	displayError: jest.SpyInstance<void, [s1: string, s2?: string], unknown>;
+	toastError: MockInstance;
 
 	// Note: the `current` property is only "halfway" readonly; the value is
 	// readonly, but the key is still mutable
@@ -56,9 +57,8 @@ function mountHook(options: MountHookOptions): MountHookResult {
 	const { initialAgentId, enabled = true } = options;
 	const serverResult: ServerResult = { current: undefined };
 
-	jest
-		.spyOn(apiModule, "watchWorkspaceAgentLogs")
-		.mockImplementation((agentId, params) => {
+	vi.spyOn(apiModule, "watchWorkspaceAgentLogs").mockImplementation(
+		(agentId, params) => {
 			return new OneWayWebSocket({
 				apiRoute: `/api/v2/workspaceagents/${agentId}/logs`,
 				searchParams: new URLSearchParams({
@@ -71,17 +71,18 @@ function mountHook(options: MountHookOptions): MountHookResult {
 					return mockSocket;
 				},
 			});
-		});
+		},
+	);
 
-	void jest.spyOn(console, "error").mockImplementation(() => {});
-	const displayError = jest.spyOn(snackbarUtils, "displayError");
+	void vi.spyOn(console, "error").mockImplementation(() => {});
+	const toastError = vi.spyOn(toast, "error");
 
 	const { result: hookResult, rerender } = renderHook(
 		(props) => useAgentLogs(props),
 		{ initialProps: { enabled, agentId: initialAgentId } },
 	);
 
-	return { rerender, serverResult, hookResult, displayError };
+	return { rerender, serverResult, hookResult, toastError };
 }
 
 describe("useAgentLogs", () => {
@@ -144,7 +145,7 @@ describe("useAgentLogs", () => {
 	});
 
 	it("Calls error callback when error is received (but only while hook is enabled)", async () => {
-		const { serverResult, rerender, displayError } = mountHook({
+		const { serverResult, rerender, toastError } = mountHook({
 			initialAgentId: MockWorkspaceAgent.id,
 			// Start off disabled so that we can check that the callback is
 			// never called when there is no connection
@@ -153,11 +154,11 @@ describe("useAgentLogs", () => {
 
 		const errorEvent = new Event("error");
 		await act(async () => serverResult.current?.publishError(errorEvent));
-		expect(displayError).not.toHaveBeenCalled();
+		expect(toastError).not.toHaveBeenCalled();
 
 		rerender({ agentId: MockWorkspaceAgent.id, enabled: true });
 		await act(async () => serverResult.current?.publishError(errorEvent));
-		expect(displayError).toHaveBeenCalledTimes(1);
+		expect(toastError).toHaveBeenCalledTimes(1);
 	});
 
 	// This is a protection to avoid duplicate logs when the hook goes back to

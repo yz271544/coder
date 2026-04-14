@@ -9,8 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sqlc-dev/pqtype"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
@@ -51,7 +50,7 @@ func ListApps(db database.Store, accessURL *url.URL) http.HandlerFunc {
 			return
 		}
 
-		var sdkApps []codersdk.OAuth2ProviderApp
+		sdkApps := make([]codersdk.OAuth2ProviderApp, 0, len(userApps))
 		for _, app := range userApps {
 			sdkApps = append(sdkApps, db2sdk.OAuth2ProviderApp(accessURL, app.OAuth2ProviderApp))
 		}
@@ -110,7 +109,7 @@ func CreateApp(db database.Store, accessURL *url.URL, auditor *audit.Auditor, lo
 			Jwks:                    pqtype.NullRawMessage{},
 			SoftwareID:              sql.NullString{},
 			SoftwareVersion:         sql.NullString{},
-			RegistrationAccessToken: sql.NullString{},
+			RegistrationAccessToken: nil,
 			RegistrationClientUri:   sql.NullString{},
 		})
 		if err != nil {

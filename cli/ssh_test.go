@@ -155,7 +155,7 @@ func TestSSH(t *testing.T) {
 		version := coderdtest.CreateTemplateVersion(t, client, owner.OrganizationID, &echo.Responses{
 			Parse:          echo.ParseComplete,
 			ProvisionPlan:  echo.PlanComplete,
-			ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+			ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, owner.OrganizationID, version.ID)
@@ -180,15 +180,11 @@ func TestSSH(t *testing.T) {
 
 		// Delay until workspace is starting, otherwise the agent may be
 		// booted due to outdated build.
-		var err error
-		for {
+		require.Eventually(t, func() bool {
+			var err error
 			workspace, err = client.Workspace(ctx, workspace.ID)
-			require.NoError(t, err)
-			if workspace.LatestBuild.Transition == codersdk.WorkspaceTransitionStart {
-				break
-			}
-			time.Sleep(testutil.IntervalFast)
-		}
+			return err == nil && workspace.LatestBuild.Transition == codersdk.WorkspaceTransitionStart
+		}, testutil.WaitShort, testutil.IntervalFast)
 
 		// When the agent connects, the workspace was started, and we should
 		// have access to the shell.
@@ -244,7 +240,7 @@ func TestSSH(t *testing.T) {
 		version := coderdtest.CreateTemplateVersion(t, client, owner.OrganizationID, &echo.Responses{
 			Parse:          echo.ParseComplete,
 			ProvisionPlan:  echo.PlanComplete,
-			ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+			ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, owner.OrganizationID, version.ID)
@@ -305,7 +301,7 @@ func TestSSH(t *testing.T) {
 		echoResponses := &echo.Responses{
 			Parse:          echo.ParseComplete,
 			ProvisionPlan:  echo.PlanComplete,
-			ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+			ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 		}
 
 		version := coderdtest.CreateTemplateVersion(t, ownerClient, owner.OrganizationID, echoResponses)
@@ -326,7 +322,7 @@ func TestSSH(t *testing.T) {
 		echoResponses2 := &echo.Responses{
 			Parse:          echo.ParseComplete,
 			ProvisionPlan:  echo.PlanComplete,
-			ProvisionApply: echo.ProvisionApplyWithAgent(authToken2),
+			ProvisionGraph: echo.ProvisionGraphWithAgent(authToken2),
 		}
 		version = coderdtest.UpdateTemplateVersion(t, ownerClient, owner.OrganizationID, echoResponses2, template.ID)
 		coderdtest.AwaitTemplateVersionJobCompleted(t, ownerClient, version.ID)
@@ -655,7 +651,7 @@ func TestSSH(t *testing.T) {
 		version := coderdtest.CreateTemplateVersion(t, client, owner.OrganizationID, &echo.Responses{
 			Parse:          echo.ParseComplete,
 			ProvisionPlan:  echo.PlanComplete,
-			ProvisionApply: echo.ProvisionApplyWithAgent(authToken),
+			ProvisionGraph: echo.ProvisionGraphWithAgent(authToken),
 		})
 		coderdtest.AwaitTemplateVersionJobCompleted(t, client, version.ID)
 		template := coderdtest.CreateTemplate(t, client, owner.OrganizationID, version.ID)
@@ -763,15 +759,11 @@ func TestSSH(t *testing.T) {
 
 		// Delay until workspace is starting, otherwise the agent may be
 		// booted due to outdated build.
-		var err error
-		for {
+		require.Eventually(t, func() bool {
+			var err error
 			workspace, err = client.Workspace(ctx, workspace.ID)
-			require.NoError(t, err)
-			if workspace.LatestBuild.Transition == codersdk.WorkspaceTransitionStart {
-				break
-			}
-			time.Sleep(testutil.IntervalFast)
-		}
+			return err == nil && workspace.LatestBuild.Transition == codersdk.WorkspaceTransitionStart
+		}, testutil.WaitShort, testutil.IntervalFast)
 
 		// When the agent connects, the workspace was started, and we should
 		// have access to the shell.
@@ -851,7 +843,7 @@ func TestSSH(t *testing.T) {
 
 		sshClient := ssh.NewClient(conn, channels, requests)
 
-		tmpdir := tempDirUnixSocket(t)
+		tmpdir := testutil.TempDirUnixSocket(t)
 
 		remoteSock := path.Join(tmpdir, "remote.sock")
 		_, err = sshClient.ListenUnix(remoteSock)
@@ -937,7 +929,7 @@ func TestSSH(t *testing.T) {
 			<-ctx.Done()
 		})
 
-		tmpdir := tempDirUnixSocket(t)
+		tmpdir := testutil.TempDirUnixSocket(t)
 		localSock := filepath.Join(tmpdir, "local.sock")
 		remoteSock := path.Join(tmpdir, "remote.sock")
 		for i := 0; i < 2; i++ {
@@ -1143,7 +1135,7 @@ func TestSSH(t *testing.T) {
 		})
 
 		// Start up ssh agent listening on unix socket.
-		tmpdir := tempDirUnixSocket(t)
+		tmpdir := testutil.TempDirUnixSocket(t)
 		agentSock := filepath.Join(tmpdir, "agent.sock")
 		l, err := net.Listen("unix", agentSock)
 		require.NoError(t, err)
@@ -1318,7 +1310,7 @@ func TestSSH(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
 		defer cancel()
 
-		tmpdir := tempDirUnixSocket(t)
+		tmpdir := testutil.TempDirUnixSocket(t)
 		localSock := filepath.Join(tmpdir, "local.sock")
 		remoteSock := filepath.Join(tmpdir, "remote.sock")
 
@@ -1408,7 +1400,7 @@ func TestSSH(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong*2)
 		defer cancel()
 
-		tmpdir := tempDirUnixSocket(t)
+		tmpdir := testutil.TempDirUnixSocket(t)
 
 		localSock := filepath.Join(tmpdir, "local.sock")
 		l, err := net.Listen("unix", localSock)
@@ -1521,7 +1513,7 @@ func TestSSH(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 		defer cancel()
 
-		tmpdir := tempDirUnixSocket(t)
+		tmpdir := testutil.TempDirUnixSocket(t)
 
 		type testSocket struct {
 			local  string
@@ -1904,7 +1896,7 @@ p7KeSZdlk47pMBGOfnvEmoQ=
 	}
 
 	// Setup GPG home directory on the "client".
-	gnupgHomeClient := tempDirUnixSocket(t)
+	gnupgHomeClient := testutil.TempDirUnixSocket(t)
 	t.Setenv("GNUPGHOME", gnupgHomeClient)
 
 	// Get the agent extra socket path.
@@ -1960,7 +1952,7 @@ Expire-Date: 0
 	}()
 
 	// Get the agent socket path in the "workspace".
-	gnupgHomeWorkspace := tempDirUnixSocket(t)
+	gnupgHomeWorkspace := testutil.TempDirUnixSocket(t)
 
 	stdout = bytes.NewBuffer(nil)
 	stderr = bytes.NewBuffer(nil)
@@ -2052,7 +2044,6 @@ func TestSSH_Container(t *testing.T) {
 		t.Parallel()
 
 		client, workspace, agentToken := setupWorkspaceForAgent(t)
-		ctx := testutil.Context(t, testutil.WaitLong)
 		pool, err := dockertest.NewPool("")
 		require.NoError(t, err, "Could not connect to docker")
 		ct, err := pool.RunWithOptions(&dockertest.RunOptions{
@@ -2087,14 +2078,15 @@ func TestSSH_Container(t *testing.T) {
 		clitest.SetupConfig(t, client, root)
 		ptty := ptytest.New(t).Attach(inv)
 
+		ctx := testutil.Context(t, testutil.WaitLong)
 		cmdDone := tGo(t, func() {
 			err := inv.WithContext(ctx).Run()
 			assert.NoError(t, err)
 		})
 
-		ptty.ExpectMatch(" #")
+		ptty.ExpectMatchContext(ctx, " #")
 		ptty.WriteLine("hostname")
-		ptty.ExpectMatch(ct.Container.Config.Hostname)
+		ptty.ExpectMatchContext(ctx, ct.Container.Config.Hostname)
 		ptty.WriteLine("exit")
 		<-cmdDone
 	})
@@ -2425,25 +2417,98 @@ func tGo(t *testing.T, fn func()) (done <-chan struct{}) {
 	return doneC
 }
 
-// tempDirUnixSocket returns a temporary directory that can safely hold unix
-// sockets (probably).
-//
-// During tests on darwin we hit the max path length limit for unix sockets
-// pretty easily in the default location, so this function uses /tmp instead to
-// get shorter paths.
-func tempDirUnixSocket(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "darwin" {
-		testName := strings.ReplaceAll(t.Name(), "/", "_")
-		dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("coder-test-%s-", testName))
-		require.NoError(t, err, "create temp dir for gpg test")
+func TestSSH_Completion(t *testing.T) {
+	t.Parallel()
 
-		t.Cleanup(func() {
-			err := os.RemoveAll(dir)
-			assert.NoError(t, err, "remove temp dir", dir)
+	t.Run("SingleAgent", func(t *testing.T) {
+		t.Parallel()
+
+		client, workspace, agentToken := setupWorkspaceForAgent(t)
+		_ = agenttest.New(t, client.URL, agentToken)
+		coderdtest.AwaitWorkspaceAgents(t, client, workspace.ID)
+
+		var stdout bytes.Buffer
+		inv, root := clitest.New(t, "ssh", "")
+		inv.Stdout = &stdout
+		inv.Environ.Set("COMPLETION_MODE", "1")
+		clitest.SetupConfig(t, client, root)
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+		defer cancel()
+
+		err := inv.WithContext(ctx).Run()
+		require.NoError(t, err)
+
+		// For single-agent workspaces, the only completion should be the
+		// bare workspace name.
+		output := stdout.String()
+		t.Logf("Completion output: %q", output)
+		require.Contains(t, output, workspace.Name)
+	})
+
+	t.Run("MultiAgent", func(t *testing.T) {
+		t.Parallel()
+
+		client, store := coderdtest.NewWithDatabase(t, nil)
+		first := coderdtest.CreateFirstUser(t, client)
+		userClient, user := coderdtest.CreateAnotherUserMutators(t, client, first.OrganizationID, nil, func(r *codersdk.CreateUserRequestWithOrgs) {
+			r.Username = "multiuser"
 		})
-		return dir
-	}
 
-	return t.TempDir()
+		r := dbfake.WorkspaceBuild(t, store, database.WorkspaceTable{
+			Name:           "multiworkspace",
+			OrganizationID: first.OrganizationID,
+			OwnerID:        user.ID,
+		}).WithAgent(func(agents []*proto.Agent) []*proto.Agent {
+			return []*proto.Agent{
+				{
+					Name: "agent1",
+					Auth: &proto.Agent_Token{},
+				},
+				{
+					Name: "agent2",
+					Auth: &proto.Agent_Token{},
+				},
+			}
+		}).Do()
+
+		var stdout bytes.Buffer
+		inv, root := clitest.New(t, "ssh", "")
+		inv.Stdout = &stdout
+		inv.Environ.Set("COMPLETION_MODE", "1")
+		clitest.SetupConfig(t, userClient, root)
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitMedium)
+		defer cancel()
+
+		err := inv.WithContext(ctx).Run()
+		require.NoError(t, err)
+
+		// For multi-agent workspaces, completions should include the
+		// workspace.agent format but NOT the bare workspace name.
+		output := stdout.String()
+		t.Logf("Completion output: %q", output)
+		lines := strings.Split(strings.TrimSpace(output), "\n")
+		require.NotContains(t, lines, r.Workspace.Name)
+		require.Contains(t, output, r.Workspace.Name+".agent1")
+		require.Contains(t, output, r.Workspace.Name+".agent2")
+	})
+
+	t.Run("NetworkError", func(t *testing.T) {
+		t.Parallel()
+
+		var stdout bytes.Buffer
+		inv, _ := clitest.New(t, "ssh", "")
+		inv.Stdout = &stdout
+		inv.Environ.Set("COMPLETION_MODE", "1")
+
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
+		defer cancel()
+
+		err := inv.WithContext(ctx).Run()
+		require.NoError(t, err)
+
+		output := stdout.String()
+		require.Empty(t, output)
+	})
 }

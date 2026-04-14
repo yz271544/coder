@@ -17,18 +17,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/pubsub"
 	"github.com/coder/coder/v2/testutil"
 )
-
-// WillUsePostgres returns true if a call to NewDB() will return a real, postgres-backed Store and Pubsub.
-// TODO(hugodutka): since we removed the in-memory database, this is always true,
-// and we need to remove this function. https://github.com/coder/internal/issues/758
-func WillUsePostgres() bool {
-	return true
-}
 
 type options struct {
 	fixedTimezone string
@@ -75,10 +68,6 @@ func withReturnSQLDB(f func(*sql.DB)) Option {
 func NewDBWithSQLDB(t testing.TB, opts ...Option) (database.Store, pubsub.Pubsub, *sql.DB) {
 	t.Helper()
 
-	if !WillUsePostgres() {
-		t.Fatal("cannot use NewDBWithSQLDB without PostgreSQL, consider adding `if !dbtestutil.WillUsePostgres() { t.Skip() }` to this test")
-	}
-
 	var sqlDB *sql.DB
 	opts = append(opts, withReturnSQLDB(func(db *sql.DB) {
 		sqlDB = db
@@ -87,7 +76,7 @@ func NewDBWithSQLDB(t testing.TB, opts ...Option) (database.Store, pubsub.Pubsub
 	return db, ps, sqlDB
 }
 
-var DefaultTimezone = "Canada/Newfoundland"
+var DefaultTimezone = "America/St_Johns"
 
 // NowInDefaultTimezone returns the current time rounded to the nearest microsecond in the default timezone
 // used by postgres in tests. Useful for object equality checks.

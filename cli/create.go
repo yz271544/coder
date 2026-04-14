@@ -12,13 +12,12 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/pretty"
-
 	"github.com/coder/coder/v2/cli/cliui"
 	"github.com/coder/coder/v2/cli/cliutil"
 	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/coderd/util/slice"
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/pretty"
 	"github.com/coder/serpent"
 )
 
@@ -43,9 +42,11 @@ func (r *RootCmd) Create(opts CreateOptions) *serpent.Command {
 		stopAfter       time.Duration
 		workspaceName   string
 
-		parameterFlags     workspaceParameterFlags
-		autoUpdates        string
-		copyParametersFrom string
+		parameterFlags       workspaceParameterFlags
+		autoUpdates          string
+		copyParametersFrom   string
+		useParameterDefaults bool
+		noWait               bool
 		// Organization context is only required if more than 1 template
 		// shares the same name across multiple organizations.
 		orgContext = NewOrganizationContext()
@@ -309,7 +310,7 @@ func (r *RootCmd) Create(opts CreateOptions) *serpent.Command {
 				displayAppliedPreset(inv, preset, presetParameters)
 			} else {
 				// Inform the user that no preset was applied
-				_, _ = fmt.Fprintf(inv.Stdout, "%s", cliui.Bold("No preset applied."))
+				_, _ = fmt.Fprintf(inv.Stdout, "%s\n", cliui.Bold("No preset applied."))
 			}
 
 			if opts.BeforeCreate != nil {
@@ -323,6 +324,7 @@ func (r *RootCmd) Create(opts CreateOptions) *serpent.Command {
 				Action:            WorkspaceCreate,
 				TemplateVersionID: templateVersionID,
 				NewWorkspaceName:  workspaceName,
+				Owner:             workspaceOwner,
 
 				PresetParameters:      presetParameters,
 				RichParameterFile:     parameterFlags.richParameterFile,
@@ -330,6 +332,8 @@ func (r *RootCmd) Create(opts CreateOptions) *serpent.Command {
 				RichParameterDefaults: cliBuildParameterDefaults,
 
 				SourceWorkspaceParameters: sourceWorkspaceParameters,
+
+				UseParameterDefaults: useParameterDefaults,
 			})
 			if err != nil {
 				return xerrors.Errorf("prepare build: %w", err)
@@ -368,6 +372,14 @@ func (r *RootCmd) Create(opts CreateOptions) *serpent.Command {
 			}
 
 			cliutil.WarnMatchedProvisioners(inv.Stderr, workspace.LatestBuild.MatchedProvisioners, workspace.LatestBuild.Job)
+
+			if noWait {
+				_, _ = fmt.Fprintf(inv.Stdout,
+					"\nThe %s workspace has been created and is building in the background.\n",
+					cliui.Keyword(workspace.Name),
+				)
+				return nil
+			}
 
 			err = cliui.WorkspaceBuild(inv.Context(), inv.Stdout, client, workspace.LatestBuild.ID)
 			if err != nil {
@@ -436,6 +448,18 @@ func (r *RootCmd) Create(opts CreateOptions) *serpent.Command {
 			Description: "Specify the source workspace name to copy parameters from.",
 			Value:       serpent.StringOf(&copyParametersFrom),
 		},
+		serpent.Option{
+			Flag:        "use-parameter-defaults",
+			Env:         "CODER_WORKSPACE_USE_PARAMETER_DEFAULTS",
+			Description: "Automatically accept parameter defaults when no value is provided.",
+			Value:       serpent.BoolOf(&useParameterDefaults),
+		},
+		serpent.Option{
+			Flag:        "no-wait",
+			Env:         "CODER_CREATE_NO_WAIT",
+			Description: "Return immediately after creating the workspace. The build will run in the background.",
+			Value:       serpent.BoolOf(&noWait),
+		},
 		cliui.SkipPromptOption(),
 	)
 	cmd.Options = append(cmd.Options, parameterFlags.cliParameters()...)
@@ -448,6 +472,8 @@ type prepWorkspaceBuildArgs struct {
 	Action            WorkspaceCLIAction
 	TemplateVersionID uuid.UUID
 	NewWorkspaceName  string
+	// The owner is required when evaluating dynamic parameters
+	Owner string
 
 	LastBuildParameters       []codersdk.WorkspaceBuildParameter
 	SourceWorkspaceParameters []codersdk.WorkspaceBuildParameter
@@ -460,6 +486,8 @@ type prepWorkspaceBuildArgs struct {
 	RichParameters        []codersdk.WorkspaceBuildParameter
 	RichParameterFile     string
 	RichParameterDefaults []codersdk.WorkspaceBuildParameter
+
+	UseParameterDefaults bool
 }
 
 // resolvePreset returns the preset matching the given presetName (if specified),
@@ -540,9 +568,14 @@ func prepWorkspaceBuild(inv *serpent.Invocation, client *codersdk.Client, args p
 		return nil, xerrors.Errorf("get template version: %w", err)
 	}
 
-	templateVersionParameters, err := client.TemplateVersionRichParameters(inv.Context(), templateVersion.ID)
-	if err != nil {
-		return nil, xerrors.Errorf("get template version rich parameters: %w", err)
+	dynamicParameters := true
+	if templateVersion.TemplateID != nil {
+		// TODO: This fetch is often redundant, as the caller often has the template already.
+		template, err := client.Template(ctx, *templateVersion.TemplateID)
+		if err != nil {
+			return nil, xerrors.Errorf("get template: %w", err)
+		}
+		dynamicParameters = !template.UseClassicParameterFlow
 	}
 
 	parameterFile := map[string]string{}
@@ -562,7 +595,47 @@ func prepWorkspaceBuild(inv *serpent.Invocation, client *codersdk.Client, args p
 		WithPromptRichParameters(args.PromptRichParameters).
 		WithRichParameters(args.RichParameters).
 		WithRichParametersFile(parameterFile).
-		WithRichParametersDefaults(args.RichParameterDefaults)
+		WithRichParametersDefaults(args.RichParameterDefaults).
+		WithUseParameterDefaults(args.UseParameterDefaults)
+
+	var templateVersionParameters []codersdk.TemplateVersionParameter
+	if !dynamicParameters {
+		templateVersionParameters, err = client.TemplateVersionRichParameters(inv.Context(), templateVersion.ID)
+		if err != nil {
+			return nil, xerrors.Errorf("get template version rich parameters: %w", err)
+		}
+	} else {
+		var ownerID uuid.UUID
+		{ // Putting in its own block to limit scope of owningMember, as it might be nil
+			owningMember, err := client.OrganizationMember(ctx, templateVersion.OrganizationID.String(), args.Owner)
+			if err != nil {
+				// This is unfortunate, but if we are an org owner, then we can create workspaces
+				// for users that are not part of the organization.
+				owningUser, uerr := client.User(ctx, args.Owner)
+				if uerr != nil {
+					return nil, xerrors.Errorf("get owning member: %w", err)
+				}
+				ownerID = owningUser.ID
+			} else {
+				ownerID = owningMember.UserID
+			}
+		}
+
+		initial := make(map[string]string)
+		for _, v := range resolver.InitialValues() {
+			initial[v.Name] = v.Value
+		}
+
+		eval, err := client.EvaluateTemplateVersion(ctx, templateVersion.ID, ownerID, initial)
+		if err != nil {
+			return nil, xerrors.Errorf("evaluate template version dynamic parameters: %w", err)
+		}
+
+		for _, param := range eval.Parameters {
+			templateVersionParameters = append(templateVersionParameters, param.TemplateVersionParameter())
+		}
+	}
+
 	buildParameters, err := resolver.Resolve(inv, args.Action, templateVersionParameters)
 	if err != nil {
 		return nil, err
@@ -577,53 +650,57 @@ func prepWorkspaceBuild(inv *serpent.Invocation, client *codersdk.Client, args p
 		return nil, xerrors.Errorf("template version git auth: %w", err)
 	}
 
-	// Run a dry-run with the given parameters to check correctness
-	dryRun, err := client.CreateTemplateVersionDryRun(inv.Context(), templateVersion.ID, codersdk.CreateTemplateVersionDryRunRequest{
-		WorkspaceName:       args.NewWorkspaceName,
-		RichParameterValues: buildParameters,
-	})
-	if err != nil {
-		return nil, xerrors.Errorf("begin workspace dry-run: %w", err)
-	}
+	// Only perform dry-run for workspace creation and updates
+	// Skip for start and restart to avoid unnecessary delays
+	if args.Action == WorkspaceCreate || args.Action == WorkspaceUpdate {
+		// Run a dry-run with the given parameters to check correctness
+		dryRun, err := client.CreateTemplateVersionDryRun(inv.Context(), templateVersion.ID, codersdk.CreateTemplateVersionDryRunRequest{
+			WorkspaceName:       args.NewWorkspaceName,
+			RichParameterValues: buildParameters,
+		})
+		if err != nil {
+			return nil, xerrors.Errorf("begin workspace dry-run: %w", err)
+		}
 
-	matchedProvisioners, err := client.TemplateVersionDryRunMatchedProvisioners(inv.Context(), templateVersion.ID, dryRun.ID)
-	if err != nil {
-		return nil, xerrors.Errorf("get matched provisioners: %w", err)
-	}
-	cliutil.WarnMatchedProvisioners(inv.Stdout, &matchedProvisioners, dryRun)
-	_, _ = fmt.Fprintln(inv.Stdout, "Planning workspace...")
-	err = cliui.ProvisionerJob(inv.Context(), inv.Stdout, cliui.ProvisionerJobOptions{
-		Fetch: func() (codersdk.ProvisionerJob, error) {
-			return client.TemplateVersionDryRun(inv.Context(), templateVersion.ID, dryRun.ID)
-		},
-		Cancel: func() error {
-			return client.CancelTemplateVersionDryRun(inv.Context(), templateVersion.ID, dryRun.ID)
-		},
-		Logs: func() (<-chan codersdk.ProvisionerJobLog, io.Closer, error) {
-			return client.TemplateVersionDryRunLogsAfter(inv.Context(), templateVersion.ID, dryRun.ID, 0)
-		},
-		// Don't show log output for the dry-run unless there's an error.
-		Silent: true,
-	})
-	if err != nil {
-		// TODO (Dean): reprompt for parameter values if we deem it to
-		// be a validation error
-		return nil, xerrors.Errorf("dry-run workspace: %w", err)
-	}
+		matchedProvisioners, err := client.TemplateVersionDryRunMatchedProvisioners(inv.Context(), templateVersion.ID, dryRun.ID)
+		if err != nil {
+			return nil, xerrors.Errorf("get matched provisioners: %w", err)
+		}
+		cliutil.WarnMatchedProvisioners(inv.Stdout, &matchedProvisioners, dryRun)
+		_, _ = fmt.Fprintln(inv.Stdout, "Planning workspace...")
+		err = cliui.ProvisionerJob(inv.Context(), inv.Stdout, cliui.ProvisionerJobOptions{
+			Fetch: func() (codersdk.ProvisionerJob, error) {
+				return client.TemplateVersionDryRun(inv.Context(), templateVersion.ID, dryRun.ID)
+			},
+			Cancel: func() error {
+				return client.CancelTemplateVersionDryRun(inv.Context(), templateVersion.ID, dryRun.ID)
+			},
+			Logs: func() (<-chan codersdk.ProvisionerJobLog, io.Closer, error) {
+				return client.TemplateVersionDryRunLogsAfter(inv.Context(), templateVersion.ID, dryRun.ID, 0)
+			},
+			// Don't show log output for the dry-run unless there's an error.
+			Silent: true,
+		})
+		if err != nil {
+			// TODO (Dean): reprompt for parameter values if we deem it to
+			// be a validation error
+			return nil, xerrors.Errorf("dry-run workspace: %w", err)
+		}
 
-	resources, err := client.TemplateVersionDryRunResources(inv.Context(), templateVersion.ID, dryRun.ID)
-	if err != nil {
-		return nil, xerrors.Errorf("get workspace dry-run resources: %w", err)
-	}
+		resources, err := client.TemplateVersionDryRunResources(inv.Context(), templateVersion.ID, dryRun.ID)
+		if err != nil {
+			return nil, xerrors.Errorf("get workspace dry-run resources: %w", err)
+		}
 
-	err = cliui.WorkspaceResources(inv.Stdout, resources, cliui.WorkspaceResourcesOptions{
-		WorkspaceName: args.NewWorkspaceName,
-		// Since agents haven't connected yet, hiding this makes more sense.
-		HideAgentState: true,
-		Title:          "Workspace Preview",
-	})
-	if err != nil {
-		return nil, xerrors.Errorf("get resources: %w", err)
+		err = cliui.WorkspaceResources(inv.Stdout, resources, cliui.WorkspaceResourcesOptions{
+			WorkspaceName: args.NewWorkspaceName,
+			// Since agents haven't connected yet, hiding this makes more sense.
+			HideAgentState: true,
+			Title:          "Workspace Preview",
+		})
+		if err != nil {
+			return nil, xerrors.Errorf("get resources: %w", err)
+		}
 	}
 
 	return buildParameters, nil

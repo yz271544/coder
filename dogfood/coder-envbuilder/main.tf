@@ -5,7 +5,7 @@ terraform {
     }
     docker = {
       source  = "kreuzwerker/docker"
-      version = "~> 3.0"
+      version = "~> 4.0"
     }
     envbuilder = {
       source = "coder/envbuilder"
@@ -18,13 +18,12 @@ locals {
   // Ask #dogfood-admins for help.
   // NOTE: keep these up to date with those in ../dogfood/main.tf!
   docker_host = {
-    ""              = "tcp://dogfood-ts-cdr-dev.tailscale.svc.cluster.local:2375"
-    "us-pittsburgh" = "tcp://dogfood-ts-cdr-dev.tailscale.svc.cluster.local:2375"
+    ""              = "tcp://rubinsky-pit-cdr-dev.tailscale.svc.cluster.local:2375"
+    "us-pittsburgh" = "tcp://rubinsky-pit-cdr-dev.tailscale.svc.cluster.local:2375"
     // For legacy reasons, this host is labelled `eu-helsinki` but it's
     // actually in Germany now.
     "eu-helsinki" = "tcp://katerose-fsn-cdr-dev.tailscale.svc.cluster.local:2375"
     "ap-sydney"   = "tcp://wolfgang-syd-cdr-dev.tailscale.svc.cluster.local:2375"
-    "sa-saopaulo" = "tcp://oberstein-sao-cdr-dev.tailscale.svc.cluster.local:2375"
     "za-jnb"      = "tcp://greenhill-jnb-cdr-dev.tailscale.svc.cluster.local:2375"
   }
 
@@ -73,11 +72,6 @@ data "coder_parameter" "region" {
     value = "ap-sydney"
   }
   option {
-    icon  = "/emojis/1f1e7-1f1f7.png"
-    name  = "São Paulo"
-    value = "sa-saopaulo"
-  }
-  option {
     icon  = "/emojis/1f1ff-1f1e6.png"
     name  = "Johannesburg"
     value = "za-jnb"
@@ -110,26 +104,26 @@ data "coder_workspace_owner" "me" {}
 
 module "slackme" {
   source           = "dev.registry.coder.com/coder/slackme/coder"
-  version          = "1.0.31"
+  version          = "1.0.33"
   agent_id         = coder_agent.dev.id
   auth_provider_id = "slack"
 }
 
 module "dotfiles" {
   source   = "dev.registry.coder.com/coder/dotfiles/coder"
-  version  = "1.2.1"
+  version  = "1.4.1"
   agent_id = coder_agent.dev.id
 }
 
 module "personalize" {
   source   = "dev.registry.coder.com/coder/personalize/coder"
-  version  = "1.0.31"
+  version  = "1.0.32"
   agent_id = coder_agent.dev.id
 }
 
 module "code-server" {
   source                  = "dev.registry.coder.com/coder/code-server/coder"
-  version                 = "1.3.1"
+  version                 = "1.4.4"
   agent_id                = coder_agent.dev.id
   folder                  = local.repo_dir
   auto_install_extensions = true
@@ -146,13 +140,13 @@ module "jetbrains" {
 
 module "filebrowser" {
   source   = "dev.registry.coder.com/coder/filebrowser/coder"
-  version  = "1.1.2"
+  version  = "1.1.4"
   agent_id = coder_agent.dev.id
 }
 
 module "coder-login" {
   source   = "dev.registry.coder.com/coder/coder-login/coder"
-  version  = "1.1.0"
+  version  = "1.1.1"
   agent_id = coder_agent.dev.id
 }
 

@@ -24,12 +24,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/sloghuman"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/coder/v2/cli/cliui"
 	"github.com/coder/coder/v2/coderd/httpapi"
-	notificationsLib "github.com/coder/coder/v2/coderd/notifications"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/codersdk/workspacesdk"
@@ -40,7 +38,6 @@ import (
 	"github.com/coder/coder/v2/scaletest/dashboard"
 	"github.com/coder/coder/v2/scaletest/harness"
 	"github.com/coder/coder/v2/scaletest/loadtestutil"
-	"github.com/coder/coder/v2/scaletest/notifications"
 	"github.com/coder/coder/v2/scaletest/reconnectingpty"
 	"github.com/coder/coder/v2/scaletest/workspacebuild"
 	"github.com/coder/coder/v2/scaletest/workspacetraffic"
@@ -49,6 +46,8 @@ import (
 )
 
 const scaletestTracerName = "coder_scaletest"
+
+var BypassHeader = map[string][]string{codersdk.BypassRatelimitHeader: {"true"}}
 
 func (r *RootCmd) scaletestCmd() *serpent.Command {
 	cmd := &serpent.Command{
@@ -66,6 +65,11 @@ func (r *RootCmd) scaletestCmd() *serpent.Command {
 			r.scaletestWorkspaceTraffic(),
 			r.scaletestAutostart(),
 			r.scaletestNotifications(),
+			r.scaletestTaskStatus(),
+			r.scaletestSMTP(),
+			r.scaletestPrebuilds(),
+			r.scaletestBridge(),
+			r.scaletestLLMMock(),
 		},
 	}
 
@@ -385,6 +389,88 @@ func (s *scaletestPrometheusFlags) attach(opts *serpent.OptionSet) {
 	)
 }
 
+// workspaceTargetFlags holds common flags for targeting specific workspaces in scale tests.
+type workspaceTargetFlags struct {
+	template         string
+	targetWorkspaces string
+	useHostLogin     bool
+}
+
+// attach adds the workspace target flags to the given options set.
+func (f *workspaceTargetFlags) attach(opts *serpent.OptionSet) {
+	*opts = append(*opts,
+		serpent.Option{
+			Flag:          "template",
+			FlagShorthand: "t",
+			Env:           "CODER_SCALETEST_TEMPLATE",
+			Description:   "Name or ID of the template. Traffic generation will be limited to workspaces created from this template.",
+			Value:         serpent.StringOf(&f.template),
+		},
+		serpent.Option{
+			Flag:        "target-workspaces",
+			Env:         "CODER_SCALETEST_TARGET_WORKSPACES",
+			Description: "Target a specific range of workspaces in the format [START]:[END] (exclusive). Example: 0:10 will target the 10 first alphabetically sorted workspaces (0-9).",
+			Value:       serpent.StringOf(&f.targetWorkspaces),
+		},
+		serpent.Option{
+			Flag:        "use-host-login",
+			Env:         "CODER_SCALETEST_USE_HOST_LOGIN",
+			Default:     "false",
+			Description: "Connect as the currently logged in user.",
+			Value:       serpent.BoolOf(&f.useHostLogin),
+		},
+	)
+}
+
+// getTargetedWorkspaces retrieves the workspaces based on the template filter and target range. warnWriter is where to
+// write a warning message if any workspaces were skipped due to ownership mismatch.
+func (f *workspaceTargetFlags) getTargetedWorkspaces(ctx context.Context, client *codersdk.Client, organizationIDs []uuid.UUID, warnWriter io.Writer) ([]codersdk.Workspace, error) {
+	// Validate template if provided
+	if f.template != "" {
+		_, err := parseTemplate(ctx, client, organizationIDs, f.template)
+		if err != nil {
+			return nil, xerrors.Errorf("parse template: %w", err)
+		}
+	}
+
+	// Parse target range
+	targetStart, targetEnd, err := parseTargetRange("workspaces", f.targetWorkspaces)
+	if err != nil {
+		return nil, xerrors.Errorf("parse target workspaces: %w", err)
+	}
+
+	// Determine owner based on useHostLogin
+	var owner string
+	if f.useHostLogin {
+		owner = codersdk.Me
+	}
+
+	// Get workspaces
+	workspaces, numSkipped, err := getScaletestWorkspaces(ctx, client, owner, f.template)
+	if err != nil {
+		return nil, err
+	}
+	if numSkipped > 0 {
+		cliui.Warnf(warnWriter, "CODER_DISABLE_OWNER_WORKSPACE_ACCESS is set on the deployment.\n\t%d workspace(s) were skipped due to ownership mismatch.\n\tSet --use-host-login to only target workspaces you own.", numSkipped)
+	}
+
+	// Adjust targetEnd if not specified
+	if targetEnd == 0 {
+		targetEnd = len(workspaces)
+	}
+
+	// Validate range
+	if len(workspaces) == 0 {
+		return nil, xerrors.Errorf("no scaletest workspaces exist")
+	}
+	if targetEnd > len(workspaces) {
+		return nil, xerrors.Errorf("target workspace end %d is greater than the number of workspaces %d", targetEnd, len(workspaces))
+	}
+
+	// Return the sliced workspaces
+	return workspaces[targetStart:targetEnd], nil
+}
+
 func requireAdmin(ctx context.Context, client *codersdk.Client) (codersdk.User, error) {
 	me, err := client.User(ctx, codersdk.Me)
 	if err != nil {
@@ -557,9 +643,10 @@ func (r *RootCmd) scaletestCleanup() *serpent.Command {
 
 func (r *RootCmd) scaletestCreateWorkspaces() *serpent.Command {
 	var (
-		count    int64
-		retry    int64
-		template string
+		count       int64
+		retry       int64
+		maxFailures int64
+		template    string
 
 		noCleanup bool
 		// TODO: implement this flag
@@ -607,15 +694,6 @@ func (r *RootCmd) scaletestCreateWorkspaces() *serpent.Command {
 				return err
 			}
 
-			client.HTTPClient = &http.Client{
-				Transport: &codersdk.HeaderTransport{
-					Transport: http.DefaultTransport,
-					Header: map[string][]string{
-						codersdk.BypassRatelimitHeader: {"true"},
-					},
-				},
-			}
-
 			if count <= 0 {
 				return xerrors.Errorf("--count is required and must be greater than 0")
 			}
@@ -641,6 +719,7 @@ func (r *RootCmd) scaletestCreateWorkspaces() *serpent.Command {
 				Action:            WorkspaceCreate,
 				TemplateVersionID: tpl.ActiveVersionID,
 				NewWorkspaceName:  "scaletest-N", // TODO: the scaletest runner will pass in a different name here. Does this matter?
+				Owner:             codersdk.Me,
 
 				RichParameterFile: parameterFlags.richParameterFile,
 				RichParameters:    cliRichParameters,
@@ -727,7 +806,13 @@ func (r *RootCmd) scaletestCreateWorkspaces() *serpent.Command {
 					return xerrors.Errorf("validate config: %w", err)
 				}
 
-				var runner harness.Runnable = createworkspaces.NewRunner(client, config)
+				// use an independent client for each Runner, so they don't reuse TCP connections. This can lead to
+				// requests being unbalanced among Coder instances.
+				runnerClient, err := loadtestutil.DupClientCopyingHeaders(client, BypassHeader)
+				if err != nil {
+					return xerrors.Errorf("create runner client: %w", err)
+				}
+				var runner harness.Runnable = createworkspaces.NewRunner(runnerClient, config)
 				if tracingEnabled {
 					runner = &runnableTraceWrapper{
 						tracer:   tracer,
@@ -764,8 +849,8 @@ func (r *RootCmd) scaletestCreateWorkspaces() *serpent.Command {
 				return xerrors.Errorf("cleanup tests: %w", err)
 			}
 
-			if res.TotalFail > 0 {
-				return xerrors.New("load test failed, see above for more details")
+			if res.TotalFail > int(maxFailures) {
+				return xerrors.Errorf("load test failed, %d runs failed (max allowed: %d)", res.TotalFail, maxFailures)
 			}
 
 			return nil
@@ -880,6 +965,13 @@ func (r *RootCmd) scaletestCreateWorkspaces() *serpent.Command {
 			Description: "Use the user logged in on the host machine, instead of creating users.",
 			Value:       serpent.BoolOf(&useHostUser),
 		},
+		{
+			Flag:        "max-failures",
+			Env:         "CODER_SCALETEST_MAX_FAILURES",
+			Default:     "0",
+			Description: "Maximum number of runs that are allowed to fail before the entire test is considered failed. 0 means any failure will cause the test to fail.",
+			Value:       serpent.Int64Of(&maxFailures),
+		},
 	}
 
 	cmd.Options = append(cmd.Options, parameterFlags.cliParameters()...)
@@ -928,15 +1020,6 @@ func (r *RootCmd) scaletestWorkspaceUpdates() *serpent.Command {
 				return err
 			}
 
-			client.HTTPClient = &http.Client{
-				Transport: &codersdk.HeaderTransport{
-					Transport: http.DefaultTransport,
-					Header: map[string][]string{
-						codersdk.BypassRatelimitHeader: {"true"},
-					},
-				},
-			}
-
 			if workspaceCount <= 0 {
 				return xerrors.Errorf("--workspace-count must be greater than 0")
 			}
@@ -983,6 +1066,7 @@ func (r *RootCmd) scaletestWorkspaceUpdates() *serpent.Command {
 			richParameters, err := prepWorkspaceBuild(inv, client, prepWorkspaceBuildArgs{
 				Action:            WorkspaceCreate,
 				TemplateVersionID: tpl.ActiveVersionID,
+				Owner:             codersdk.Me,
 
 				RichParameterFile: parameterFlags.richParameterFile,
 				RichParameters:    cliRichParameters,
@@ -1075,7 +1159,14 @@ func (r *RootCmd) scaletestWorkspaceUpdates() *serpent.Command {
 			for i, config := range configs {
 				name := fmt.Sprintf("workspaceupdates-%dw", config.WorkspaceCount)
 				id := strconv.Itoa(i)
-				var runner harness.Runnable = workspaceupdates.NewRunner(client, config)
+
+				// use an independent client for each Runner, so they don't reuse TCP connections. This can lead to
+				// requests being unbalanced among Coder instances.
+				runnerClient, err := loadtestutil.DupClientCopyingHeaders(client, BypassHeader)
+				if err != nil {
+					return xerrors.Errorf("create runner client: %w", err)
+				}
+				var runner harness.Runnable = workspaceupdates.NewRunner(runnerClient, config)
 				if tracingEnabled {
 					runner = &runnableTraceWrapper{
 						tracer:   tracer,
@@ -1194,12 +1285,10 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 		bytesPerTick      int64
 		ssh               bool
 		disableDirect     bool
-		useHostLogin      bool
 		app               string
-		template          string
-		targetWorkspaces  string
 		workspaceProxyURL string
 
+		targetFlags     = &workspaceTargetFlags{}
 		tracingFlags    = &scaletestTracingFlags{}
 		strategy        = &scaletestStrategyFlags{}
 		cleanupStrategy = newScaletestCleanupStrategy()
@@ -1234,54 +1323,14 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 			prometheusSrvClose := ServeHandler(ctx, logger, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), prometheusFlags.Address, "prometheus")
 			defer prometheusSrvClose()
 
-			// Bypass rate limiting
-			client.HTTPClient = &http.Client{
-				Transport: &codersdk.HeaderTransport{
-					Transport: http.DefaultTransport,
-					Header: map[string][]string{
-						codersdk.BypassRatelimitHeader: {"true"},
-					},
-				},
-			}
-
-			if template != "" {
-				_, err := parseTemplate(ctx, client, me.OrganizationIDs, template)
-				if err != nil {
-					return xerrors.Errorf("parse template: %w", err)
-				}
-			}
-			targetWorkspaceStart, targetWorkspaceEnd, err := parseTargetRange("workspaces", targetWorkspaces)
+			workspaces, err := targetFlags.getTargetedWorkspaces(ctx, client, me.OrganizationIDs, inv.Stdout)
 			if err != nil {
-				return xerrors.Errorf("parse target workspaces: %w", err)
+				return err
 			}
 
 			appHost, err := client.AppHost(ctx)
 			if err != nil {
 				return xerrors.Errorf("get app host: %w", err)
-			}
-
-			var owner string
-			if useHostLogin {
-				owner = codersdk.Me
-			}
-
-			workspaces, numSkipped, err := getScaletestWorkspaces(inv.Context(), client, owner, template)
-			if err != nil {
-				return err
-			}
-			if numSkipped > 0 {
-				cliui.Warnf(inv.Stdout, "CODER_DISABLE_OWNER_WORKSPACE_ACCESS is set on the deployment.\n\t%d workspace(s) were skipped due to ownership mismatch.\n\tSet --use-host-login to only target workspaces you own.", numSkipped)
-			}
-
-			if targetWorkspaceEnd == 0 {
-				targetWorkspaceEnd = len(workspaces)
-			}
-
-			if len(workspaces) == 0 {
-				return xerrors.Errorf("no scaletest workspaces exist")
-			}
-			if targetWorkspaceEnd > len(workspaces) {
-				return xerrors.Errorf("target workspace end %d is greater than the number of workspaces %d", targetWorkspaceEnd, len(workspaces))
 			}
 
 			tracerProvider, closeTracing, tracingEnabled, err := tracingFlags.provider(ctx)
@@ -1308,10 +1357,6 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 
 			th := harness.NewTestHarness(strategy.toStrategy(), cleanupStrategy.toStrategy())
 			for idx, ws := range workspaces {
-				if idx < targetWorkspaceStart || idx >= targetWorkspaceEnd {
-					continue
-				}
-
 				var (
 					agent codersdk.WorkspaceAgent
 					name  = "workspace-traffic"
@@ -1356,6 +1401,9 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 				// Setup our workspace agent connection.
 				config := workspacetraffic.Config{
 					AgentID:       agent.ID,
+					WorkspaceID:   ws.ID,
+					WorkspaceName: ws.Name,
+					AgentName:     agent.Name,
 					BytesPerTick:  bytesPerTick,
 					Duration:      strategy.timeout,
 					TickInterval:  tickInterval,
@@ -1374,7 +1422,13 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 				if err := config.Validate(); err != nil {
 					return xerrors.Errorf("validate config: %w", err)
 				}
-				var runner harness.Runnable = workspacetraffic.NewRunner(client, config)
+				// use an independent client for each Runner, so they don't reuse TCP connections. This can lead to
+				// requests being unbalanced among Coder instances.
+				runnerClient, err := loadtestutil.DupClientCopyingHeaders(client, BypassHeader)
+				if err != nil {
+					return xerrors.Errorf("create runner client: %w", err)
+				}
+				var runner harness.Runnable = workspacetraffic.NewRunner(runnerClient, config)
 				if tracingEnabled {
 					runner = &runnableTraceWrapper{
 						tracer:   tracer,
@@ -1417,19 +1471,6 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 
 	cmd.Options = []serpent.Option{
 		{
-			Flag:          "template",
-			FlagShorthand: "t",
-			Env:           "CODER_SCALETEST_TEMPLATE",
-			Description:   "Name or ID of the template. Traffic generation will be limited to workspaces created from this template.",
-			Value:         serpent.StringOf(&template),
-		},
-		{
-			Flag:        "target-workspaces",
-			Env:         "CODER_SCALETEST_TARGET_WORKSPACES",
-			Description: "Target a specific range of workspaces in the format [START]:[END] (exclusive). Example: 0:10 will target the 10 first alphabetically sorted workspaces (0-9).",
-			Value:       serpent.StringOf(&targetWorkspaces),
-		},
-		{
 			Flag:        "bytes-per-tick",
 			Env:         "CODER_SCALETEST_WORKSPACE_TRAFFIC_BYTES_PER_TICK",
 			Default:     "1024",
@@ -1465,13 +1506,6 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 			Value:       serpent.StringOf(&app),
 		},
 		{
-			Flag:        "use-host-login",
-			Env:         "CODER_SCALETEST_USE_HOST_LOGIN",
-			Default:     "false",
-			Description: "Connect as the currently logged in user.",
-			Value:       serpent.BoolOf(&useHostLogin),
-		},
-		{
 			Flag:        "workspace-proxy-url",
 			Env:         "CODER_SCALETEST_WORKSPACE_PROXY_URL",
 			Default:     "",
@@ -1480,6 +1514,7 @@ func (r *RootCmd) scaletestWorkspaceTraffic() *serpent.Command {
 		},
 	}
 
+	targetFlags.attach(&cmd.Options)
 	tracingFlags.attach(&cmd.Options)
 	strategy.attach(&cmd.Options)
 	cleanupStrategy.attach(&cmd.Options)
@@ -1531,6 +1566,15 @@ func (r *RootCmd) scaletestDashboard() *serpent.Command {
 			if err != nil {
 				return xerrors.Errorf("create tracer provider: %w", err)
 			}
+			tracer := tracerProvider.Tracer(scaletestTracerName)
+			outputs, err := output.parse()
+			if err != nil {
+				return xerrors.Errorf("could not parse --output flags")
+			}
+			reg := prometheus.NewRegistry()
+			prometheusSrvClose := ServeHandler(ctx, logger, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), prometheusFlags.Address, "prometheus")
+			defer prometheusSrvClose()
+
 			defer func() {
 				// Allow time for traces to flush even if command context is
 				// canceled. This is a no-op if tracing is not enabled.
@@ -1542,14 +1586,7 @@ func (r *RootCmd) scaletestDashboard() *serpent.Command {
 				_, _ = fmt.Fprintf(inv.Stderr, "Waiting %s for prometheus metrics to be scraped\n", prometheusFlags.Wait)
 				<-time.After(prometheusFlags.Wait)
 			}()
-			tracer := tracerProvider.Tracer(scaletestTracerName)
-			outputs, err := output.parse()
-			if err != nil {
-				return xerrors.Errorf("could not parse --output flags")
-			}
-			reg := prometheus.NewRegistry()
-			prometheusSrvClose := ServeHandler(ctx, logger, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), prometheusFlags.Address, "prometheus")
-			defer prometheusSrvClose()
+
 			metrics := dashboard.NewMetrics(reg)
 
 			th := harness.NewTestHarness(strategy.toStrategy(), cleanupStrategy.toStrategy())
@@ -1579,9 +1616,13 @@ func (r *RootCmd) scaletestDashboard() *serpent.Command {
 					return xerrors.Errorf("create token for user: %w", err)
 				}
 
-				userClient := codersdk.New(client.URL,
-					codersdk.WithSessionToken(userTokResp.Key),
-				)
+				// use an independent client for each Runner, so they don't reuse TCP connections. This can lead to
+				// requests being unbalanced among Coder instances.
+				userClient, err := loadtestutil.DupClientCopyingHeaders(client, BypassHeader)
+				if err != nil {
+					return xerrors.Errorf("create runner client: %w", err)
+				}
+				codersdk.WithSessionToken(userTokResp.Key)(userClient)
 
 				config := dashboard.Config{
 					Interval: interval,
@@ -1694,19 +1735,18 @@ const (
 
 func (r *RootCmd) scaletestAutostart() *serpent.Command {
 	var (
-		workspaceCount      int64
-		workspaceJobTimeout time.Duration
-		autostartDelay      time.Duration
-		autostartTimeout    time.Duration
-		template            string
-		noCleanup           bool
+		workspaceCount        int64
+		workspaceJobTimeout   time.Duration
+		autostartBuildTimeout time.Duration
+		autostartDelay        time.Duration
+		template              string
+		noCleanup             bool
 
 		parameterFlags  workspaceParameterFlags
 		tracingFlags    = &scaletestTracingFlags{}
 		timeoutStrategy = &timeoutFlags{}
 		cleanupStrategy = newScaletestCleanupStrategy()
 		output          = &scaletestOutputFlags{}
-		prometheusFlags = &scaletestPrometheusFlags{}
 	)
 
 	cmd := &serpent.Command{
@@ -1728,22 +1768,13 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 				return err
 			}
 
-			client.HTTPClient = &http.Client{
-				Transport: &codersdk.HeaderTransport{
-					Transport: http.DefaultTransport,
-					Header: map[string][]string{
-						codersdk.BypassRatelimitHeader: {"true"},
-					},
-				},
-			}
-
 			if workspaceCount <= 0 {
 				return xerrors.Errorf("--workspace-count must be greater than zero")
 			}
 
 			outputs, err := output.parse()
 			if err != nil {
-				return xerrors.Errorf("could not parse --output flags")
+				return xerrors.Errorf("parse output flags: %w", err)
 			}
 
 			tpl, err := parseTemplate(ctx, client, me.OrganizationIDs, template)
@@ -1759,6 +1790,7 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 			richParameters, err := prepWorkspaceBuild(inv, client, prepWorkspaceBuildArgs{
 				Action:            WorkspaceCreate,
 				TemplateVersionID: tpl.ActiveVersionID,
+				Owner:             codersdk.Me,
 
 				RichParameterFile: parameterFlags.richParameterFile,
 				RichParameters:    cliRichParameters,
@@ -1773,15 +1805,41 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 			}
 			tracer := tracerProvider.Tracer(scaletestTracerName)
 
-			reg := prometheus.NewRegistry()
-			metrics := autostart.NewMetrics(reg)
-
 			setupBarrier := new(sync.WaitGroup)
 			setupBarrier.Add(int(workspaceCount))
 
-			th := harness.NewTestHarness(timeoutStrategy.wrapStrategy(harness.ConcurrentExecutionStrategy{}), cleanupStrategy.toStrategy())
+			// The workspace-build-updates experiment must be enabled to use
+			// the centralized pubsub channel for coordinating workspace builds.
+			experiments, err := client.Experiments(ctx)
+			if err != nil {
+				return xerrors.Errorf("get experiments: %w", err)
+			}
+			if !experiments.Enabled(codersdk.ExperimentWorkspaceBuildUpdates) {
+				return xerrors.New("the workspace-build-updates experiment must be enabled to run the autostart scaletest")
+			}
+
+			workspaceNames := make([]string, 0, workspaceCount)
+			resultSink := make(chan autostart.RunResult, workspaceCount)
 			for i := range workspaceCount {
 				id := strconv.Itoa(int(i))
+				workspaceNames = append(workspaceNames, loadtestutil.GenerateDeterministicWorkspaceName(id))
+			}
+			dispatcher := autostart.NewWorkspaceDispatcher(workspaceNames)
+
+			decoder, err := client.WatchAllWorkspaceBuilds(ctx)
+			if err != nil {
+				return xerrors.Errorf("watch all workspace builds: %w", err)
+			}
+			defer decoder.Close()
+
+			// Start the dispatcher. It will run in a goroutine and automatically
+			// close all workspace channels when the build updates channel closes.
+			dispatcher.Start(ctx, decoder.Chan())
+
+			th := harness.NewTestHarness(timeoutStrategy.wrapStrategy(harness.ConcurrentExecutionStrategy{}), cleanupStrategy.toStrategy())
+			for workspaceName, buildUpdatesChannel := range dispatcher.Channels {
+				id := strings.TrimPrefix(workspaceName, loadtestutil.ScaleTestPrefix+"-")
+
 				config := autostart.Config{
 					User: createusers.Config{
 						OrganizationID: me.OrganizationIDs[0],
@@ -1791,18 +1849,27 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 						Request: codersdk.CreateWorkspaceRequest{
 							TemplateID:          tpl.ID,
 							RichParameterValues: richParameters,
+							// Use deterministic workspace name so we can pre-create the channel.
+							Name: workspaceName,
 						},
 					},
-					WorkspaceJobTimeout: workspaceJobTimeout,
-					AutostartDelay:      autostartDelay,
-					AutostartTimeout:    autostartTimeout,
-					Metrics:             metrics,
-					SetupBarrier:        setupBarrier,
+					WorkspaceJobTimeout:   workspaceJobTimeout,
+					AutostartBuildTimeout: autostartBuildTimeout,
+					AutostartDelay:        autostartDelay,
+					SetupBarrier:          setupBarrier,
+					BuildUpdates:          buildUpdatesChannel,
+					ResultSink:            resultSink,
 				}
 				if err := config.Validate(); err != nil {
 					return xerrors.Errorf("validate config: %w", err)
 				}
-				var runner harness.Runnable = autostart.NewRunner(client, config)
+				// use an independent client for each Runner, so they don't reuse TCP connections. This can lead to
+				// requests being unbalanced among Coder instances.
+				runnerClient, err := loadtestutil.DupClientCopyingHeaders(client, BypassHeader)
+				if err != nil {
+					return xerrors.Errorf("create runner client: %w", err)
+				}
+				var runner harness.Runnable = autostart.NewRunner(runnerClient, config)
 				if tracingEnabled {
 					runner = &runnableTraceWrapper{
 						tracer:   tracer,
@@ -1813,18 +1880,11 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 				th.AddRun(autostartTestName, id, runner)
 			}
 
-			logger := inv.Logger
-			prometheusSrvClose := ServeHandler(ctx, logger, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), prometheusFlags.Address, "prometheus")
-			defer prometheusSrvClose()
-
 			defer func() {
 				_, _ = fmt.Fprintln(inv.Stderr, "\nUploading traces...")
 				if err := closeTracing(ctx); err != nil {
 					_, _ = fmt.Fprintf(inv.Stderr, "\nError uploading traces: %+v\n", err)
 				}
-				// Wait for prometheus metrics to be scraped
-				_, _ = fmt.Fprintf(inv.Stderr, "Waiting %s for prometheus metrics to be scraped\n", prometheusFlags.Wait)
-				<-time.After(prometheusFlags.Wait)
 			}()
 
 			_, _ = fmt.Fprintln(inv.Stderr, "Running autostart load test...")
@@ -1835,31 +1895,40 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 				return xerrors.Errorf("run test harness (harness failure, not a test failure): %w", err)
 			}
 
-			// If the command was interrupted, skip stats.
-			if notifyCtx.Err() != nil {
-				return notifyCtx.Err()
+			// Collect all metrics from the channel.
+			close(resultSink)
+			var runResults []autostart.RunResult
+			for r := range resultSink {
+				runResults = append(runResults, r)
 			}
 
 			res := th.Results()
-			for _, o := range outputs {
-				err = o.write(res, inv.Stdout)
-				if err != nil {
-					return xerrors.Errorf("write output %q to %q: %w", o.format, o.path, err)
+			if res.TotalFail > 0 {
+				return xerrors.New("load test failed, see above for more details")
+			}
+
+			_, _ = fmt.Fprintf(inv.Stderr, "\nAll %d autostart builds completed successfully (elapsed: %s)\n", res.TotalRuns, time.Duration(res.Elapsed).Round(time.Millisecond))
+
+			if len(runResults) > 0 {
+				results := autostart.NewRunResults(runResults)
+				for _, out := range outputs {
+					if err := out.write(results.ToHarnessResults(), inv.Stdout); err != nil {
+						return xerrors.Errorf("write output: %w", err)
+					}
 				}
 			}
 
 			if !noCleanup {
 				_, _ = fmt.Fprintln(inv.Stderr, "\nCleaning up...")
-				cleanupCtx, cleanupCancel := cleanupStrategy.toContext(ctx)
+				cleanupCtx, cleanupCancel := cleanupStrategy.toContext(context.Background())
 				defer cleanupCancel()
 				err = th.Cleanup(cleanupCtx)
 				if err != nil {
 					return xerrors.Errorf("cleanup tests: %w", err)
 				}
-			}
-
-			if res.TotalFail > 0 {
-				return xerrors.New("load test failed, see above for more details")
+				_, _ = fmt.Fprintln(inv.Stderr, "Cleanup complete")
+			} else {
+				_, _ = fmt.Fprintln(inv.Stderr, "\nSkipping cleanup (--no-cleanup specified). Resources left running.")
 			}
 
 			return nil
@@ -1883,18 +1952,18 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 			Value:       serpent.DurationOf(&workspaceJobTimeout),
 		},
 		{
+			Flag:        "autostart-build-timeout",
+			Env:         "CODER_SCALETEST_AUTOSTART_BUILD_TIMEOUT",
+			Default:     "15m",
+			Description: "Timeout for the autostart build to complete. Must be longer than workspace-job-timeout to account for queueing time in high-load scenarios.",
+			Value:       serpent.DurationOf(&autostartBuildTimeout),
+		},
+		{
 			Flag:        "autostart-delay",
 			Env:         "CODER_SCALETEST_AUTOSTART_DELAY",
 			Default:     "2m",
 			Description: "How long after all the workspaces have been stopped to schedule them to be started again.",
 			Value:       serpent.DurationOf(&autostartDelay),
-		},
-		{
-			Flag:        "autostart-timeout",
-			Env:         "CODER_SCALETEST_AUTOSTART_TIMEOUT",
-			Default:     "5m",
-			Description: "Timeout for the autostart build to be initiated after the scheduled start time.",
-			Value:       serpent.DurationOf(&autostartTimeout),
 		},
 		{
 			Flag:          "template",
@@ -1914,263 +1983,9 @@ func (r *RootCmd) scaletestAutostart() *serpent.Command {
 
 	cmd.Options = append(cmd.Options, parameterFlags.cliParameters()...)
 	tracingFlags.attach(&cmd.Options)
+	output.attach(&cmd.Options)
 	timeoutStrategy.attach(&cmd.Options)
 	cleanupStrategy.attach(&cmd.Options)
-	output.attach(&cmd.Options)
-	prometheusFlags.attach(&cmd.Options)
-	return cmd
-}
-
-func (r *RootCmd) scaletestNotifications() *serpent.Command {
-	var (
-		userCount           int64
-		ownerUserPercentage float64
-		notificationTimeout time.Duration
-		dialTimeout         time.Duration
-		noCleanup           bool
-
-		tracingFlags = &scaletestTracingFlags{}
-
-		// This test requires unlimited concurrency.
-		timeoutStrategy = &timeoutFlags{}
-		cleanupStrategy = newScaletestCleanupStrategy()
-		output          = &scaletestOutputFlags{}
-		prometheusFlags = &scaletestPrometheusFlags{}
-	)
-
-	cmd := &serpent.Command{
-		Use:   "notifications",
-		Short: "Simulate notification delivery by creating many users listening to notifications.",
-		Handler: func(inv *serpent.Invocation) error {
-			ctx := inv.Context()
-			client, err := r.InitClient(inv)
-			if err != nil {
-				return err
-			}
-
-			notifyCtx, stop := signal.NotifyContext(ctx, StopSignals...)
-			defer stop()
-			ctx = notifyCtx
-
-			me, err := requireAdmin(ctx, client)
-			if err != nil {
-				return err
-			}
-
-			client.HTTPClient = &http.Client{
-				Transport: &codersdk.HeaderTransport{
-					Transport: http.DefaultTransport,
-					Header: map[string][]string{
-						codersdk.BypassRatelimitHeader: {"true"},
-					},
-				},
-			}
-
-			if userCount <= 0 {
-				return xerrors.Errorf("--user-count must be greater than 0")
-			}
-
-			if ownerUserPercentage < 0 || ownerUserPercentage > 100 {
-				return xerrors.Errorf("--owner-user-percentage must be between 0 and 100")
-			}
-
-			ownerUserCount := int64(float64(userCount) * ownerUserPercentage / 100)
-			if ownerUserCount == 0 && ownerUserPercentage > 0 {
-				ownerUserCount = 1
-			}
-			regularUserCount := userCount - ownerUserCount
-
-			_, _ = fmt.Fprintf(inv.Stderr, "Distribution plan:\n")
-			_, _ = fmt.Fprintf(inv.Stderr, "  Total users: %d\n", userCount)
-			_, _ = fmt.Fprintf(inv.Stderr, "  Owner users: %d (%.1f%%)\n", ownerUserCount, ownerUserPercentage)
-			_, _ = fmt.Fprintf(inv.Stderr, "  Regular users: %d (%.1f%%)\n", regularUserCount, 100.0-ownerUserPercentage)
-
-			outputs, err := output.parse()
-			if err != nil {
-				return xerrors.Errorf("could not parse --output flags")
-			}
-
-			tracerProvider, closeTracing, tracingEnabled, err := tracingFlags.provider(ctx)
-			if err != nil {
-				return xerrors.Errorf("create tracer provider: %w", err)
-			}
-			tracer := tracerProvider.Tracer(scaletestTracerName)
-
-			reg := prometheus.NewRegistry()
-			metrics := notifications.NewMetrics(reg)
-
-			logger := inv.Logger
-			prometheusSrvClose := ServeHandler(ctx, logger, promhttp.HandlerFor(reg, promhttp.HandlerOpts{}), prometheusFlags.Address, "prometheus")
-			defer prometheusSrvClose()
-
-			defer func() {
-				_, _ = fmt.Fprintln(inv.Stderr, "\nUploading traces...")
-				if err := closeTracing(ctx); err != nil {
-					_, _ = fmt.Fprintf(inv.Stderr, "\nError uploading traces: %+v\n", err)
-				}
-				// Wait for prometheus metrics to be scraped
-				_, _ = fmt.Fprintf(inv.Stderr, "Waiting %s for prometheus metrics to be scraped\n", prometheusFlags.Wait)
-				<-time.After(prometheusFlags.Wait)
-			}()
-
-			_, _ = fmt.Fprintln(inv.Stderr, "Creating users...")
-
-			dialBarrier := &sync.WaitGroup{}
-			ownerWatchBarrier := &sync.WaitGroup{}
-			dialBarrier.Add(int(userCount))
-			ownerWatchBarrier.Add(int(ownerUserCount))
-
-			expectedNotifications := map[uuid.UUID]chan time.Time{
-				notificationsLib.TemplateUserAccountCreated: make(chan time.Time, 1),
-				notificationsLib.TemplateUserAccountDeleted: make(chan time.Time, 1),
-			}
-
-			configs := make([]notifications.Config, 0, userCount)
-			for range ownerUserCount {
-				config := notifications.Config{
-					User: createusers.Config{
-						OrganizationID: me.OrganizationIDs[0],
-					},
-					Roles:                 []string{codersdk.RoleOwner},
-					NotificationTimeout:   notificationTimeout,
-					DialTimeout:           dialTimeout,
-					DialBarrier:           dialBarrier,
-					ReceivingWatchBarrier: ownerWatchBarrier,
-					ExpectedNotifications: expectedNotifications,
-					Metrics:               metrics,
-				}
-				if err := config.Validate(); err != nil {
-					return xerrors.Errorf("validate config: %w", err)
-				}
-				configs = append(configs, config)
-			}
-			for range regularUserCount {
-				config := notifications.Config{
-					User: createusers.Config{
-						OrganizationID: me.OrganizationIDs[0],
-					},
-					Roles:                 []string{},
-					NotificationTimeout:   notificationTimeout,
-					DialTimeout:           dialTimeout,
-					DialBarrier:           dialBarrier,
-					ReceivingWatchBarrier: ownerWatchBarrier,
-					Metrics:               metrics,
-				}
-				if err := config.Validate(); err != nil {
-					return xerrors.Errorf("validate config: %w", err)
-				}
-				configs = append(configs, config)
-			}
-
-			go triggerUserNotifications(
-				ctx,
-				logger,
-				client,
-				me.OrganizationIDs[0],
-				dialBarrier,
-				dialTimeout,
-				expectedNotifications,
-			)
-
-			th := harness.NewTestHarness(timeoutStrategy.wrapStrategy(harness.ConcurrentExecutionStrategy{}), cleanupStrategy.toStrategy())
-
-			for i, config := range configs {
-				id := strconv.Itoa(i)
-				name := fmt.Sprintf("notifications-%s", id)
-				var runner harness.Runnable = notifications.NewRunner(client, config)
-				if tracingEnabled {
-					runner = &runnableTraceWrapper{
-						tracer:   tracer,
-						spanName: name,
-						runner:   runner,
-					}
-				}
-
-				th.AddRun(name, id, runner)
-			}
-
-			_, _ = fmt.Fprintln(inv.Stderr, "Running notification delivery scaletest...")
-			testCtx, testCancel := timeoutStrategy.toContext(ctx)
-			defer testCancel()
-			err = th.Run(testCtx)
-			if err != nil {
-				return xerrors.Errorf("run test harness (harness failure, not a test failure): %w", err)
-			}
-
-			// If the command was interrupted, skip stats.
-			if notifyCtx.Err() != nil {
-				return notifyCtx.Err()
-			}
-
-			res := th.Results()
-			for _, o := range outputs {
-				err = o.write(res, inv.Stdout)
-				if err != nil {
-					return xerrors.Errorf("write output %q to %q: %w", o.format, o.path, err)
-				}
-			}
-
-			if !noCleanup {
-				_, _ = fmt.Fprintln(inv.Stderr, "\nCleaning up...")
-				cleanupCtx, cleanupCancel := cleanupStrategy.toContext(ctx)
-				defer cleanupCancel()
-				err = th.Cleanup(cleanupCtx)
-				if err != nil {
-					return xerrors.Errorf("cleanup tests: %w", err)
-				}
-			}
-
-			if res.TotalFail > 0 {
-				return xerrors.New("load test failed, see above for more details")
-			}
-
-			return nil
-		},
-	}
-
-	cmd.Options = serpent.OptionSet{
-		{
-			Flag:          "user-count",
-			FlagShorthand: "c",
-			Env:           "CODER_SCALETEST_NOTIFICATION_USER_COUNT",
-			Description:   "Required: Total number of users to create.",
-			Value:         serpent.Int64Of(&userCount),
-			Required:      true,
-		},
-		{
-			Flag:        "owner-user-percentage",
-			Env:         "CODER_SCALETEST_NOTIFICATION_OWNER_USER_PERCENTAGE",
-			Default:     "20.0",
-			Description: "Percentage of users to assign Owner role to (0-100).",
-			Value:       serpent.Float64Of(&ownerUserPercentage),
-		},
-		{
-			Flag:        "notification-timeout",
-			Env:         "CODER_SCALETEST_NOTIFICATION_TIMEOUT",
-			Default:     "5m",
-			Description: "How long to wait for notifications after triggering.",
-			Value:       serpent.DurationOf(&notificationTimeout),
-		},
-		{
-			Flag:        "dial-timeout",
-			Env:         "CODER_SCALETEST_DIAL_TIMEOUT",
-			Default:     "2m",
-			Description: "Timeout for dialing the notification websocket endpoint.",
-			Value:       serpent.DurationOf(&dialTimeout),
-		},
-		{
-			Flag:        "no-cleanup",
-			Env:         "CODER_SCALETEST_NO_CLEANUP",
-			Description: "Do not clean up resources after the test completes.",
-			Value:       serpent.BoolOf(&noCleanup),
-		},
-	}
-
-	tracingFlags.attach(&cmd.Options)
-	timeoutStrategy.attach(&cmd.Options)
-	cleanupStrategy.attach(&cmd.Options)
-	output.attach(&cmd.Options)
-	prometheusFlags.attach(&cmd.Options)
 	return cmd
 }
 
@@ -2183,8 +1998,9 @@ type runnableTraceWrapper struct {
 }
 
 var (
-	_ harness.Runnable  = &runnableTraceWrapper{}
-	_ harness.Cleanable = &runnableTraceWrapper{}
+	_ harness.Runnable    = &runnableTraceWrapper{}
+	_ harness.Cleanable   = &runnableTraceWrapper{}
+	_ harness.Collectable = &runnableTraceWrapper{}
 )
 
 func (r *runnableTraceWrapper) Run(ctx context.Context, id string, logs io.Writer) error {
@@ -2224,6 +2040,14 @@ func (r *runnableTraceWrapper) Cleanup(ctx context.Context, id string, logs io.W
 	defer span.End()
 
 	return c.Cleanup(ctx, id, logs)
+}
+
+func (r *runnableTraceWrapper) GetMetrics() map[string]any {
+	c, ok := r.runner.(harness.Collectable)
+	if !ok {
+		return nil
+	}
+	return c.GetMetrics()
 }
 
 func getScaletestWorkspaces(ctx context.Context, client *codersdk.Client, owner, template string) ([]codersdk.Workspace, int, error) {
@@ -2372,73 +2196,6 @@ func parseTargetRange(name, targets string) (start, end int, err error) {
 	}
 
 	return start, end, nil
-}
-
-// triggerUserNotifications waits for all test users to connect,
-// then creates and deletes a test user to trigger notification events for testing.
-func triggerUserNotifications(
-	ctx context.Context,
-	logger slog.Logger,
-	client *codersdk.Client,
-	orgID uuid.UUID,
-	dialBarrier *sync.WaitGroup,
-	dialTimeout time.Duration,
-	expectedNotifications map[uuid.UUID]chan time.Time,
-) {
-	logger.Info(ctx, "waiting for all users to connect")
-
-	// Wait for all users to connect
-	waitCtx, cancel := context.WithTimeout(ctx, dialTimeout+30*time.Second)
-	defer cancel()
-
-	done := make(chan struct{})
-	go func() {
-		dialBarrier.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		logger.Info(ctx, "all users connected")
-	case <-waitCtx.Done():
-		if waitCtx.Err() == context.DeadlineExceeded {
-			logger.Error(ctx, "timeout waiting for users to connect")
-		} else {
-			logger.Info(ctx, "context canceled while waiting for users")
-		}
-		return
-	}
-
-	const (
-		triggerUsername = "scaletest-trigger-user"
-		triggerEmail    = "scaletest-trigger@example.com"
-	)
-
-	logger.Info(ctx, "creating test user to test notifications",
-		slog.F("username", triggerUsername),
-		slog.F("email", triggerEmail),
-		slog.F("org_id", orgID))
-
-	testUser, err := client.CreateUserWithOrgs(ctx, codersdk.CreateUserRequestWithOrgs{
-		OrganizationIDs: []uuid.UUID{orgID},
-		Username:        triggerUsername,
-		Email:           triggerEmail,
-		Password:        "test-password-123",
-	})
-	if err != nil {
-		logger.Error(ctx, "create test user", slog.Error(err))
-		return
-	}
-	expectedNotifications[notificationsLib.TemplateUserAccountCreated] <- time.Now()
-
-	err = client.DeleteUser(ctx, testUser.ID)
-	if err != nil {
-		logger.Error(ctx, "delete test user", slog.Error(err))
-		return
-	}
-	expectedNotifications[notificationsLib.TemplateUserAccountDeleted] <- time.Now()
-	close(expectedNotifications[notificationsLib.TemplateUserAccountCreated])
-	close(expectedNotifications[notificationsLib.TemplateUserAccountDeleted])
 }
 
 func createWorkspaceAppConfig(client *codersdk.Client, appHost, app string, workspace codersdk.Workspace, agent codersdk.WorkspaceAgent) (workspacetraffic.AppConfig, error) {

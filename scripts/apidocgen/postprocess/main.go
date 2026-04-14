@@ -9,10 +9,13 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
 	"golang.org/x/xerrors"
+
+	"github.com/coder/coder/v2/scripts/atomicwrite"
 )
 
 const (
@@ -126,7 +129,7 @@ func writeDocs(sections [][]byte) error {
 	log.Println("Write docs to destination")
 
 	apiDir := path.Join(docsDirectory, apiSubdir)
-	err := os.WriteFile(path.Join(apiDir, apiIndexFile), []byte(apiIndexContent), 0o644) // #nosec
+	err := atomicwrite.File(path.Join(apiDir, apiIndexFile), []byte(apiIndexContent))
 	if err != nil {
 		return xerrors.Errorf(`can't write the index file: %w`, err)
 	}
@@ -147,7 +150,7 @@ func writeDocs(sections [][]byte) error {
 
 		mdFilename := toMdFilename(sectionName)
 		docPath := path.Join(apiDir, mdFilename)
-		err = os.WriteFile(docPath, section, 0o644) // #nosec
+		err = atomicwrite.File(docPath, section)
 		if err != nil {
 			return xerrors.Errorf(`can't write doc file "%s": %w`, docPath, err)
 		}
@@ -166,7 +169,7 @@ func writeDocs(sections [][]byte) error {
 		if mdFiles[j].title == "General" {
 			return false // ... < "General" - not sorted
 		}
-		return sort.StringsAreSorted([]string{mdFiles[i].title, mdFiles[j].title})
+		return slices.IsSorted([]string{mdFiles[i].title, mdFiles[j].title})
 	})
 
 	// Update manifest.json
@@ -198,20 +201,26 @@ func writeDocs(sections [][]byte) error {
 	}
 
 	for i, r := range m.Routes {
-		if r.Title != "API" {
+		if r.Title != "Reference" {
 			continue
 		}
-
-		var children []route
-		for _, mdf := range mdFiles {
-			docRoute := route{
-				Title: mdf.title,
-				Path:  mdf.path,
+		for j, child := range r.Children {
+			if child.Title != "REST API" {
+				continue
 			}
-			children = append(children, docRoute)
-		}
 
-		m.Routes[i].Children = children
+			var children []route
+			for _, mdf := range mdFiles {
+				docRoute := route{
+					Title: mdf.title,
+					Path:  mdf.path,
+				}
+				children = append(children, docRoute)
+			}
+
+			m.Routes[i].Children[j].Children = children
+			break
+		}
 		break
 	}
 
@@ -220,7 +229,7 @@ func writeDocs(sections [][]byte) error {
 		return xerrors.Errorf("json.Marshal failed: %w", err)
 	}
 
-	err = os.WriteFile(manifestPath, manifestFile, 0o644) // #nosec
+	err = atomicwrite.File(manifestPath, manifestFile)
 	if err != nil {
 		return xerrors.Errorf("can't write manifest file: %w", err)
 	}
@@ -239,5 +248,5 @@ func extractSectionName(section []byte) (string, error) {
 }
 
 func toMdFilename(sectionName string) string {
-	return nonAlphanumericRegex.ReplaceAllLiteralString(strings.ToLower(sectionName), "-") + ".md"
+	return nonAlphanumericRegex.ReplaceAllLiteralString(strings.ReplaceAll(strings.ToLower(sectionName), " ", ""), "-") + ".md"
 }

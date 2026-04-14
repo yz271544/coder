@@ -137,9 +137,9 @@
 					"icon_path": "./images/icons/cloud.svg",
 					"children": [
 						{
-							"title": "AWS EC2",
-							"description": "Install Coder on AWS EC2",
-							"path": "./install/cloud/ec2.md"
+							"title": "AWS Marketplace",
+							"description": "Install Coder via AWS Marketplace",
+							"path": "./install/cloud/aws-marketplace.md"
 						},
 						{
 							"title": "GCP Compute Engine",
@@ -169,7 +169,14 @@
 					"title": "Upgrading",
 					"description": "Learn how to upgrade Coder",
 					"path": "./install/upgrade.md",
-					"icon_path": "./images/icons/upgrade.svg"
+					"icon_path": "./images/icons/upgrade.svg",
+					"children": [
+						{
+							"title": "Upgrading Best Practices",
+							"description": "Best practices and troubleshooting for Coder upgrades",
+							"path": "./install/upgrade-best-practices.md"
+						}
+					]
 				},
 				{
 					"title": "Uninstall",
@@ -187,6 +194,11 @@
 							"title": "Feature stages",
 							"description": "Information about pre-GA stages.",
 							"path": "./install/releases/feature-stages.md"
+						},
+						{
+							"title": "Upgrading from ESR 2.24 to 2.29",
+							"description": "Upgrade Guide for ESR Releases",
+							"path": "./install/releases/esr-2.24-2.29-upgrade.md"
 						}
 					]
 				}
@@ -208,6 +220,11 @@
 							"title": "Visual Studio Code",
 							"description": "Use VSCode with Coder in the desktop or browser",
 							"path": "./user-guides/workspace-access/vscode.md"
+						},
+						{
+							"title": "Web Terminal",
+							"description": "Use the browser-based terminal to access your workspace",
+							"path": "./user-guides/workspace-access/web-terminal.md"
 						},
 						{
 							"title": "JetBrains IDEs",
@@ -276,6 +293,11 @@
 							"title": "Windsurf",
 							"description": "Access your workspace with Windsurf",
 							"path": "./user-guides/workspace-access/windsurf.md"
+						},
+						{
+							"title": "Antigravity",
+							"description": "Access your workspace with Antigravity",
+							"path": "./user-guides/workspace-access/antigravity.md"
 						}
 					]
 				},
@@ -299,6 +321,12 @@
 					"icon_path": "./images/icons/generic.svg"
 				},
 				{
+					"title": "Workspace Sharing",
+					"description": "Sharing workspaces",
+					"path": "./user-guides/shared-workspaces.md",
+					"icon_path": "./images/icons/generic.svg"
+				},
+				{
 					"title": "Workspace Scheduling",
 					"description": "Cost control with workspace schedules",
 					"path": "./user-guides/workspace-scheduling.md",
@@ -311,7 +339,7 @@
 					"icon_path": "./images/icons/circle-dot.svg"
 				},
 				{
-					"title": "Dev Containers Integration",
+					"title": "Dev Containers",
 					"description": "Run containerized development environments in your Coder workspace using the dev containers specification.",
 					"path": "./user-guides/devcontainers/index.md",
 					"icon_path": "./images/icons/container.svg",
@@ -320,6 +348,11 @@
 							"title": "Working with dev containers",
 							"description": "Access dev containers via SSH, your IDE, or web terminal.",
 							"path": "./user-guides/devcontainers/working-with-dev-containers.md"
+						},
+						{
+							"title": "Customizing dev containers",
+							"description": "Configure custom agent names, apps, and display options in devcontainer.json.",
+							"path": "./user-guides/devcontainers/customizing-dev-containers.md"
 						},
 						{
 							"title": "Troubleshooting dev containers",
@@ -358,6 +391,11 @@
 							"title": "Telemetry",
 							"description": "Learn what usage telemetry Coder collects",
 							"path": "./admin/setup/telemetry.md"
+						},
+						{
+							"title": "Data Retention",
+							"description": "Configure data retention policies for database tables",
+							"path": "./admin/setup/data-retention.md"
 						}
 					]
 				},
@@ -391,6 +429,11 @@
 									"title": "Up to 3,000 Users",
 									"description": "Enterprise-scale architecture recommendations for Coder deployments that support up to 3,000 users",
 									"path": "./admin/infrastructure/validated-architectures/3k-users.md"
+								},
+								{
+									"title": "Up to 10,000 Users",
+									"description": "Enterprise-scale architecture recommendations for Coder deployments that support up to 10,000 users",
+									"path": "./admin/infrastructure/validated-architectures/10k-users.md"
 								}
 							]
 						},
@@ -428,6 +471,11 @@
 									"path": "./admin/users/oidc-auth/google.md"
 								},
 								{
+									"title": "Microsoft",
+									"description": "Configure Microsoft Entra ID as an OIDC provider",
+									"path": "./admin/users/oidc-auth/microsoft.md"
+								},
+								{
 									"title": "Configure OIDC refresh tokens",
 									"description": "How to configure OIDC refresh tokens",
 									"path": "./admin/users/oidc-auth/refresh-tokens.md"
@@ -447,7 +495,8 @@
 						{
 							"title": "Headless Authentication",
 							"description": "Create and manage headless service accounts for automated systems and API integrations",
-							"path": "./admin/users/headless-auth.md"
+							"path": "./admin/users/headless-auth.md",
+							"state": ["premium"]
 						},
 						{
 							"title": "Groups \u0026 Roles",
@@ -507,26 +556,9 @@
 									"path": "./admin/templates/managing-templates/change-management.md"
 								},
 								{
-									"title": "Dev containers",
-									"description": "Learn about using development containers in templates",
-									"path": "./admin/templates/managing-templates/devcontainers/index.md",
-									"children": [
-										{
-											"title": "Add a dev container template",
-											"description": "How to add a dev container template to Coder",
-											"path": "./admin/templates/managing-templates/devcontainers/add-devcontainer.md"
-										},
-										{
-											"title": "Dev container security and caching",
-											"description": "Configure dev container authentication and caching",
-											"path": "./admin/templates/managing-templates/devcontainers/devcontainer-security-caching.md"
-										},
-										{
-											"title": "Dev container releases and known issues",
-											"description": "Dev container releases and known issues",
-											"path": "./admin/templates/managing-templates/devcontainers/devcontainer-releases-known-issues.md"
-										}
-									]
+									"title": "Envbuilder",
+									"description": "Shift environment definition to repositories",
+									"path": "./admin/templates/managing-templates/envbuilder.md"
 								},
 								{
 									"title": "Template Dependencies",
@@ -598,6 +630,11 @@
 									"path": "./admin/templates/extending-templates/resource-persistence.md"
 								},
 								{
+									"title": "Environment Variables",
+									"description": "Inject environment variables into workspaces using coder_env",
+									"path": "./admin/templates/extending-templates/environment-variables.md"
+								},
+								{
 									"title": "Terraform Variables",
 									"description": "Use variables to manage template state",
 									"path": "./admin/templates/extending-templates/variables.md"
@@ -638,15 +675,43 @@
 									"path": "./admin/templates/extending-templates/provider-authentication.md"
 								},
 								{
-									"title": "Configure a template for dev containers",
-									"description": "How to use configure your template for dev containers",
+									"title": "Dev Containers",
+									"description": "Extend templates with containerized dev environments",
 									"path": "./admin/templates/extending-templates/devcontainers.md"
+								},
+								{
+									"title": "Improving Agent Resiliency",
+									"description": "Manage agent child process CPU and OOM priority",
+									"path": "./admin/templates/extending-templates/process-priority.md"
 								},
 								{
 									"title": "Process Logging",
 									"description": "Log workspace processes",
 									"path": "./admin/templates/extending-templates/process-logging.md",
 									"state": ["premium"]
+								},
+								{
+									"title": "Startup Dependencies",
+									"description": "Coordinate workspace startup with dependency management",
+									"path": "./admin/templates/startup-coordination/index.md",
+									"state": ["early access"],
+									"children": [
+										{
+											"title": "Usage",
+											"description": "How to use startup coordination",
+											"path": "./admin/templates/startup-coordination/usage.md"
+										},
+										{
+											"title": "Troubleshooting",
+											"description": "Troubleshoot startup coordination",
+											"path": "./admin/templates/startup-coordination/troubleshooting.md"
+										},
+										{
+											"title": "Examples",
+											"description": "Examples of startup coordination",
+											"path": "./admin/templates/startup-coordination/example.md"
+										}
+									]
 								}
 							]
 						},
@@ -739,6 +804,40 @@
 							"title": "OAuth2 Provider",
 							"description": "Use Coder as an OAuth2 provider",
 							"path": "./admin/integrations/oauth2-provider.md"
+						},
+						{
+							"title": "Dev Containers",
+							"description": "Configure dev container support using Docker or Envbuilder",
+							"path": "./admin/integrations/devcontainers/index.md",
+							"children": [
+								{
+									"title": "Dev Containers Integration",
+									"description": "Configure native dev containers with Docker",
+									"path": "./admin/integrations/devcontainers/integration.md"
+								},
+								{
+									"title": "Envbuilder",
+									"description": "Build dev containers without Docker",
+									"path": "./admin/integrations/devcontainers/envbuilder/index.md",
+									"children": [
+										{
+											"title": "Add an Envbuilder template",
+											"description": "How to add an Envbuilder template",
+											"path": "./admin/integrations/devcontainers/envbuilder/add-envbuilder.md"
+										},
+										{
+											"title": "Security and caching",
+											"description": "Configure authentication and caching",
+											"path": "./admin/integrations/devcontainers/envbuilder/envbuilder-security-caching.md"
+										},
+										{
+											"title": "Releases and known issues",
+											"description": "Release channels and known issues",
+											"path": "./admin/integrations/devcontainers/envbuilder/envbuilder-releases-known-issues.md"
+										}
+									]
+								}
+							]
 						}
 					]
 				},
@@ -881,24 +980,214 @@
 					"title": "Coder Tasks",
 					"description": "Run Coding Agents on your Own Infrastructure",
 					"path": "./ai-coder/tasks.md",
-					"state": ["beta"],
 					"children": [
 						{
 							"title": "Understanding Coder Tasks",
 							"description": "Core principles and concepts behind Coder Tasks",
-							"path": "./ai-coder/tasks-core-principles.md",
-							"state": ["beta"]
+							"path": "./ai-coder/tasks-core-principles.md"
 						},
 						{
 							"title": "Custom Agents",
 							"description": "Run custom agents with Coder Tasks",
-							"path": "./ai-coder/custom-agents.md",
-							"state": ["beta"]
+							"path": "./ai-coder/custom-agents.md"
 						},
 						{
-							"title": "Security \u0026 Boundaries",
-							"description": "Learn about security and boundaries when running AI coding agents in Coder",
+							"title": "Task Lifecycle",
+							"description": "How tasks pause and resume, and what gets preserved",
+							"path": "./ai-coder/tasks-lifecycle.md"
+						},
+						{
+							"title": "Agent Compatibility",
+							"description": "Which AI agents support session persistence across workspace restarts",
+							"path": "./ai-coder/agent-compatibility.md"
+						},
+						{
+							"title": "Tasks Migration Guide",
+							"description": "Changes to Coder Tasks made in v2.28",
+							"path": "./ai-coder/tasks-migration.md"
+						},
+						{
+							"title": "Security \u0026 Agent Firewall",
+							"description": "Learn about security and the Agent Firewall when running AI coding agents in Coder",
 							"path": "./ai-coder/security.md"
+						},
+						{
+							"title": "Create a GitHub to Coder Tasks Workflow",
+							"description": "How to setup Coder Tasks to run in GitHub",
+							"path": "./ai-coder/github-to-tasks.md"
+						}
+					]
+				},
+				{
+					"title": "AI Governance Add-On",
+					"description": "Features around managing agents at scale",
+					"path": "./ai-coder/ai-governance.md",
+					"state": ["premium"],
+					"children": [
+						{
+							"title": "Agent Firewall",
+							"description": "Understanding Agent Firewall in Coder Tasks",
+							"path": "./ai-coder/agent-firewall/index.md",
+							"state": ["premium"],
+							"children": [
+								{
+									"title": "NS Jail",
+									"description": "Documentation for Namespace Jail",
+									"path": "./ai-coder/agent-firewall/nsjail/index.md",
+									"children": [
+										{
+											"title": "NS Jail on Docker",
+											"description": "Runtime and permission requirements for running NS Jail on Docker",
+											"path": "./ai-coder/agent-firewall/nsjail/docker.md"
+										},
+										{
+											"title": "NS Jail on Kubernetes",
+											"description": "Runtime and permission requirements for running NS Jail on Kubernetes",
+											"path": "./ai-coder/agent-firewall/nsjail/k8s.md"
+										},
+										{
+											"title": "NS Jail on ECS",
+											"description": "Runtime and permission requirements for running NS Jail on ECS",
+											"path": "./ai-coder/agent-firewall/nsjail/ecs.md"
+										}
+									]
+								},
+								{
+									"title": "LandJail",
+									"description": "Documentation for LandJail",
+									"path": "./ai-coder/agent-firewall/landjail.md"
+								},
+								{
+									"title": "Rules Engine",
+									"description": "Documentation for the Agent Firewall rules engine",
+									"path": "./ai-coder/agent-firewall/rules-engine.md"
+								},
+								{
+									"title": "Version Compatibility",
+									"description": "Version requirements and compatibility information",
+									"path": "./ai-coder/agent-firewall/version.md"
+								}
+							]
+						},
+						{
+							"title": "AI Gateway",
+							"description": "AI Gateway for Enterprise Governance \u0026 Observability",
+							"path": "./ai-coder/ai-gateway/index.md",
+							"icon_path": "./images/icons/api.svg",
+							"state": ["premium"],
+							"children": [
+								{
+									"title": "Setup",
+									"description": "How to set up and configure AI Gateway",
+									"path": "./ai-coder/ai-gateway/setup.md"
+								},
+								{
+									"title": "Client Configuration",
+									"description": "How to configure your AI coding tools to use AI Gateway",
+									"path": "./ai-coder/ai-gateway/clients/index.md",
+									"children": [
+										{
+											"title": "Claude Code",
+											"description": "Configure Claude Code to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/claude-code.md"
+										},
+										{
+											"title": "Codex",
+											"description": "Configure Codex to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/codex.md"
+										},
+										{
+											"title": "Mux",
+											"description": "Configure Mux to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/mux.md"
+										},
+										{
+											"title": "OpenCode",
+											"description": "Configure OpenCode to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/opencode.md"
+										},
+										{
+											"title": "Factory",
+											"description": "Configure Factory to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/factory.md"
+										},
+										{
+											"title": "Cline",
+											"description": "Configure Cline to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/cline.md"
+										},
+										{
+											"title": "Kilo Code",
+											"description": "Configure Kilo Code to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/kilo-code.md"
+										},
+										{
+											"title": "Roo Code",
+											"description": "Configure Roo Code to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/roo-code.md"
+										},
+										{
+											"title": "VS Code",
+											"description": "Configure VS Code to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/vscode.md"
+										},
+										{
+											"title": "JetBrains",
+											"description": "Configure JetBrains IDEs to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/jetbrains.md"
+										},
+										{
+											"title": "Zed",
+											"description": "Configure Zed to use AI Gateway",
+											"path": "./ai-coder/ai-gateway/clients/zed.md"
+										},
+										{
+											"title": "GitHub Copilot",
+											"description": "Configure GitHub Copilot to use AI Gateway via AI Gateway Proxy",
+											"path": "./ai-coder/ai-gateway/clients/copilot.md"
+										}
+									]
+								},
+								{
+									"title": "MCP Tools Injection",
+									"description": "How to configure MCP servers for tools injection through AI Gateway",
+									"path": "./ai-coder/ai-gateway/mcp.md",
+									"state": ["early access"]
+								},
+								{
+									"title": "AI Gateway Proxy",
+									"description": "Proxy for AI coding tools without base URL override support",
+									"path": "./ai-coder/ai-gateway/ai-gateway-proxy/index.md",
+									"state": ["premium"],
+									"children": [
+										{
+											"title": "Setup",
+											"description": "How to set up and configure AI Gateway Proxy",
+											"path": "./ai-coder/ai-gateway/ai-gateway-proxy/setup.md"
+										}
+									]
+								},
+								{
+									"title": "Auditing AI Sessions",
+									"description": "How to audit AI sessions",
+									"path": "./ai-coder/ai-gateway/audit.md"
+								},
+								{
+									"title": "Monitoring",
+									"description": "How to monitor AI Gateway",
+									"path": "./ai-coder/ai-gateway/monitoring.md"
+								},
+								{
+									"title": "Reference",
+									"description": "Technical reference for AI Gateway",
+									"path": "./ai-coder/ai-gateway/reference.md"
+								}
+							]
+						},
+						{
+							"title": "Usage Data Reporting",
+							"description": "Configure AI usage data reporting",
+							"path": "./ai-coder/usage-data-reporting.md"
 						}
 					]
 				},
@@ -909,24 +1198,80 @@
 					"state": ["beta"]
 				},
 				{
-					"title": "Agent Boundaries",
-					"description": "Understanding Agent Boundaries in Coder Tasks",
-					"path": "./ai-coder/agent-boundary.md",
-					"state": ["beta"]
-				},
-				{
-					"title": "AI Bridge",
-					"description": "Centralized LLM and MCP proxy for platform teams",
-					"path": "./ai-coder/ai-bridge.md",
-					"icon_path": "./images/icons/api.svg",
-					"state": ["premium", "early access"]
-				},
-				{
-					"title": "Tasks CLI",
-					"description": "Coder CLI for managing tasks programmatically",
-					"path": "./ai-coder/cli.md",
-					"icon_path": "./images/icons/api.svg",
-					"state": ["beta"]
+					"title": "Coder Agents",
+					"description": "Self-hosted agent by Coder",
+					"path": "./ai-coder/agents/index.md",
+					"state": ["early access"],
+					"children": [
+						{
+							"title": "Getting Started",
+							"description": "Enable Coder Agents, prepare your deployment, and run your first Coder Agent",
+							"path": "./ai-coder/agents/getting-started.md",
+							"state": ["early access"]
+						},
+						{
+							"title": "Early Access",
+							"description": "About the Coder Agents Early Access program",
+							"path": "./ai-coder/agents/early-access.md",
+							"state": ["early access"]
+						},
+						{
+							"title": "Architecture",
+							"description": "How the agent in the control plane communicates with workspaces",
+							"path": "./ai-coder/agents/architecture.md",
+							"state": ["early access"]
+						},
+						{
+							"title": "Models",
+							"description": "Configure LLM providers and models for Coder Agents",
+							"path": "./ai-coder/agents/models.md",
+							"state": ["early access"]
+						},
+						{
+							"title": "Platform Controls",
+							"description": "How platform teams control agent behavior, models, and policies",
+							"path": "./ai-coder/agents/platform-controls/index.md",
+							"state": ["early access"],
+							"children": [
+								{
+									"title": "Template Optimization",
+									"description": "Best practices for creating templates that are discoverable and useful to Coder Agents",
+									"path": "./ai-coder/agents/platform-controls/template-optimization.md",
+									"state": ["early access"]
+								},
+								{
+									"title": "MCP Servers",
+									"description": "Configure external MCP servers that provide additional tools for agent chat sessions",
+									"path": "./ai-coder/agents/platform-controls/mcp-servers.md",
+									"state": ["early access"]
+								},
+								{
+									"title": "Spend Management",
+									"description": "Spend limits and cost tracking for Coder Agents",
+									"path": "./ai-coder/agents/platform-controls/usage-insights.md",
+									"state": ["early access"]
+								},
+								{
+									"title": "Data Retention",
+									"description": "Automatic cleanup of old conversation data",
+									"path": "./ai-coder/agents/platform-controls/chat-retention.md",
+									"state": ["early access"]
+								}
+							]
+						},
+						{
+							"title": "Extending Agents",
+							"description": "Add custom skills and MCP tools to agent workspaces",
+							"path": "./ai-coder/agents/extending-agents.md",
+							"state": ["early access"]
+						},
+						{
+							"title": "Chats API",
+							"description": "Programmatic access to Coder Agents via the experimental Chats API",
+							"path": "./ai-coder/agents/chats-api.md",
+							"state": ["early access"]
+						}
+					]
 				}
 			]
 		},
@@ -962,6 +1307,12 @@
 					"path": "./tutorials/configuring-okta.md"
 				},
 				{
+					"title": "Persistent Shared Workspaces",
+					"description": "Set up long-lived shared workspaces with service accounts and workspace sharing",
+					"path": "./tutorials/persistent-shared-workspaces.md",
+					"state": ["premium"]
+				},
+				{
 					"title": "Google to AWS Federation",
 					"description": "Federating a Google Cloud service account to AWS",
 					"path": "./tutorials/gcp-to-aws.md"
@@ -970,6 +1321,11 @@
 					"title": "JFrog Artifactory Integration",
 					"description": "Integrate Coder with JFrog Artifactory",
 					"path": "./admin/integrations/jfrog-artifactory.md"
+				},
+				{
+					"title": "Mirror Coder Registry with Artifactory",
+					"description": "Use JFrog Artifactory to mirror the Coder Registry for air-gapped deployments",
+					"path": "./install/registry-mirror-artifactory.md"
 				},
 				{
 					"title": "Istio Integration",
@@ -1087,6 +1443,10 @@
 							"path": "./reference/api/general.md"
 						},
 						{
+							"title": "AI Bridge",
+							"path": "./reference/api/aibridge.md"
+						},
+						{
 							"title": "Agents",
 							"path": "./reference/api/agents.md"
 						},
@@ -1111,6 +1471,10 @@
 							"path": "./reference/api/builds.md"
 						},
 						{
+							"title": "Chats",
+							"path": "./reference/api/chats.md"
+						},
+						{
 							"title": "Debug",
 							"path": "./reference/api/debug.md"
 						},
@@ -1127,12 +1491,20 @@
 							"path": "./reference/api/git.md"
 						},
 						{
+							"title": "InitScript",
+							"path": "./reference/api/initscript.md"
+						},
+						{
 							"title": "Insights",
 							"path": "./reference/api/insights.md"
 						},
 						{
 							"title": "Members",
 							"path": "./reference/api/members.md"
+						},
+						{
+							"title": "Notifications",
+							"path": "./reference/api/notifications.md"
 						},
 						{
 							"title": "Organizations",
@@ -1143,8 +1515,24 @@
 							"path": "./reference/api/portsharing.md"
 						},
 						{
+							"title": "Prebuilds",
+							"path": "./reference/api/prebuilds.md"
+						},
+						{
+							"title": "Provisioning",
+							"path": "./reference/api/provisioning.md"
+						},
+						{
 							"title": "Schemas",
 							"path": "./reference/api/schemas.md"
+						},
+						{
+							"title": "Secrets",
+							"path": "./reference/api/secrets.md"
+						},
+						{
+							"title": "Tasks",
+							"path": "./reference/api/tasks.md"
 						},
 						{
 							"title": "Templates",
@@ -1171,9 +1559,29 @@
 					"icon_path": "./images/icons/terminal.svg",
 					"children": [
 						{
+							"title": "aibridge",
+							"description": "Manage AI Bridge.",
+							"path": "reference/cli/aibridge.md"
+						},
+						{
+							"title": "aibridge interceptions",
+							"description": "Manage AI Bridge interceptions.",
+							"path": "reference/cli/aibridge_interceptions.md"
+						},
+						{
+							"title": "aibridge interceptions list",
+							"description": "List AI Bridge interceptions as JSON.",
+							"path": "reference/cli/aibridge_interceptions_list.md"
+						},
+						{
 							"title": "autoupdate",
 							"description": "Toggle auto-update policy for a workspace",
 							"path": "reference/cli/autoupdate.md"
+						},
+						{
+							"title": "boundary",
+							"description": "Network isolation tool for monitoring and restricting HTTP/HTTPS requests",
+							"path": "reference/cli/boundary.md"
 						},
 						{
 							"title": "coder",
@@ -1304,9 +1712,19 @@
 							"path": "reference/cli/login.md"
 						},
 						{
+							"title": "login token",
+							"description": "Print the current session token",
+							"path": "reference/cli/login_token.md"
+						},
+						{
 							"title": "logout",
 							"description": "Unauthenticate your local session",
 							"path": "reference/cli/logout.md"
+						},
+						{
+							"title": "logs",
+							"description": "View logs for a workspace",
+							"path": "reference/cli/logs.md"
 						},
 						{
 							"title": "netcheck",
@@ -1362,6 +1780,16 @@
 							"title": "organizations create",
 							"description": "Create a new organization.",
 							"path": "reference/cli/organizations_create.md"
+						},
+						{
+							"title": "organizations delete",
+							"description": "Delete an organization",
+							"path": "reference/cli/organizations_delete.md"
+						},
+						{
+							"title": "organizations list",
+							"description": "List all organizations",
+							"path": "reference/cli/organizations_list.md"
 						},
 						{
 							"title": "organizations members",
@@ -1434,6 +1862,11 @@
 							"path": "reference/cli/organizations_settings_set_role-sync.md"
 						},
 						{
+							"title": "organizations settings set workspace-sharing",
+							"description": "Workspace sharing settings for the organization.",
+							"path": "reference/cli/organizations_settings_set_workspace-sharing.md"
+						},
+						{
 							"title": "organizations settings show",
 							"description": "Outputs specified organization setting.",
 							"path": "reference/cli/organizations_settings_show.md"
@@ -1452,6 +1885,11 @@
 							"title": "organizations settings show role-sync",
 							"description": "Role sync settings to sync organization roles from an IdP.",
 							"path": "reference/cli/organizations_settings_show_role-sync.md"
+						},
+						{
+							"title": "organizations settings show workspace-sharing",
+							"description": "Workspace sharing settings for the organization.",
+							"path": "reference/cli/organizations_settings_show_workspace-sharing.md"
 						},
 						{
 							"title": "organizations show",
@@ -1689,6 +2127,51 @@
 							"path": "reference/cli/support_bundle.md"
 						},
 						{
+							"title": "task",
+							"description": "Manage tasks",
+							"path": "reference/cli/task.md"
+						},
+						{
+							"title": "task create",
+							"description": "Create a task",
+							"path": "reference/cli/task_create.md"
+						},
+						{
+							"title": "task delete",
+							"description": "Delete tasks",
+							"path": "reference/cli/task_delete.md"
+						},
+						{
+							"title": "task list",
+							"description": "List tasks",
+							"path": "reference/cli/task_list.md"
+						},
+						{
+							"title": "task logs",
+							"description": "Show a task's logs",
+							"path": "reference/cli/task_logs.md"
+						},
+						{
+							"title": "task pause",
+							"description": "Pause a task",
+							"path": "reference/cli/task_pause.md"
+						},
+						{
+							"title": "task resume",
+							"description": "Resume a task",
+							"path": "reference/cli/task_resume.md"
+						},
+						{
+							"title": "task send",
+							"description": "Send input to a task",
+							"path": "reference/cli/task_send.md"
+						},
+						{
+							"title": "task status",
+							"description": "Show the status of a task.",
+							"path": "reference/cli/task_status.md"
+						},
+						{
 							"title": "templates",
 							"description": "Manage templates",
 							"path": "reference/cli/templates.md"
@@ -1785,8 +2268,13 @@
 						},
 						{
 							"title": "tokens remove",
-							"description": "Delete a token",
+							"description": "Expire or delete a token",
 							"path": "reference/cli/tokens_remove.md"
+						},
+						{
+							"title": "tokens view",
+							"description": "Display detailed information about a token",
+							"path": "reference/cli/tokens_view.md"
 						},
 						{
 							"title": "unfavorite",

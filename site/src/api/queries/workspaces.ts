@@ -1,28 +1,34 @@
-import { API, type DeleteWorkspaceOptions } from "api/api";
-import { DetailedError, isApiValidationError } from "api/errors";
-import type {
-	CreateWorkspaceRequest,
-	ProvisionerLogLevel,
-	UsageAppName,
-	Workspace,
-	WorkspaceAgentLog,
-	WorkspaceBuild,
-	WorkspaceBuildParameter,
-	WorkspacesRequest,
-	WorkspacesResponse,
-} from "api/typesGenerated";
 import type { Dayjs } from "dayjs";
-import {
-	type WorkspacePermissions,
-	workspaceChecks,
-} from "modules/workspaces/permissions";
-import type { ConnectionStatus } from "pages/TerminalPage/types";
 import type {
+	MutationOptions,
 	QueryClient,
 	QueryOptions,
 	UseMutationOptions,
 	UseQueryOptions,
 } from "react-query";
+import { API, type DeleteWorkspaceOptions } from "#/api/api";
+import { DetailedError, isApiValidationError } from "#/api/errors";
+import type {
+	CreateWorkspaceRequest,
+	ProvisionerLogLevel,
+	UsageAppName,
+	Workspace,
+	WorkspaceACL,
+	WorkspaceAgent,
+	WorkspaceAgentDevcontainer,
+	WorkspaceAgentListContainersResponse,
+	WorkspaceAgentLog,
+	WorkspaceBuild,
+	WorkspaceBuildParameter,
+	WorkspaceRole,
+	WorkspacesRequest,
+	WorkspacesResponse,
+} from "#/api/typesGenerated";
+import type { ConnectionStatus } from "#/modules/terminal/types";
+import {
+	type WorkspacePermissions,
+	workspaceChecks,
+} from "#/modules/workspaces/permissions";
 import { checkAuthorization } from "./authCheck";
 import { disabledRefetchOptions } from "./util";
 import { workspaceBuildsKey } from "./workspaceBuilds";
@@ -32,6 +38,16 @@ export const workspaceByOwnerAndNameKey = (
 	name: string,
 ) => ["workspace", ownerUsername, name, "settings"];
 
+export const workspaceByIdKey = (workspaceId: string) =>
+	["workspace", workspaceId] as const;
+
+export const workspaceById = (workspaceId: string) => {
+	return {
+		queryKey: workspaceByIdKey(workspaceId),
+		queryFn: () => API.getWorkspace(workspaceId),
+	};
+};
+
 export const workspaceByOwnerAndName = (owner: string, name: string) => {
 	return {
 		queryKey: workspaceByOwnerAndNameKey(owner, name),
@@ -39,6 +55,63 @@ export const workspaceByOwnerAndName = (owner: string, name: string) => {
 			API.getWorkspaceByOwnerAndName(owner, name, {
 				include_deleted: true,
 			}),
+	};
+};
+
+const workspaceACLKey = (workspaceId: string) => ["workspaceAcl", workspaceId];
+
+export const workspaceACL = (workspaceId: string) => {
+	return {
+		queryKey: workspaceACLKey(workspaceId),
+		queryFn: () => API.getWorkspaceACL(workspaceId),
+	} satisfies QueryOptions<WorkspaceACL>;
+};
+
+export const setWorkspaceUserRole = (
+	queryClient: QueryClient,
+): MutationOptions<
+	void,
+	unknown,
+	{
+		workspaceId: string;
+		userId: string;
+		role: WorkspaceRole;
+	}
+> => {
+	return {
+		mutationFn: ({ workspaceId, userId, role }) =>
+			API.updateWorkspaceACL(workspaceId, {
+				user_roles: {
+					[userId]: role,
+				},
+			}),
+		onSuccess: async (_res, { workspaceId }) => {
+			await queryClient.invalidateQueries({
+				queryKey: workspaceACLKey(workspaceId),
+			});
+		},
+	};
+};
+
+export const setWorkspaceGroupRole = (
+	queryClient: QueryClient,
+): MutationOptions<
+	void,
+	unknown,
+	{ workspaceId: string; groupId: string; role: WorkspaceRole }
+> => {
+	return {
+		mutationFn: ({ workspaceId, groupId, role }) =>
+			API.updateWorkspaceACL(workspaceId, {
+				group_roles: {
+					[groupId]: role,
+				},
+			}),
+		onSuccess: async (_res, { workspaceId }) => {
+			await queryClient.invalidateQueries({
+				queryKey: workspaceACLKey(workspaceId),
+			});
+		},
 	};
 };
 
@@ -138,7 +211,7 @@ async function findMatchWorkspace(q: string): Promise<Workspace | undefined> {
 	}
 }
 
-function workspacesKey(req: WorkspacesRequest = {}) {
+export function workspacesKey(req: WorkspacesRequest = {}) {
 	return ["workspaces", req] as const;
 }
 
@@ -416,7 +489,7 @@ export const workspacePermissions = (workspace?: Workspace) => {
 			checks: workspace ? workspaceChecks(workspace) : {},
 		}),
 		queryKey: ["workspaces", workspace?.id, "permissions"],
-		enabled: !!workspace,
+		enabled: Boolean(workspace),
 		staleTime: Number.POSITIVE_INFINITY,
 	};
 };
@@ -429,4 +502,76 @@ export const workspaceAgentCredentials = (
 		queryKey: ["workspaces", workspaceId, "agents", agentName, "credentials"],
 		queryFn: () => API.getWorkspaceAgentCredentials(workspaceId, agentName),
 	};
+};
+
+export const workspaceAgentContainersKey = (agentId: string) => [
+	"agents",
+	agentId,
+	"containers",
+];
+
+export const workspaceAgentContainers = (agent: WorkspaceAgent) => {
+	return {
+		queryKey: workspaceAgentContainersKey(agent.id),
+		queryFn: () => API.getAgentContainers(agent.id),
+		enabled: agent.status === "connected",
+	} satisfies UseQueryOptions<WorkspaceAgentListContainersResponse>;
+};
+
+export const deleteWorkspaceAgentDevcontainer = (
+	parentAgent: WorkspaceAgent,
+	devcontainer: WorkspaceAgentDevcontainer,
+	queryClient: QueryClient,
+) => {
+	const queryKey = workspaceAgentContainersKey(parentAgent.id);
+
+	return {
+		mutationFn: async () => {
+			await API.deleteDevContainer({
+				parentAgentId: parentAgent.id,
+				devcontainerId: devcontainer.id,
+			});
+		},
+		onMutate: async () => {
+			await queryClient.cancelQueries({ queryKey });
+			const previousData = queryClient.getQueryData(queryKey);
+
+			queryClient.setQueryData(
+				queryKey,
+				(oldData?: WorkspaceAgentListContainersResponse) => {
+					if (!oldData?.devcontainers) {
+						return oldData;
+					}
+
+					return {
+						...oldData,
+						devcontainers: oldData.devcontainers.map((dc) => {
+							if (dc.id === devcontainer.id) {
+								return {
+									...dc,
+									status: "stopping",
+									container: undefined,
+								};
+							}
+							return dc;
+						}),
+					};
+				},
+			);
+
+			return { previousData };
+		},
+		onError: (_error, _variables, context) => {
+			if (context?.previousData) {
+				queryClient.setQueryData(queryKey, context.previousData);
+			}
+		},
+	} satisfies UseMutationOptions<
+		void,
+		Error,
+		void,
+		{
+			previousData: unknown;
+		}
+	>;
 };

@@ -1,10 +1,10 @@
+import { screen, within } from "@testing-library/react";
 import {
 	renderWithAuth,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { screen, within } from "@testing-library/react";
-import * as CreateDayString from "utils/createDayString";
-import * as templateVersionUtils from "utils/templateVersion";
+} from "#/testHelpers/renderHelpers";
+import * as CreateDayString from "#/utils/createDayString";
+import * as templateVersionUtils from "#/utils/templateVersion";
 import TemplateVersionPage from "./TemplateVersionPage";
 
 const TEMPLATE_NAME = "coder-ts";
@@ -17,13 +17,13 @@ const TEMPLATE_VERSION_FILES = {
 };
 
 const setup = async () => {
-	jest
-		.spyOn(templateVersionUtils, "getTemplateVersionFiles")
-		.mockResolvedValue(TEMPLATE_VERSION_FILES);
+	vi.spyOn(templateVersionUtils, "getTemplateVersionFiles").mockResolvedValue(
+		TEMPLATE_VERSION_FILES,
+	);
 
-	jest
-		.spyOn(CreateDayString, "createDayString")
-		.mockImplementation(() => "a minute ago");
+	vi.spyOn(CreateDayString, "createDayString").mockImplementation(
+		() => "a minute ago",
+	);
 
 	renderWithAuth(<TemplateVersionPage />, {
 		route: `/templates/${TEMPLATE_NAME}/versions/${VERSION_NAME}`,

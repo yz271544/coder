@@ -27,7 +27,8 @@ import (
 	"golang.org/x/xerrors"
 	protobuf "google.golang.org/protobuf/proto"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
+	"github.com/coder/coder/v2/coderd/aiseats"
 	"github.com/coder/coder/v2/coderd/apikey"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
@@ -76,6 +77,7 @@ const (
 type Options struct {
 	OIDCConfig          promoauth.OAuth2Config
 	ExternalAuthConfigs []*externalauth.Config
+	AISeatTracker       aiseats.SeatTracker
 
 	// Clock for testing
 	Clock quartz.Clock
@@ -120,6 +122,8 @@ type server struct {
 	NotificationsEnqueuer       notifications.Enqueuer
 	PrebuildsOrchestrator       *atomic.Pointer[prebuilds.ReconciliationOrchestrator]
 	UsageInserter               *atomic.Pointer[usage.Inserter]
+	AISeatTracker               aiseats.SeatTracker
+	Experiments                 codersdk.Experiments
 
 	OIDCConfig promoauth.OAuth2Config
 
@@ -181,6 +185,7 @@ func NewServer(
 	enqueuer notifications.Enqueuer,
 	prebuildsOrchestrator *atomic.Pointer[prebuilds.ReconciliationOrchestrator],
 	metrics *Metrics,
+	experiments codersdk.Experiments,
 ) (proto.DRPCProvisionerDaemonServer, error) {
 	// Fail-fast if pointers are nil
 	if lifecycleCtx == nil {
@@ -212,6 +217,9 @@ func NewServer(
 	}
 	if err := tags.Valid(); err != nil {
 		return nil, xerrors.Errorf("invalid tags: %w", err)
+	}
+	if options.AISeatTracker == nil {
+		options.AISeatTracker = aiseats.Noop{}
 	}
 	if options.AcquireJobLongPollDur == 0 {
 		options.AcquireJobLongPollDur = DefaultAcquireJobLongPollDur
@@ -251,7 +259,9 @@ func NewServer(
 		heartbeatFn:                 options.HeartbeatFn,
 		PrebuildsOrchestrator:       prebuildsOrchestrator,
 		UsageInserter:               usageInserter,
+		AISeatTracker:               options.AISeatTracker,
 		metrics:                     metrics,
+		Experiments:                 experiments,
 	}
 
 	if s.heartbeatFn == nil {
@@ -475,6 +485,10 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 		TraceMetadata: jobTraceMetadata,
 	}
 
+	// jobTransition and jobBuildReason are used for metrics; only set for workspace builds.
+	var jobTransition string
+	var jobBuildReason string
+
 	switch job.Type {
 	case database.ProvisionerJobTypeWorkspaceBuild:
 		var input WorkspaceProvisionJob
@@ -506,6 +520,20 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 		if err != nil {
 			return nil, failJob(fmt.Sprintf("get owner: %s", err))
 		}
+
+		// Fetch the file id of the cached module files if it exists.
+		versionModulesFile := ""
+		if !template.DisableModuleCache {
+			tfvals, err := s.Database.GetTemplateVersionTerraformValues(ctx, templateVersion.ID)
+			if err != nil && !xerrors.Is(err, sql.ErrNoRows) {
+				// Older templates (before dynamic parameters) will not have cached module files.
+				return nil, failJob(fmt.Sprintf("get template version terraform values: %s", err))
+			}
+			if err == nil && tfvals.CachedModuleFiles.Valid {
+				versionModulesFile = tfvals.CachedModuleFiles.UUID.String()
+			}
+		}
+
 		var ownerSSHPublicKey, ownerSSHPrivateKey string
 		if ownerSSHKey, err := s.Database.GetGitSSHKey(ctx, owner.ID); err != nil {
 			if !xerrors.Is(err, sql.ErrNoRows) {
@@ -543,7 +571,7 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 		// The check `s.OIDCConfig != nil` is not as strict, since it can be an interface
 		// pointing to a typed nil.
 		if !reflect.ValueOf(s.OIDCConfig).IsNil() {
-			workspaceOwnerOIDCAccessToken, err = obtainOIDCAccessToken(ctx, s.Database, s.OIDCConfig, owner.ID)
+			workspaceOwnerOIDCAccessToken, err = ObtainOIDCAccessToken(ctx, s.Logger, s.Database, s.OIDCConfig, owner.ID)
 			if err != nil {
 				return nil, failJob(fmt.Sprintf("obtain OIDC access token: %s", err))
 			}
@@ -566,6 +594,15 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 		transition, err := convertWorkspaceTransition(workspaceBuild.Transition)
 		if err != nil {
 			return nil, failJob(fmt.Sprintf("convert workspace transition: %s", err))
+		}
+		jobTransition = string(workspaceBuild.Transition)
+		// Prebuilds use BuildReasonInitiator in the database but we want to
+		// track them separately in metrics. Check the initiator ID to detect
+		// prebuild jobs.
+		if job.InitiatorID == database.PrebuildsSystemUserID {
+			jobBuildReason = BuildReasonPrebuild
+		} else {
+			jobBuildReason = string(workspaceBuild.Reason)
 		}
 
 		// A previous workspace build exists
@@ -597,13 +634,10 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 			return nil, failJob(fmt.Sprintf("get workspace build parameters: %s", err))
 		}
 
-		// TODO(DanielleMaywood):
-		// Plumb a task prompt into this when we have the new data-model ready
-		var taskPrompt string
-
-		// TODO(DanielleMaywood):
-		// Plumb a task ID into this when we have the new data-model ready
-		var taskID string
+		task, err := s.Database.GetTaskByWorkspaceID(ctx, workspaceBuild.WorkspaceID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, xerrors.Errorf("get task by workspace id: %w", err)
+		}
 
 		dbExternalAuthProviders := []database.ExternalAuthProvider{}
 		err = json.Unmarshal(templateVersion.ExternalAuthProviders, &dbExternalAuthProviders)
@@ -698,11 +732,16 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 			}
 		}
 
+		provisionerStateRow, err := s.Database.GetWorkspaceBuildProvisionerStateByID(ctx, workspaceBuild.ID)
+		if err != nil {
+			return nil, failJob(fmt.Sprintf("get workspace build provisioner state: %s", err))
+		}
+
 		protoJob.Type = &proto.AcquiredJob_WorkspaceBuild_{
 			WorkspaceBuild: &proto.AcquiredJob_WorkspaceBuild{
 				WorkspaceBuildId:        workspaceBuild.ID.String(),
 				WorkspaceName:           workspace.Name,
-				State:                   workspaceBuild.ProvisionerState,
+				State:                   provisionerStateRow.ProvisionerState,
 				RichParameterValues:     convertRichParameterValues(workspaceBuildParameters),
 				PreviousParameterValues: convertRichParameterValues(lastWorkspaceBuildParameters),
 				VariableValues:          asVariableValues(templateVariables),
@@ -720,6 +759,7 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 					WorkspaceOwnerId:              owner.ID.String(),
 					TemplateId:                    template.ID.String(),
 					TemplateName:                  template.Name,
+					TemplateVersionId:             templateVersion.ID.String(),
 					TemplateVersion:               templateVersion.Name,
 					WorkspaceOwnerSessionToken:    sessionToken,
 					WorkspaceOwnerSshPublicKey:    ownerSSHPublicKey,
@@ -729,8 +769,9 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 					WorkspaceOwnerRbacRoles:       ownerRbacRoles,
 					RunningAgentAuthTokens:        runningAgentAuthTokens,
 					PrebuiltWorkspaceBuildStage:   input.PrebuiltWorkspaceBuildStage,
-					TaskId:                        taskID,
-					TaskPrompt:                    taskPrompt,
+					TaskId:                        task.ID.String(),
+					TaskPrompt:                    task.Prompt,
+					TemplateVersionModulesFile:    versionModulesFile,
 				},
 				LogLevel: input.LogLevel,
 			},
@@ -776,6 +817,11 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 			return nil, failJob(err.Error())
 		}
 
+		templateID := ""
+		if input.TemplateID.Valid {
+			templateID = input.TemplateID.UUID.String()
+		}
+
 		protoJob.Type = &proto.AcquiredJob_TemplateImport_{
 			TemplateImport: &proto.AcquiredJob_TemplateImport{
 				UserVariableValues: convertVariableValues(userVariableValues),
@@ -784,6 +830,8 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 					// There is no owner for a template import, but we can assume
 					// the "Everyone" group as a placeholder.
 					WorkspaceOwnerGroups: []string{database.EveryoneGroup},
+					TemplateId:           templateID,
+					TemplateVersionId:    input.TemplateVersionID.String(),
 				},
 			},
 		}
@@ -800,6 +848,16 @@ func (s *server) acquireProtoJob(ctx context.Context, job database.ProvisionerJo
 	}
 	if protobuf.Size(protoJob) > drpcsdk.MaxMessageSize {
 		return nil, failJob(fmt.Sprintf("payload was too big: %d > %d", protobuf.Size(protoJob), drpcsdk.MaxMessageSize))
+	}
+
+	// Record the time the job spent waiting in the queue.
+	if s.metrics != nil && job.StartedAt.Valid && job.Provisioner.Valid() {
+		// These timestamps lose their monotonic clock component after a Postgres
+		// round-trip, so the subtraction is based purely on wall-clock time. Floor at
+		// 1ms as a defensive measure against clock adjustments producing a negative
+		// delta while acknowledging there's a non-zero queue time.
+		queueWaitSeconds := max(job.StartedAt.Time.Sub(job.CreatedAt).Seconds(), 0.001)
+		s.metrics.ObserveJobQueueWait(string(job.Provisioner), string(job.Type), jobTransition, jobBuildReason, queueWaitSeconds)
 	}
 
 	return protoJob, err
@@ -1238,6 +1296,21 @@ func (s *server) FailJob(ctx context.Context, failJob *proto.FailedJob) (*proto.
 		if err != nil {
 			return nil, xerrors.Errorf("publish workspace update: %w", err)
 		}
+
+		// Publish workspace build update to the all builds channel if the experiment is enabled.
+		if s.Experiments.Enabled(codersdk.ExperimentWorkspaceBuildUpdates) {
+			err = wspubsub.PublishWorkspaceBuildUpdate(ctx, s.Pubsub, codersdk.WorkspaceBuildUpdate{
+				WorkspaceID:   workspace.ID,
+				WorkspaceName: workspace.Name,
+				BuildID:       build.ID,
+				Transition:    string(build.Transition),
+				JobStatus:     string(database.ProvisionerJobStatusFailed),
+				BuildNumber:   build.BuildNumber,
+			})
+			if err != nil {
+				s.Logger.Warn(ctx, "failed to publish workspace build update", slog.Error(err))
+			}
+		}
 	case *proto.FailedJob_TemplateImport_:
 	}
 
@@ -1415,54 +1488,12 @@ func (s *server) prepareForNotifyWorkspaceManualBuildFailed(ctx context.Context,
 func (s *server) UploadFile(stream proto.DRPCProvisionerDaemon_UploadFileStream) error {
 	var file *sdkproto.DataBuilder
 	// Always terminate the stream with an empty response.
+	//nolint:errcheck // We can't do much about send errors here.
 	defer stream.SendAndClose(&proto.Empty{})
 
-UploadFileStream:
-	for {
-		msg, err := stream.Recv()
-		if err != nil {
-			return xerrors.Errorf("receive complete job with files: %w", err)
-		}
-
-		switch typed := msg.Type.(type) {
-		case *proto.UploadFileRequest_DataUpload:
-			if file != nil {
-				return xerrors.New("unexpected file upload while waiting for file completion")
-			}
-
-			file, err = sdkproto.NewDataBuilder(&sdkproto.DataUpload{
-				UploadType: typed.DataUpload.UploadType,
-				DataHash:   typed.DataUpload.DataHash,
-				FileSize:   typed.DataUpload.FileSize,
-				Chunks:     typed.DataUpload.Chunks,
-			})
-			if err != nil {
-				return xerrors.Errorf("unable to create file upload: %w", err)
-			}
-
-			if file.IsDone() {
-				// If a file is 0 bytes, we can consider it done immediately.
-				// This should never really happen in practice, but we handle it gracefully.
-				break UploadFileStream
-			}
-		case *proto.UploadFileRequest_ChunkPiece:
-			if file == nil {
-				return xerrors.New("unexpected chunk piece while waiting for file upload")
-			}
-
-			done, err := file.Add(&sdkproto.ChunkPiece{
-				Data:         typed.ChunkPiece.Data,
-				FullDataHash: typed.ChunkPiece.FullDataHash,
-				PieceIndex:   typed.ChunkPiece.PieceIndex,
-			})
-			if err != nil {
-				return xerrors.Errorf("unable to add chunk piece: %w", err)
-			}
-
-			if done {
-				break UploadFileStream
-			}
-		}
+	file, err := provisionersdk.HandleReceivingDataUpload(stream)
+	if err != nil {
+		return err
 	}
 
 	fileData, err := file.Complete()
@@ -1506,6 +1537,78 @@ UploadFileStream:
 		// new_insert indicates whether the file was newly inserted or already existed.
 		slog.F("new_insert", err == nil),
 	)
+
+	return nil
+}
+
+// DownloadFile pulls the requested file from the database and sends it over the protobuf stream in chunks.
+func (s *server) DownloadFile(request *proto.FileRequest, stream proto.DRPCProvisionerDaemon_DownloadFileStream) error {
+	//nolint:errcheck
+	defer stream.CloseSend()
+	//nolint:gocritic // Provisionerd is the actor here.
+	ctx := dbauthz.AsProvisionerd(stream.Context())
+
+	// A graceful error message will help debugging.
+	fail := func(err error) error {
+		if sendErr := stream.Send(&sdkproto.FileUpload{
+			Type: &sdkproto.FileUpload_Error{
+				Error: &sdkproto.FailedFile{
+					Error: err.Error(),
+				},
+			},
+		}); sendErr != nil {
+			s.Logger.Warn(ctx, "failed to send error response on download stream",
+				slog.Error(sendErr),
+				slog.F("original_error", err.Error()),
+			)
+		}
+		return err
+	}
+	if request.FileId == "" || request.FileId == uuid.Nil.String() {
+		return fail(xerrors.New("file id is required"))
+	}
+
+	fid, err := uuid.Parse(request.FileId)
+	if err != nil {
+		return fail(xerrors.Errorf("invalid file id: %w", err))
+	}
+
+	file, err := s.Database.GetFileByID(ctx, fid)
+	if err != nil {
+		return fail(xerrors.Errorf("get file: %w", err))
+	}
+
+	switch request.UploadType {
+	case sdkproto.DataUploadType_UPLOAD_TYPE_MODULE_FILES:
+		// This check is not perfect. If these conditions are not true, then the file is not a modules file.
+		if file.CreatedBy != uuid.Nil || file.Mimetype != tarMimeType {
+			return fail(xerrors.Errorf("file %s is not a modules file", fid))
+		}
+	default:
+		return fail(xerrors.Errorf("unsupported file upload type: %s", request.UploadType))
+	}
+
+	upload, chunks := sdkproto.BytesToDataUpload(sdkproto.DataUploadType_UPLOAD_TYPE_MODULE_FILES, file.Data)
+
+	err = stream.Send(&sdkproto.FileUpload{
+		Type: &sdkproto.FileUpload_DataUpload{DataUpload: upload},
+	})
+	if err != nil {
+		return fail(xerrors.Errorf("send file upload: %w", err))
+	}
+
+	for i, c := range chunks {
+		if ctx.Err() != nil {
+			return fail(ctx.Err())
+		}
+
+		err = stream.Send(&sdkproto.FileUpload{
+			Type: &sdkproto.FileUpload_ChunkPiece{ChunkPiece: c},
+		})
+		if err != nil {
+			return fail(xerrors.Errorf("send chunk piece %d: %w", i, err))
+		}
+	}
 
 	return nil
 }
@@ -1606,7 +1709,6 @@ func (s *server) completeTemplateImportJob(ctx context.Context, job database.Pro
 		// Process modules
 		for transition, modules := range map[database.WorkspaceTransition][]*sdkproto.Module{
 			database.WorkspaceTransitionStart: jobType.TemplateImport.StartModules,
-			database.WorkspaceTransitionStop:  jobType.TemplateImport.StopModules,
 		} {
 			for _, module := range modules {
 				s.Logger.Info(ctx, "inserting template import job module",
@@ -1779,8 +1881,8 @@ func (s *server) completeTemplateImportJob(ctx context.Context, job database.Pro
 				hashBytes := sha256.Sum256(moduleFiles)
 				hash := hex.EncodeToString(hashBytes[:])
 
-				// nolint:gocritic // Requires reading "system" files
-				file, err := db.GetFileByHashAndCreator(dbauthz.AsSystemRestricted(ctx), database.GetFileByHashAndCreatorParams{Hash: hash, CreatedBy: uuid.Nil})
+				//nolint:gocritic // Acting as provisionerd
+				file, err := db.GetFileByHashAndCreator(dbauthz.AsProvisionerd(ctx), database.GetFileByHashAndCreatorParams{Hash: hash, CreatedBy: uuid.Nil})
 				switch {
 				case err == nil:
 					// This set of modules is already cached, which means we can reuse them
@@ -1791,8 +1893,8 @@ func (s *server) completeTemplateImportJob(ctx context.Context, job database.Pro
 				case !xerrors.Is(err, sql.ErrNoRows):
 					return xerrors.Errorf("check for cached modules: %w", err)
 				default:
-					// nolint:gocritic // Requires creating a "system" file
-					file, err = db.InsertFile(dbauthz.AsSystemRestricted(ctx), database.InsertFileParams{
+					//nolint:gocritic // Acting as provisionerd
+					file, err = db.InsertFile(dbauthz.AsProvisionerd(ctx), database.InsertFileParams{
 						ID:        uuid.New(),
 						Hash:      hash,
 						CreatedBy: uuid.Nil,
@@ -1964,18 +2066,58 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 		}
 
 		appIDs := make([]string, 0)
+		agentIDByAppID := make(map[string]uuid.UUID)
 		agentTimeouts := make(map[time.Duration]bool) // A set of agent timeouts.
 		// This could be a bulk insert to improve performance.
 		for _, protoResource := range jobType.WorkspaceBuild.Resources {
-			for _, protoAgent := range protoResource.Agents {
+			for _, protoAgent := range protoResource.GetAgents() {
+				if protoAgent == nil {
+					continue
+				}
+				// By default InsertWorkspaceResource ignores the protoAgent.Id
+				// and generates a new one, but we will insert these using the
+				// InsertWorkspaceResourceWithAgentIDsFromProto option so that
+				// we can properly map agent IDs to app IDs. This is needed for
+				// task linking.
+				agentID := uuid.New()
+				protoAgent.Id = agentID.String()
+
 				dur := time.Duration(protoAgent.GetConnectionTimeoutSeconds()) * time.Second
 				agentTimeouts[dur] = true
 				for _, app := range protoAgent.GetApps() {
 					appIDs = append(appIDs, app.GetId())
+					agentIDByAppID[app.GetId()] = agentID
+				}
+
+				// Subagents in devcontainers can also have apps that need
+				// tracking for task linking, just like the parent agent's
+				// apps above.
+				for _, dc := range protoAgent.GetDevcontainers() {
+					dc.Id = uuid.New().String()
+
+					if dc.GetSubagentId() != "" {
+						subAgentID := uuid.New()
+						dc.SubagentId = subAgentID.String()
+
+						for _, app := range dc.GetApps() {
+							appIDs = append(appIDs, app.GetId())
+							agentIDByAppID[app.GetId()] = subAgentID
+						}
+					}
 				}
 			}
 
-			err = InsertWorkspaceResource(ctx, db, job.ID, workspaceBuild.Transition, protoResource, telemetrySnapshot)
+			err = InsertWorkspaceResource(
+				ctx,
+				db,
+				job.ID,
+				workspaceBuild.Transition,
+				protoResource,
+				telemetrySnapshot,
+				// Ensure that the agent IDs we set previously
+				// are written to the database.
+				InsertWorkspaceResourceWithAgentIDsFromProto(),
+			)
 			if err != nil {
 				return xerrors.Errorf("insert provisioner job: %w", err)
 			}
@@ -1986,11 +2128,12 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 			}
 		}
 
-		var taskAppID uuid.NullUUID
-		var hasAITask bool
-		var warnUnknownTaskAppID bool
+		var (
+			unknownAppID string
+			taskAppID    uuid.NullUUID
+			taskAgentID  uuid.NullUUID
+		)
 		if tasks := jobType.WorkspaceBuild.GetAiTasks(); len(tasks) > 0 {
-			hasAITask = true
 			task := tasks[0]
 			if task == nil {
 				return xerrors.Errorf("update ai task: task is nil")
@@ -2005,56 +2148,28 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 			}
 
 			if !slices.Contains(appIDs, appID) {
-				warnUnknownTaskAppID = true
-			}
-
-			id, err := uuid.Parse(appID)
-			if err != nil {
-				return xerrors.Errorf("parse app id: %w", err)
-			}
-
-			taskAppID = uuid.NullUUID{UUID: id, Valid: true}
-		}
-
-		// This is a hacky workaround for the issue with tasks 'disappearing' on stop:
-		// reuse has_ai_task and sidebar_app_id from the previous build.
-		// This workaround should be removed as soon as possible.
-		if workspaceBuild.Transition == database.WorkspaceTransitionStop && workspaceBuild.BuildNumber > 1 {
-			if prevBuild, err := s.Database.GetWorkspaceBuildByWorkspaceIDAndBuildNumber(ctx, database.GetWorkspaceBuildByWorkspaceIDAndBuildNumberParams{
-				WorkspaceID: workspaceBuild.WorkspaceID,
-				BuildNumber: workspaceBuild.BuildNumber - 1,
-			}); err == nil {
-				hasAITask = prevBuild.HasAITask.Bool
-				taskAppID = prevBuild.AITaskSidebarAppID
-				warnUnknownTaskAppID = false
-				s.Logger.Debug(ctx, "task workaround: reused has_ai_task and app_id from previous build to keep track of task",
-					slog.F("job_id", job.ID.String()),
-					slog.F("build_number", prevBuild.BuildNumber),
-					slog.F("workspace_id", workspace.ID),
-					slog.F("workspace_build_id", workspaceBuild.ID),
-					slog.F("transition", string(workspaceBuild.Transition)),
-					slog.F("sidebar_app_id", taskAppID.UUID),
-					slog.F("has_ai_task", hasAITask),
-				)
+				unknownAppID = appID
 			} else {
-				s.Logger.Error(ctx, "task workaround: tracking via has_ai_task and app_id from previous build failed",
-					slog.Error(err),
-					slog.F("job_id", job.ID.String()),
-					slog.F("workspace_id", workspace.ID),
-					slog.F("workspace_build_id", workspaceBuild.ID),
-					slog.F("transition", string(workspaceBuild.Transition)),
-				)
+				// Only parse for valid app and agent to avoid fk violation.
+				id, err := uuid.Parse(appID)
+				if err != nil {
+					return xerrors.Errorf("parse app id: %w", err)
+				}
+				taskAppID = uuid.NullUUID{UUID: id, Valid: true}
+
+				agentID, ok := agentIDByAppID[appID]
+				taskAgentID = uuid.NullUUID{UUID: agentID, Valid: ok}
 			}
 		}
 
-		if warnUnknownTaskAppID {
+		if unknownAppID != "" && workspaceBuild.Transition == database.WorkspaceTransitionStart {
 			// Ref: https://github.com/coder/coder/issues/18776
 			// This can happen for a number of reasons:
 			// 1. Misconfigured template
 			// 2. Count=0 on the agent due to stop transition, meaning the associated coder_app was not inserted.
 			// Failing the build at this point is not ideal, so log a warning instead.
 			s.Logger.Warn(ctx, "unknown ai_task_app_id",
-				slog.F("ai_task_app_id", taskAppID.UUID.String()),
+				slog.F("ai_task_app_id", unknownAppID),
 				slog.F("job_id", job.ID.String()),
 				slog.F("workspace_id", workspace.ID),
 				slog.F("workspace_build_id", workspaceBuild.ID),
@@ -2068,7 +2183,7 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 				Level:     []database.LogLevel{database.LogLevelWarn, database.LogLevelWarn, database.LogLevelWarn, database.LogLevelWarn},
 				Stage:     []string{"Cleaning Up", "Cleaning Up", "Cleaning Up", "Cleaning Up"},
 				Output: []string{
-					fmt.Sprintf("Unknown ai_task_app_id %q. This workspace will be unable to run AI tasks. This may be due to a template configuration issue, please check with the template author.", taskAppID.UUID.String()),
+					fmt.Sprintf("Unknown ai_task_app_id %q. This workspace will be unable to run AI tasks. This may be due to a template configuration issue, please check with the template author.", unknownAppID),
 					"Template author: double-check the following:",
 					"  - You have associated the coder_ai_task with a valid coder_app in your template (ref: https://registry.terraform.io/providers/coder/coder/latest/docs/resources/ai_task).",
 					"  - You have associated the coder_agent with at least one other compute resource. Agents with no other associated resources are not inserted into the database.",
@@ -2081,35 +2196,48 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 					slog.F("transition", string(workspaceBuild.Transition)),
 				)
 			}
-			// Important: reset hasAITask and sidebarAppID so that we don't run into a fk constraint violation.
-			hasAITask = false
-			taskAppID = uuid.NullUUID{}
 		}
 
-		if hasAITask && workspaceBuild.Transition == database.WorkspaceTransitionStart {
-			// Insert usage event for managed agents.
-			usageInserter := s.UsageInserter.Load()
-			if usageInserter != nil {
-				event := usagetypes.DCManagedAgentsV1{
-					Count: 1,
-				}
-				err = (*usageInserter).InsertDiscreteUsageEvent(ctx, db, event)
-				if err != nil {
-					return xerrors.Errorf("insert %q event: %w", event.EventType(), err)
+		var hasAITask bool
+		if task, err := db.GetTaskByWorkspaceID(ctx, workspace.ID); err == nil {
+			hasAITask = true
+			if workspaceBuild.Transition == database.WorkspaceTransitionStart {
+				// Insert usage event for managed agents.
+				usageInserter := s.UsageInserter.Load()
+				if usageInserter != nil {
+					event := usagetypes.DCManagedAgentsV1{
+						Count: 1,
+					}
+					err = (*usageInserter).InsertDiscreteUsageEvent(ctx, db, event)
+					if err != nil {
+						return xerrors.Errorf("insert %q event: %w", event.EventType(), err)
+					}
 				}
 			}
-		}
 
-		hasExternalAgent := false
-		for _, resource := range jobType.WorkspaceBuild.Resources {
-			if resource.Type == "coder_external_agent" {
-				hasExternalAgent = true
-				break
+			// Irrespective of whether the agent or sidebar app is present,
+			// perform the upsert to ensure a link between the task and
+			// workspace build. Linking the task to the build is typically
+			// already established by wsbuilder.
+			_, err = db.UpsertTaskWorkspaceApp(
+				ctx,
+				database.UpsertTaskWorkspaceAppParams{
+					TaskID:               task.ID,
+					WorkspaceBuildNumber: workspaceBuild.BuildNumber,
+					WorkspaceAgentID:     taskAgentID,
+					WorkspaceAppID:       taskAppID,
+				},
+			)
+			if err != nil {
+				return xerrors.Errorf("upsert task workspace app: %w", err)
 			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return xerrors.Errorf("get task by workspace id: %w", err)
 		}
 
-		// Regardless of whether there is an AI task or not, update the field to indicate one way or the other since it
-		// always defaults to nil. ONLY if has_ai_task=true MUST ai_task_sidebar_app_id be set.
+		_, hasExternalAgent := slice.Find(jobType.WorkspaceBuild.Resources, func(resource *sdkproto.Resource) bool {
+			return resource.Type == "coder_external_agent"
+		})
 		if err := db.UpdateWorkspaceBuildFlagsByID(ctx, database.UpdateWorkspaceBuildFlagsByIDParams{
 			ID: workspaceBuild.ID,
 			HasAITask: sql.NullBool{
@@ -2120,8 +2248,7 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 				Bool:  hasExternalAgent,
 				Valid: true,
 			},
-			SidebarAppID: taskAppID,
-			UpdatedAt:    now,
+			UpdatedAt: now,
 		}); err != nil {
 			return xerrors.Errorf("update workspace build ai tasks and external agent flag: %w", err)
 		}
@@ -2150,6 +2277,12 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 				continue
 			}
 
+			// Scan does not guarantee validity
+			if !stg.Valid() {
+				s.Logger.Warn(ctx, "invalid stage, will fail insert based one enum", slog.F("value", t.Stage))
+				continue
+			}
+
 			params.Stage = append(params.Stage, stg)
 			params.Source = append(params.Source, t.Source)
 			params.Resource = append(params.Resource, t.Resource)
@@ -2159,8 +2292,11 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 		}
 		_, err = db.InsertProvisionerJobTimings(ctx, params)
 		if err != nil {
-			// Log error but don't fail the whole transaction for non-critical data
+			// A database error here will "fail" this transaction. Making this error fatal.
+			// If this error is seen, add checks above to validate the insert parameters. In
+			// production, timings should not be a fatal error.
 			s.Logger.Warn(ctx, "failed to update provisioner job timings", slog.F("job_id", jobID), slog.Error(err))
+			return xerrors.Errorf("update provisioner job timings: %w", err)
 		}
 
 		// On start, we want to ensure that workspace agents timeout statuses
@@ -2234,6 +2370,21 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 			return xerrors.Errorf("update workspace deleted: %w", err)
 		}
 
+		// A user might delete their task workspace directly, instead of
+		// deleting the task. To avoid leaving the Task in a scenario where
+		// it has no workspace, we also attempt to delete the task.
+		//
+		// Deleting the task may fail if it has already been deleted as part
+		// of the typical task deletion workflow, so we explicitly allow that.
+		if workspace.TaskID.Valid {
+			if _, err := db.DeleteTask(ctx, database.DeleteTaskParams{
+				ID:        workspace.TaskID.UUID,
+				DeletedAt: dbtime.Now(),
+			}); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return xerrors.Errorf("delete task related to workspace: %w", err)
+			}
+		}
+
 		return nil
 	}, nil)
 	if err != nil {
@@ -2293,6 +2444,12 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 		})
 	}
 
+	// Record AI seat usage for successful task workspace builds.
+	if workspaceBuild.Transition == database.WorkspaceTransitionStart && workspace.TaskID.Valid {
+		s.AISeatTracker.RecordUsage(ctx, workspace.OwnerID,
+			aiseats.ReasonTask("task workspace build succeeded"))
+	}
+
 	if s.PrebuildsOrchestrator != nil && input.PrebuiltWorkspaceBuildStage == sdkproto.PrebuiltWorkspaceBuildStage_CLAIM {
 		// Track resource replacements, if there are any.
 		orchestrator := s.PrebuildsOrchestrator.Load()
@@ -2303,40 +2460,42 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 	}
 
 	// Update workspace (regular and prebuild) timing metrics
-	if s.metrics != nil {
-		// Only consider 'start' workspace builds
-		if workspaceBuild.Transition == database.WorkspaceTransitionStart {
-			// Get the updated job to report the metrics with correct data
-			updatedJob, err := s.Database.GetProvisionerJobByID(ctx, jobID)
-			if err != nil {
-				s.Logger.Error(ctx, "get updated job from database", slog.Error(err))
-			} else
-			// Only consider 'succeeded' provisioner jobs
-			if updatedJob.JobStatus == database.ProvisionerJobStatusSucceeded {
-				presetName := ""
-				if workspaceBuild.TemplateVersionPresetID.Valid {
-					preset, err := s.Database.GetPresetByID(ctx, workspaceBuild.TemplateVersionPresetID.UUID)
-					if err != nil {
-						if !errors.Is(err, sql.ErrNoRows) {
-							s.Logger.Error(ctx, "get preset by ID for workspace timing metrics", slog.Error(err))
-						}
-					} else {
-						presetName = preset.Name
+	// Only consider 'start' workspace builds
+	if s.metrics != nil && workspaceBuild.Transition == database.WorkspaceTransitionStart {
+		// Get the updated job to report the metrics with correct data
+		updatedJob, err := s.Database.GetProvisionerJobByID(ctx, jobID)
+		if err != nil {
+			s.Logger.Error(ctx, "get updated job from database", slog.Error(err))
+		} else
+		// Only consider 'succeeded' provisioner jobs
+		if updatedJob.JobStatus == database.ProvisionerJobStatusSucceeded {
+			presetName := ""
+			if workspaceBuild.TemplateVersionPresetID.Valid {
+				preset, err := s.Database.GetPresetByID(ctx, workspaceBuild.TemplateVersionPresetID.UUID)
+				if err != nil {
+					if !errors.Is(err, sql.ErrNoRows) {
+						s.Logger.Error(ctx, "get preset by ID for workspace timing metrics", slog.Error(err))
 					}
+				} else {
+					presetName = preset.Name
 				}
+			}
 
-				buildTime := updatedJob.CompletedAt.Time.Sub(updatedJob.StartedAt.Time).Seconds()
+			buildTime := updatedJob.CompletedAt.Time.Sub(updatedJob.StartedAt.Time).Seconds()
+			flags := WorkspaceTimingFlags{
+				// Is a prebuilt workspace creation build
+				IsPrebuild: input.PrebuiltWorkspaceBuildStage.IsPrebuild(),
+				// Is a prebuilt workspace claim build
+				IsClaim: input.PrebuiltWorkspaceBuildStage.IsPrebuiltWorkspaceClaim(),
+				// Is a regular workspace creation build
+				// Only consider the first build number for regular workspaces
+				IsFirstBuild: workspaceBuild.BuildNumber == 1,
+			}
+			// Only track metrics for prebuild creation, prebuild claims and workspace creation
+			if flags.IsTrackable() {
 				s.metrics.UpdateWorkspaceTimingsMetrics(
 					ctx,
-					WorkspaceTimingFlags{
-						// Is a prebuilt workspace creation build
-						IsPrebuild: input.PrebuiltWorkspaceBuildStage.IsPrebuild(),
-						// Is a prebuilt workspace claim build
-						IsClaim: input.PrebuiltWorkspaceBuildStage.IsPrebuiltWorkspaceClaim(),
-						// Is a regular workspace creation build
-						// Only consider the first build number for regular workspaces
-						IsFirstBuild: workspaceBuild.BuildNumber == 1,
-					},
+					flags,
 					workspace.OrganizationName,
 					workspace.TemplateName,
 					presetName,
@@ -2358,6 +2517,21 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 		return xerrors.Errorf("update workspace: %w", err)
 	}
 
+	// Publish workspace build update to the all builds channel if the experiment is enabled.
+	if s.Experiments.Enabled(codersdk.ExperimentWorkspaceBuildUpdates) {
+		err = wspubsub.PublishWorkspaceBuildUpdate(ctx, s.Pubsub, codersdk.WorkspaceBuildUpdate{
+			WorkspaceID:   workspace.ID,
+			WorkspaceName: workspace.Name,
+			BuildID:       workspaceBuild.ID,
+			Transition:    string(workspaceBuild.Transition),
+			JobStatus:     string(database.ProvisionerJobStatusSucceeded),
+			BuildNumber:   workspaceBuild.BuildNumber,
+		})
+		if err != nil {
+			s.Logger.Warn(ctx, "failed to publish workspace build update", slog.Error(err))
+		}
+	}
+
 	if input.PrebuiltWorkspaceBuildStage == sdkproto.PrebuiltWorkspaceBuildStage_CLAIM {
 		s.Logger.Info(ctx, "workspace prebuild successfully claimed by user",
 			slog.F("workspace_id", workspace.ID))
@@ -2365,6 +2539,7 @@ func (s *server) completeWorkspaceBuildJob(ctx context.Context, job database.Pro
 		err = prebuilds.NewPubsubWorkspaceClaimPublisher(s.Pubsub).PublishWorkspaceClaim(agentsdk.ReinitializationEvent{
 			WorkspaceID: workspace.ID,
 			Reason:      agentsdk.ReinitializeReasonPrebuildClaimed,
+			OwnerID:     workspace.OwnerID,
 		})
 		if err != nil {
 			s.Logger.Error(ctx, "failed to publish workspace claim event", slog.Error(err))
@@ -2537,6 +2712,7 @@ func InsertWorkspacePresetAndParameters(ctx context.Context, db database.Store, 
 			IsDefault:           protoPreset.GetDefault(),
 			Description:         protoPreset.Description,
 			Icon:                protoPreset.Icon,
+			LastInvalidatedAt:   sql.NullTime{},
 		})
 		if err != nil {
 			return xerrors.Errorf("insert preset: %w", err)
@@ -2578,7 +2754,28 @@ func InsertWorkspacePresetAndParameters(ctx context.Context, db database.Store, 
 	return nil
 }
 
-func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.UUID, transition database.WorkspaceTransition, protoResource *sdkproto.Resource, snapshot *telemetry.Snapshot) error {
+type insertWorkspaceResourceOptions struct {
+	useAgentIDsFromProto bool
+}
+
+// InsertWorkspaceResourceOption represents a functional option for
+// InsertWorkspaceResource.
+type InsertWorkspaceResourceOption func(*insertWorkspaceResourceOptions)
+
+// InsertWorkspaceResourceWithAgentIDsFromProto allows inserting agents into the
+// database using the agent IDs defined in the proto resource.
+func InsertWorkspaceResourceWithAgentIDsFromProto() InsertWorkspaceResourceOption {
+	return func(opts *insertWorkspaceResourceOptions) {
+		opts.useAgentIDsFromProto = true
+	}
+}
+
+func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.UUID, transition database.WorkspaceTransition, protoResource *sdkproto.Resource, snapshot *telemetry.Snapshot, opt ...InsertWorkspaceResourceOption) error {
+	opts := &insertWorkspaceResourceOptions{}
+	for _, o := range opt {
+		o(opts)
+	}
+
 	resource, err := db.InsertWorkspaceResource(ctx, database.InsertWorkspaceResourceParams{
 		ID:         uuid.New(),
 		CreatedAt:  dbtime.Now(),
@@ -2638,12 +2835,11 @@ func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.
 		}
 
 		env := make(map[string]string)
-		// For now, we only support adding extra envs, not overriding
-		// existing ones or performing other manipulations. In future
-		// we may write these to a separate table so we can perform
-		// conditional logic on the agent.
-		for _, e := range prAgent.ExtraEnvs {
-			env[e.Name] = e.Value
+		// Apply extra envs with merge strategy support.
+		// When multiple coder_env resources define the same name,
+		// the merge_strategy controls how values are combined.
+		if err := MergeExtraEnvs(env, prAgent.ExtraEnvs); err != nil {
+			return err
 		}
 		// Allow the agent defined envs to override extra envs.
 		for k, v := range prAgent.Env {
@@ -2675,6 +2871,12 @@ func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.
 		}
 
 		agentID := uuid.New()
+		if opts.useAgentIDsFromProto {
+			agentID, err = uuid.Parse(prAgent.Id)
+			if err != nil {
+				return xerrors.Errorf("invalid agent ID format; must be uuid: %w", err)
+			}
+		}
 		dbAgent, err := db.InsertWorkspaceAgent(ctx, database.InsertWorkspaceAgentParams{
 			ID:                       agentID,
 			ParentID:                 uuid.NullUUID{},
@@ -2752,33 +2954,7 @@ func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.
 			}
 		}
 
-		logSourceIDs := make([]uuid.UUID, 0, len(prAgent.Scripts))
-		logSourceDisplayNames := make([]string, 0, len(prAgent.Scripts))
-		logSourceIcons := make([]string, 0, len(prAgent.Scripts))
-		scriptIDs := make([]uuid.UUID, 0, len(prAgent.Scripts))
-		scriptDisplayName := make([]string, 0, len(prAgent.Scripts))
-		scriptLogPaths := make([]string, 0, len(prAgent.Scripts))
-		scriptSources := make([]string, 0, len(prAgent.Scripts))
-		scriptCron := make([]string, 0, len(prAgent.Scripts))
-		scriptTimeout := make([]int32, 0, len(prAgent.Scripts))
-		scriptStartBlocksLogin := make([]bool, 0, len(prAgent.Scripts))
-		scriptRunOnStart := make([]bool, 0, len(prAgent.Scripts))
-		scriptRunOnStop := make([]bool, 0, len(prAgent.Scripts))
-
-		for _, script := range prAgent.Scripts {
-			logSourceIDs = append(logSourceIDs, uuid.New())
-			logSourceDisplayNames = append(logSourceDisplayNames, script.DisplayName)
-			logSourceIcons = append(logSourceIcons, script.Icon)
-			scriptIDs = append(scriptIDs, uuid.New())
-			scriptDisplayName = append(scriptDisplayName, script.DisplayName)
-			scriptLogPaths = append(scriptLogPaths, script.LogPath)
-			scriptSources = append(scriptSources, script.Script)
-			scriptCron = append(scriptCron, script.Cron)
-			scriptTimeout = append(scriptTimeout, script.TimeoutSeconds)
-			scriptStartBlocksLogin = append(scriptStartBlocksLogin, script.StartBlocksLogin)
-			scriptRunOnStart = append(scriptRunOnStart, script.RunOnStart)
-			scriptRunOnStop = append(scriptRunOnStop, script.RunOnStop)
-		}
+		scriptsParams := agentScriptsFromProto(prAgent.Scripts)
 
 		// Dev Containers require a script and log/source, so we do this before
 		// the logs insert below.
@@ -2788,32 +2964,43 @@ func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.
 				devcontainerNames            = make([]string, 0, len(devcontainers))
 				devcontainerWorkspaceFolders = make([]string, 0, len(devcontainers))
 				devcontainerConfigPaths      = make([]string, 0, len(devcontainers))
+				devcontainerSubagentIDs      = make([]uuid.UUID, 0, len(devcontainers))
 			)
 			for _, dc := range devcontainers {
 				id := uuid.New()
+				if opts.useAgentIDsFromProto {
+					id, err = uuid.Parse(dc.GetId())
+					if err != nil {
+						return xerrors.Errorf("invalid devcontainer ID format; must be uuid: %w", err)
+					}
+				}
+
+				subAgentID, err := insertDevcontainerSubagent(ctx, db, dc, dbAgent, resource.ID, appSlugs, snapshot, opts)
+				if err != nil {
+					return xerrors.Errorf("insert devcontainer %q subagent: %w", dc.GetName(), err)
+				}
+
 				devcontainerIDs = append(devcontainerIDs, id)
-				devcontainerNames = append(devcontainerNames, dc.Name)
-				devcontainerWorkspaceFolders = append(devcontainerWorkspaceFolders, dc.WorkspaceFolder)
-				devcontainerConfigPaths = append(devcontainerConfigPaths, dc.ConfigPath)
+				devcontainerNames = append(devcontainerNames, dc.GetName())
+				devcontainerWorkspaceFolders = append(devcontainerWorkspaceFolders, dc.GetWorkspaceFolder())
+				devcontainerConfigPaths = append(devcontainerConfigPaths, dc.GetConfigPath())
+				devcontainerSubagentIDs = append(devcontainerSubagentIDs, subAgentID)
 
 				// Add a log source and script for each devcontainer so we can
 				// track logs and timings for each devcontainer.
-				displayName := fmt.Sprintf("Dev Container (%s)", dc.Name)
-				logSourceIDs = append(logSourceIDs, uuid.New())
-				logSourceDisplayNames = append(logSourceDisplayNames, displayName)
-				logSourceIcons = append(logSourceIcons, "/emojis/1f4e6.png") // Emoji package. Or perhaps /icon/container.svg?
-				scriptIDs = append(scriptIDs, id)                            // Re-use the devcontainer ID as the script ID for identification.
-				scriptDisplayName = append(scriptDisplayName, displayName)
-				scriptLogPaths = append(scriptLogPaths, "")
-				scriptSources = append(scriptSources, `echo "WARNING: Dev Containers are early access. If you're seeing this message then Dev Containers haven't been enabled for your workspace yet. To enable, the agent needs to run with the environment variable CODER_AGENT_DEVCONTAINERS_ENABLE=true set."`)
-				scriptCron = append(scriptCron, "")
-				scriptTimeout = append(scriptTimeout, 0)
-				scriptStartBlocksLogin = append(scriptStartBlocksLogin, false)
-				// Run on start to surface the warning message in case the
-				// terraform resource is used, but the experiment hasn't
-				// been enabled.
-				scriptRunOnStart = append(scriptRunOnStart, true)
-				scriptRunOnStop = append(scriptRunOnStop, false)
+				displayName := fmt.Sprintf("Dev Container (%s)", dc.GetName())
+				scriptsParams.LogSourceIDs = append(scriptsParams.LogSourceIDs, uuid.New())
+				scriptsParams.LogSourceDisplayNames = append(scriptsParams.LogSourceDisplayNames, displayName)
+				scriptsParams.LogSourceIcons = append(scriptsParams.LogSourceIcons, "/emojis/1f4e6.png") // Emoji package. Or perhaps /icon/container.svg?
+				scriptsParams.ScriptIDs = append(scriptsParams.ScriptIDs, id)                            // Re-use the devcontainer ID as the script ID for identification.
+				scriptsParams.ScriptDisplayNames = append(scriptsParams.ScriptDisplayNames, displayName)
+				scriptsParams.ScriptLogPaths = append(scriptsParams.ScriptLogPaths, "")
+				scriptsParams.ScriptSources = append(scriptsParams.ScriptSources, "")
+				scriptsParams.ScriptCron = append(scriptsParams.ScriptCron, "")
+				scriptsParams.ScriptTimeout = append(scriptsParams.ScriptTimeout, 0)
+				scriptsParams.ScriptStartBlocksLogin = append(scriptsParams.ScriptStartBlocksLogin, false)
+				scriptsParams.ScriptRunOnStart = append(scriptsParams.ScriptRunOnStart, false)
+				scriptsParams.ScriptRunOnStop = append(scriptsParams.ScriptRunOnStop, false)
 			}
 
 			_, err = db.InsertWorkspaceAgentDevcontainers(ctx, database.InsertWorkspaceAgentDevcontainersParams{
@@ -2823,131 +3010,21 @@ func InsertWorkspaceResource(ctx context.Context, db database.Store, jobID uuid.
 				Name:             devcontainerNames,
 				WorkspaceFolder:  devcontainerWorkspaceFolders,
 				ConfigPath:       devcontainerConfigPaths,
+				SubagentID:       devcontainerSubagentIDs,
 			})
 			if err != nil {
 				return xerrors.Errorf("insert agent devcontainer: %w", err)
 			}
 		}
 
-		_, err = db.InsertWorkspaceAgentLogSources(ctx, database.InsertWorkspaceAgentLogSourcesParams{
-			WorkspaceAgentID: agentID,
-			ID:               logSourceIDs,
-			CreatedAt:        dbtime.Now(),
-			DisplayName:      logSourceDisplayNames,
-			Icon:             logSourceIcons,
-		})
-		if err != nil {
-			return xerrors.Errorf("insert agent log sources: %w", err)
-		}
-
-		_, err = db.InsertWorkspaceAgentScripts(ctx, database.InsertWorkspaceAgentScriptsParams{
-			WorkspaceAgentID: agentID,
-			LogSourceID:      logSourceIDs,
-			LogPath:          scriptLogPaths,
-			CreatedAt:        dbtime.Now(),
-			Script:           scriptSources,
-			Cron:             scriptCron,
-			TimeoutSeconds:   scriptTimeout,
-			StartBlocksLogin: scriptStartBlocksLogin,
-			RunOnStart:       scriptRunOnStart,
-			RunOnStop:        scriptRunOnStop,
-			DisplayName:      scriptDisplayName,
-			ID:               scriptIDs,
-		})
-		if err != nil {
-			return xerrors.Errorf("insert agent scripts: %w", err)
+		if err := insertAgentScriptsAndLogSources(ctx, db, agentID, scriptsParams); err != nil {
+			return xerrors.Errorf("insert agent scripts and log sources: %w", err)
 		}
 
 		for _, app := range prAgent.Apps {
-			// Similar logic is duplicated in terraform/resources.go.
-			slug := app.Slug
-			if slug == "" {
-				return xerrors.Errorf("app must have a slug or name set")
+			if err := insertAgentApp(ctx, db, dbAgent.ID, app, appSlugs, snapshot); err != nil {
+				return xerrors.Errorf("insert agent app: %w", err)
 			}
-			// Contrary to agent names above, app slugs were never permitted to
-			// contain uppercase letters or underscores.
-			if !provisioner.AppSlugRegex.MatchString(slug) {
-				return xerrors.Errorf("app slug %q does not match regex %q", slug, provisioner.AppSlugRegex.String())
-			}
-			if _, exists := appSlugs[slug]; exists {
-				return xerrors.Errorf("duplicate app slug, must be unique per template: %q", slug)
-			}
-			appSlugs[slug] = struct{}{}
-
-			health := database.WorkspaceAppHealthDisabled
-			if app.Healthcheck == nil {
-				app.Healthcheck = &sdkproto.Healthcheck{}
-			}
-			if app.Healthcheck.Url != "" {
-				health = database.WorkspaceAppHealthInitializing
-			}
-
-			sharingLevel := database.AppSharingLevelOwner
-			switch app.SharingLevel {
-			case sdkproto.AppSharingLevel_AUTHENTICATED:
-				sharingLevel = database.AppSharingLevelAuthenticated
-			case sdkproto.AppSharingLevel_PUBLIC:
-				sharingLevel = database.AppSharingLevelPublic
-			}
-
-			displayGroup := sql.NullString{
-				Valid:  app.Group != "",
-				String: app.Group,
-			}
-
-			openIn := database.WorkspaceAppOpenInSlimWindow
-			switch app.OpenIn {
-			case sdkproto.AppOpenIn_TAB:
-				openIn = database.WorkspaceAppOpenInTab
-			case sdkproto.AppOpenIn_SLIM_WINDOW:
-				openIn = database.WorkspaceAppOpenInSlimWindow
-			}
-
-			var appID string
-			if app.Id == "" || app.Id == uuid.Nil.String() {
-				appID = uuid.NewString()
-			} else {
-				appID = app.Id
-			}
-			id, err := uuid.Parse(appID)
-			if err != nil {
-				return xerrors.Errorf("parse app uuid: %w", err)
-			}
-
-			// If workspace apps are "persistent", the ID will not be regenerated across workspace builds, so we have to upsert.
-			dbApp, err := db.UpsertWorkspaceApp(ctx, database.UpsertWorkspaceAppParams{
-				ID:          id,
-				CreatedAt:   dbtime.Now(),
-				AgentID:     dbAgent.ID,
-				Slug:        slug,
-				DisplayName: app.DisplayName,
-				Icon:        app.Icon,
-				Command: sql.NullString{
-					String: app.Command,
-					Valid:  app.Command != "",
-				},
-				Url: sql.NullString{
-					String: app.Url,
-					Valid:  app.Url != "",
-				},
-				External:             app.External,
-				Subdomain:            app.Subdomain,
-				SharingLevel:         sharingLevel,
-				HealthcheckUrl:       app.Healthcheck.Url,
-				HealthcheckInterval:  app.Healthcheck.Interval,
-				HealthcheckThreshold: app.Healthcheck.Threshold,
-				Health:               health,
-				// #nosec G115 - Order represents a display order value that's always small and fits in int32
-				DisplayOrder: int32(app.Order),
-				DisplayGroup: displayGroup,
-				Hidden:       app.Hidden,
-				OpenIn:       openIn,
-				Tooltip:      app.Tooltip,
-			})
-			if err != nil {
-				return xerrors.Errorf("upsert app: %w", err)
-			}
-			snapshot.WorkspaceApps = append(snapshot.WorkspaceApps, telemetry.ConvertWorkspaceApp(dbApp))
 		}
 	}
 
@@ -3043,9 +3120,37 @@ func deleteSessionTokenForUserAndWorkspace(ctx context.Context, db database.Stor
 	return nil
 }
 
-// obtainOIDCAccessToken returns a valid OpenID Connect access token
+func shouldRefreshOIDCToken(link database.UserLink) (bool, time.Time) {
+	if link.OAuthRefreshToken == "" {
+		// We cannot refresh even if we wanted to
+		return false, link.OAuthExpiry
+	}
+
+	if link.OAuthExpiry.IsZero() {
+		// 0 expire means the token never expires, so we shouldn't refresh
+		return false, link.OAuthExpiry
+	}
+
+	// This handles an edge case where the token is about to expire. A workspace
+	// build takes a non-trivial amount of time. If the token is to expire during the
+	// build, then the build risks failure. To mitigate this, refresh the token
+	// prematurely.
+	//
+	// If an OIDC provider issues short-lived tokens less than our defined period,
+	// the token will always be refreshed on every workspace build.
+	//
+	// By setting the expiration backwards, we are effectively shortening the
+	// time a token can be alive for by 10 minutes.
+	// Note: This is how it is done in the oauth2 package's own token refreshing logic.
+	expiresAt := link.OAuthExpiry.Add(-time.Minute * 10)
+
+	// Return if the token is assumed to be expired.
+	return expiresAt.Before(dbtime.Now()), expiresAt
+}
+
+// ObtainOIDCAccessToken returns a valid OpenID Connect access token
 // for the user if it's able to obtain one, otherwise it returns an empty string.
-func obtainOIDCAccessToken(ctx context.Context, db database.Store, oidcConfig promoauth.OAuth2Config, userID uuid.UUID) (string, error) {
+func ObtainOIDCAccessToken(ctx context.Context, logger slog.Logger, db database.Store, oidcConfig promoauth.OAuth2Config, userID uuid.UUID) (string, error) {
 	link, err := db.GetUserLinkByUserIDLoginType(ctx, database.GetUserLinkByUserIDLoginTypeParams{
 		UserID:    userID,
 		LoginType: database.LoginTypeOIDC,
@@ -3057,11 +3162,13 @@ func obtainOIDCAccessToken(ctx context.Context, db database.Store, oidcConfig pr
 		return "", xerrors.Errorf("get owner oidc link: %w", err)
 	}
 
-	if link.OAuthExpiry.Before(dbtime.Now()) && !link.OAuthExpiry.IsZero() && link.OAuthRefreshToken != "" {
+	if shouldRefresh, expiresAt := shouldRefreshOIDCToken(link); shouldRefresh {
 		token, err := oidcConfig.TokenSource(ctx, &oauth2.Token{
 			AccessToken:  link.OAuthAccessToken,
 			RefreshToken: link.OAuthRefreshToken,
-			Expiry:       link.OAuthExpiry,
+			// Use the expiresAt returned by shouldRefreshOIDCToken.
+			// It will force a refresh with an expired time.
+			Expiry: expiresAt,
 		}).Token()
 		if err != nil {
 			// If OIDC fails to refresh, we return an empty string and don't fail.
@@ -3086,6 +3193,7 @@ func obtainOIDCAccessToken(ctx context.Context, db database.Store, oidcConfig pr
 		if err != nil {
 			return "", xerrors.Errorf("update user link: %w", err)
 		}
+		logger.Info(ctx, "refreshed expired OIDC token for user during workspace build", slog.F("user_id", userID))
 	}
 
 	return link.OAuthAccessToken, nil
@@ -3169,6 +3277,10 @@ func auditActionFromTransition(transition database.WorkspaceTransition) database
 }
 
 type TemplateVersionImportJob struct {
+	// TemplateID is not guaranteed to be set. Template versions can be created
+	// without being associated with a template. Resulting in a template id of
+	// `uuid.Nil`
+	TemplateID         uuid.NullUUID            `json:"template_id"`
 	TemplateVersionID  uuid.UUID                `json:"template_version_id"`
 	UserVariableValues []codersdk.VariableValue `json:"user_variable_values"`
 }
@@ -3248,4 +3360,327 @@ func convertDisplayApps(apps *sdkproto.DisplayApps) []database.DisplayApp {
 		dapps = append(dapps, database.DisplayAppWebTerminal)
 	}
 	return dapps
+}
+
+// insertDevcontainerSubagent creates a workspace agent for a devcontainer's
+// subagent if one is defined. It returns the subagent ID (zero UUID if no
+// subagent is defined).
+func insertDevcontainerSubagent(
+	ctx context.Context,
+	db database.Store,
+	dc *sdkproto.Devcontainer,
+	parentAgent database.WorkspaceAgent,
+	resourceID uuid.UUID,
+	appSlugs map[string]struct{},
+	snapshot *telemetry.Snapshot,
+	opts *insertWorkspaceResourceOptions,
+) (uuid.UUID, error) {
+	// If there are no attached resources, we don't need to pre-create the
+	// subagent. This preserves backwards compatibility where devcontainers
+	// without resources can have their agents recreated dynamically.
+	if len(dc.GetApps()) == 0 && len(dc.GetScripts()) == 0 && len(dc.GetEnvs()) == 0 {
+		return uuid.UUID{}, nil
+	}
+
+	subAgentID := uuid.New()
+	if opts.useAgentIDsFromProto {
+		var err error
+		subAgentID, err = uuid.Parse(dc.GetSubagentId())
+		if err != nil {
+			return uuid.UUID{}, xerrors.Errorf("parse subagent id: %w", err)
+		}
+	}
+
+	envJSON, err := encodeSubagentEnvs(dc.GetEnvs())
+	if err != nil {
+		return uuid.UUID{}, err
+	}
+
+	_, err = db.InsertWorkspaceAgent(ctx, database.InsertWorkspaceAgentParams{
+		ID:                       subAgentID,
+		ParentID:                 uuid.NullUUID{Valid: true, UUID: parentAgent.ID},
+		CreatedAt:                dbtime.Now(),
+		UpdatedAt:                dbtime.Now(),
+		ResourceID:               resourceID,
+		Name:                     dc.GetName(),
+		AuthToken:                uuid.New(),
+		AuthInstanceID:           sql.NullString{},
+		Architecture:             parentAgent.Architecture,
+		EnvironmentVariables:     envJSON,
+		Directory:                dc.GetWorkspaceFolder(),
+		InstanceMetadata:         pqtype.NullRawMessage{},
+		ResourceMetadata:         pqtype.NullRawMessage{},
+		OperatingSystem:          parentAgent.OperatingSystem,
+		ConnectionTimeoutSeconds: parentAgent.ConnectionTimeoutSeconds,
+		TroubleshootingURL:       parentAgent.TroubleshootingURL,
+		MOTDFile:                 "",
+		DisplayApps:              []database.DisplayApp{},
+		DisplayOrder:             0,
+		APIKeyScope:              parentAgent.APIKeyScope,
+	})
+	if err != nil {
+		return uuid.UUID{}, xerrors.Errorf("insert subagent: %w", err)
+	}
+
+	for _, app := range dc.GetApps() {
+		if err := insertAgentApp(ctx, db, subAgentID, app, appSlugs, snapshot); err != nil {
+			return uuid.UUID{}, xerrors.Errorf("insert agent app: %w", err)
+		}
+	}
+
+	if err := insertAgentScriptsAndLogSources(ctx, db, subAgentID, agentScriptsFromProto(dc.GetScripts())); err != nil {
+		return uuid.UUID{}, xerrors.Errorf("insert agent scripts and log sources: %w", err)
+	}
+
+	return subAgentID, nil
+}
+
+// MergeExtraEnvs applies extra environment variables to the given map,
+// respecting the merge_strategy field on each env. When merge_strategy
+// is empty or "replace", the value overwrites any existing entry.
+// "append" and "prepend" join values with a ":" separator (PATH-style).
+// "error" causes a failure if the key already exists.
+func MergeExtraEnvs(env map[string]string, extraEnvs []*sdkproto.Env) error {
+	for _, e := range extraEnvs {
+		strategy := e.GetMergeStrategy()
+		if strategy == "" {
+			strategy = "replace"
+		}
+		existing, exists := env[e.GetName()]
+		switch strategy {
+		case "error":
+			if exists {
+				return xerrors.Errorf(
+					"duplicate env var %q: merge_strategy is %q but variable is already defined",
+					e.GetName(), strategy,
+				)
+			}
+			env[e.GetName()] = e.GetValue()
+		case "append":
+			if exists && existing != "" {
+				env[e.GetName()] = existing + ":" + e.GetValue()
+			} else {
+				env[e.GetName()] = e.GetValue()
+			}
+		case "prepend":
+			if exists && existing != "" {
+				env[e.GetName()] = e.GetValue() + ":" + existing
+			} else {
+				env[e.GetName()] = e.GetValue()
+			}
+		default: // "replace"
+			env[e.GetName()] = e.GetValue()
+		}
+	}
+	return nil
+}
+
+func encodeSubagentEnvs(envs []*sdkproto.Env) (pqtype.NullRawMessage, error) {
+	if len(envs) == 0 {
+		return pqtype.NullRawMessage{}, nil
+	}
+
+	subAgentEnvs := make(map[string]string, len(envs))
+	if err := MergeExtraEnvs(subAgentEnvs, envs); err != nil {
+		return pqtype.NullRawMessage{}, err
+	}
+
+	data, err := json.Marshal(subAgentEnvs)
+	if err != nil {
+		return pqtype.NullRawMessage{}, xerrors.Errorf("marshal env: %w", err)
+	}
+	return pqtype.NullRawMessage{Valid: true, RawMessage: data}, nil
+}
+
+// agentScriptsParams holds the parameters for inserting agent scripts and
+// their associated log sources.
+type agentScriptsParams struct {
+	LogSourceIDs          []uuid.UUID
+	LogSourceDisplayNames []string
+	LogSourceIcons        []string
+
+	ScriptIDs              []uuid.UUID
+	ScriptDisplayNames     []string
+	ScriptLogPaths         []string
+	ScriptSources          []string
+	ScriptCron             []string
+	ScriptTimeout          []int32
+	ScriptStartBlocksLogin []bool
+	ScriptRunOnStart       []bool
+	ScriptRunOnStop        []bool
+}
+
+// agentScriptsFromProto converts a slice of proto scripts into the
+// agentScriptsParams struct needed for database insertion.
+func agentScriptsFromProto(scripts []*sdkproto.Script) agentScriptsParams {
+	params := agentScriptsParams{
+		LogSourceIDs:          make([]uuid.UUID, 0, len(scripts)),
+		LogSourceDisplayNames: make([]string, 0, len(scripts)),
+		LogSourceIcons:        make([]string, 0, len(scripts)),
+
+		ScriptIDs:              make([]uuid.UUID, 0, len(scripts)),
+		ScriptDisplayNames:     make([]string, 0, len(scripts)),
+		ScriptLogPaths:         make([]string, 0, len(scripts)),
+		ScriptSources:          make([]string, 0, len(scripts)),
+		ScriptCron:             make([]string, 0, len(scripts)),
+		ScriptTimeout:          make([]int32, 0, len(scripts)),
+		ScriptStartBlocksLogin: make([]bool, 0, len(scripts)),
+		ScriptRunOnStart:       make([]bool, 0, len(scripts)),
+		ScriptRunOnStop:        make([]bool, 0, len(scripts)),
+	}
+
+	for _, script := range scripts {
+		params.LogSourceIDs = append(params.LogSourceIDs, uuid.New())
+		params.LogSourceDisplayNames = append(params.LogSourceDisplayNames, script.GetDisplayName())
+		params.LogSourceIcons = append(params.LogSourceIcons, script.GetIcon())
+
+		params.ScriptIDs = append(params.ScriptIDs, uuid.New())
+		params.ScriptDisplayNames = append(params.ScriptDisplayNames, script.GetDisplayName())
+		params.ScriptLogPaths = append(params.ScriptLogPaths, script.GetLogPath())
+		params.ScriptSources = append(params.ScriptSources, script.GetScript())
+		params.ScriptCron = append(params.ScriptCron, script.GetCron())
+		params.ScriptTimeout = append(params.ScriptTimeout, script.GetTimeoutSeconds())
+		params.ScriptStartBlocksLogin = append(params.ScriptStartBlocksLogin, script.GetStartBlocksLogin())
+		params.ScriptRunOnStart = append(params.ScriptRunOnStart, script.GetRunOnStart())
+		params.ScriptRunOnStop = append(params.ScriptRunOnStop, script.GetRunOnStop())
+	}
+
+	return params
+}
+
+// insertAgentScriptsAndLogSources inserts log sources and scripts for an agent (or
+// subagent). It expects the caller to have built the agentScriptsParams,
+// allowing for additional entries to be appended before insertion (e.g. for
+// devcontainers). Returns nil if there are no log sources to insert.
+func insertAgentScriptsAndLogSources(ctx context.Context, db database.Store, agentID uuid.UUID, params agentScriptsParams) error {
+	if len(params.LogSourceIDs) == 0 {
+		return nil
+	}
+
+	_, err := db.InsertWorkspaceAgentLogSources(ctx, database.InsertWorkspaceAgentLogSourcesParams{
+		WorkspaceAgentID: agentID,
+		ID:               params.LogSourceIDs,
+		CreatedAt:        dbtime.Now(),
+		DisplayName:      params.LogSourceDisplayNames,
+		Icon:             params.LogSourceIcons,
+	})
+	if err != nil {
+		return xerrors.Errorf("insert log sources: %w", err)
+	}
+
+	_, err = db.InsertWorkspaceAgentScripts(ctx, database.InsertWorkspaceAgentScriptsParams{
+		WorkspaceAgentID: agentID,
+		LogSourceID:      params.LogSourceIDs,
+		ID:               params.ScriptIDs,
+		LogPath:          params.ScriptLogPaths,
+		CreatedAt:        dbtime.Now(),
+		Script:           params.ScriptSources,
+		Cron:             params.ScriptCron,
+		TimeoutSeconds:   params.ScriptTimeout,
+		StartBlocksLogin: params.ScriptStartBlocksLogin,
+		RunOnStart:       params.ScriptRunOnStart,
+		RunOnStop:        params.ScriptRunOnStop,
+		DisplayName:      params.ScriptDisplayNames,
+	})
+	if err != nil {
+		return xerrors.Errorf("insert scripts: %w", err)
+	}
+
+	return nil
+}
+
+func insertAgentApp(ctx context.Context, db database.Store, agentID uuid.UUID, app *sdkproto.App, appSlugs map[string]struct{}, snapshot *telemetry.Snapshot) error {
+	// Similar logic is duplicated in terraform/resources.go.
+	slug := app.Slug
+	if slug == "" {
+		return xerrors.Errorf("app must have a slug or name set")
+	}
+	// Unlike agent names, app slugs were never permitted to contain uppercase
+	// letters or underscores.
+	if !provisioner.AppSlugRegex.MatchString(slug) {
+		return xerrors.Errorf("app slug %q does not match regex %q", slug, provisioner.AppSlugRegex.String())
+	}
+	if _, exists := appSlugs[slug]; exists {
+		return xerrors.Errorf("duplicate app slug, must be unique per template: %q", slug)
+	}
+	appSlugs[slug] = struct{}{}
+
+	health := database.WorkspaceAppHealthDisabled
+	healthcheck := app.GetHealthcheck()
+	if healthcheck == nil {
+		healthcheck = &sdkproto.Healthcheck{}
+	}
+	if healthcheck.Url != "" {
+		health = database.WorkspaceAppHealthInitializing
+	}
+
+	sharingLevel := database.AppSharingLevelOwner
+	switch app.SharingLevel {
+	case sdkproto.AppSharingLevel_AUTHENTICATED:
+		sharingLevel = database.AppSharingLevelAuthenticated
+	case sdkproto.AppSharingLevel_PUBLIC:
+		sharingLevel = database.AppSharingLevelPublic
+	}
+
+	displayGroup := sql.NullString{
+		Valid:  app.Group != "",
+		String: app.Group,
+	}
+
+	openIn := database.WorkspaceAppOpenInSlimWindow
+	switch app.OpenIn {
+	case sdkproto.AppOpenIn_TAB:
+		openIn = database.WorkspaceAppOpenInTab
+	case sdkproto.AppOpenIn_SLIM_WINDOW:
+		openIn = database.WorkspaceAppOpenInSlimWindow
+	}
+
+	var appID string
+	if app.Id == "" || app.Id == uuid.Nil.String() {
+		appID = uuid.NewString()
+	} else {
+		appID = app.Id
+	}
+	id, err := uuid.Parse(appID)
+	if err != nil {
+		return xerrors.Errorf("parse app uuid: %w", err)
+	}
+
+	// If workspace apps are "persistent", the ID will not be regenerated across workspace builds, so we have to upsert.
+	dbApp, err := db.UpsertWorkspaceApp(ctx, database.UpsertWorkspaceAppParams{
+		ID:          id,
+		CreatedAt:   dbtime.Now(),
+		AgentID:     agentID,
+		Slug:        slug,
+		DisplayName: app.DisplayName,
+		Icon:        app.Icon,
+		Command: sql.NullString{
+			String: app.Command,
+			Valid:  app.Command != "",
+		},
+		Url: sql.NullString{
+			String: app.Url,
+			Valid:  app.Url != "",
+		},
+		External:             app.External,
+		Subdomain:            app.Subdomain,
+		SharingLevel:         sharingLevel,
+		HealthcheckUrl:       healthcheck.Url,
+		HealthcheckInterval:  healthcheck.Interval,
+		HealthcheckThreshold: healthcheck.Threshold,
+		Health:               health,
+		// #nosec G115 - Order represents a display order value that's always small and fits in int32
+		DisplayOrder: int32(app.Order),
+		DisplayGroup: displayGroup,
+		Hidden:       app.Hidden,
+		OpenIn:       openIn,
+		Tooltip:      app.Tooltip,
+	})
+	if err != nil {
+		return xerrors.Errorf("upsert app: %w", err)
+	}
+
+	snapshot.WorkspaceApps = append(snapshot.WorkspaceApps, telemetry.ConvertWorkspaceApp(dbApp))
+
+	return nil
 }

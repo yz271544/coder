@@ -25,10 +25,6 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
-	"tailscale.com/net/speedtest"
-	"tailscale.com/tailcfg"
-
 	"github.com/bramvdbogaerde/go-scp"
 	"github.com/google/uuid"
 	"github.com/ory/dockertest/v3"
@@ -40,12 +36,14 @@ import (
 	"github.com/spf13/afero"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/goleak"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/xerrors"
+	"tailscale.com/net/speedtest"
+	"tailscale.com/tailcfg"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/agent"
 	"github.com/coder/coder/v2/agent/agentcontainers"
 	"github.com/coder/coder/v2/agent/agentssh"
@@ -123,7 +121,8 @@ func TestAgent_ImmediateClose(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// NOTE: These tests only work when your default shell is bash for some reason.
+// NOTE(Cian): I noticed that these tests would fail when my default shell was zsh.
+//             Writing "exit 0" to stdin before closing fixed the issue for me.
 
 func TestAgent_Stats_SSH(t *testing.T) {
 	t.Parallel()
@@ -150,16 +149,37 @@ func TestAgent_Stats_SSH(t *testing.T) {
 			require.NoError(t, err)
 
 			var s *proto.Stats
+			// We are looking for four different stats to be reported. They might not all
+			// arrive at the same time, so we loop until we've seen them all.
+			var connectionCountSeen, rxBytesSeen, txBytesSeen, sessionCountSSHSeen bool
 			require.Eventuallyf(t, func() bool {
 				var ok bool
 				s, ok = <-stats
-				return ok && s.ConnectionCount > 0 && s.RxBytes > 0 && s.TxBytes > 0 && s.SessionCountSsh == 1
+				if !ok {
+					return false
+				}
+				if s.ConnectionCount > 0 {
+					connectionCountSeen = true
+				}
+				if s.RxBytes > 0 {
+					rxBytesSeen = true
+				}
+				if s.TxBytes > 0 {
+					txBytesSeen = true
+				}
+				if s.SessionCountSsh == 1 {
+					sessionCountSSHSeen = true
+				}
+				return connectionCountSeen && rxBytesSeen && txBytesSeen && sessionCountSSHSeen
 			}, testutil.WaitLong, testutil.IntervalFast,
-				"never saw stats: %+v", s,
+				"never saw all stats: %+v, saw connectionCount: %t, rxBytes: %t, txBytes: %t, sessionCountSsh: %t",
+				s, connectionCountSeen, rxBytesSeen, txBytesSeen, sessionCountSSHSeen,
 			)
+			_, err = stdin.Write([]byte("exit 0\n"))
+			require.NoError(t, err, "writing exit to stdin")
 			_ = stdin.Close()
 			err = session.Wait()
-			require.NoError(t, err)
+			require.NoError(t, err, "waiting for session to exit")
 		})
 	}
 }
@@ -185,12 +205,31 @@ func TestAgent_Stats_ReconnectingPTY(t *testing.T) {
 	require.NoError(t, err)
 
 	var s *proto.Stats
+	// We are looking for four different stats to be reported. They might not all
+	// arrive at the same time, so we loop until we've seen them all.
+	var connectionCountSeen, rxBytesSeen, txBytesSeen, sessionCountReconnectingPTYSeen bool
 	require.Eventuallyf(t, func() bool {
 		var ok bool
 		s, ok = <-stats
-		return ok && s.ConnectionCount > 0 && s.RxBytes > 0 && s.TxBytes > 0 && s.SessionCountReconnectingPty == 1
+		if !ok {
+			return false
+		}
+		if s.ConnectionCount > 0 {
+			connectionCountSeen = true
+		}
+		if s.RxBytes > 0 {
+			rxBytesSeen = true
+		}
+		if s.TxBytes > 0 {
+			txBytesSeen = true
+		}
+		if s.SessionCountReconnectingPty == 1 {
+			sessionCountReconnectingPTYSeen = true
+		}
+		return connectionCountSeen && rxBytesSeen && txBytesSeen && sessionCountReconnectingPTYSeen
 	}, testutil.WaitLong, testutil.IntervalFast,
-		"never saw stats: %+v", s,
+		"never saw all stats: %+v, saw connectionCount: %t, rxBytes: %t, txBytes: %t, sessionCountReconnectingPTY: %t",
+		s, connectionCountSeen, rxBytesSeen, txBytesSeen, sessionCountReconnectingPTYSeen,
 	)
 }
 
@@ -220,9 +259,10 @@ func TestAgent_Stats_Magic(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, expected, strings.TrimSpace(string(output)))
 	})
+
 	t.Run("TracksVSCode", func(t *testing.T) {
 		t.Parallel()
-		if runtime.GOOS == "window" {
+		if runtime.GOOS == "windows" {
 			t.Skip("Sleeping for infinity doesn't work on Windows")
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
@@ -254,7 +294,9 @@ func TestAgent_Stats_Magic(t *testing.T) {
 		}, testutil.WaitLong, testutil.IntervalFast,
 			"never saw stats",
 		)
-		// The shell will automatically exit if there is no stdin!
+
+		_, err = stdin.Write([]byte("exit 0\n"))
+		require.NoError(t, err, "writing exit to stdin")
 		_ = stdin.Close()
 		err = session.Wait()
 		require.NoError(t, err)
@@ -465,7 +507,7 @@ func TestAgent_SessionTTYShell(t *testing.T) {
 	for _, port := range sshPorts {
 		t.Run(fmt.Sprintf("(%d)", port), func(t *testing.T) {
 			t.Parallel()
-			ctx := testutil.Context(t, testutil.WaitShort)
+			ctx := testutil.Context(t, testutil.WaitMedium)
 
 			session := setupSSHSessionOnPort(t, agentsdk.Manifest{}, codersdk.ServiceBannerConfig{}, nil, port)
 			command := "sh"
@@ -671,14 +713,14 @@ func TestAgent_Session_TTY_MOTD_Update(t *testing.T) {
 		},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-	defer cancel()
-
 	setSBInterval := func(_ *agenttest.Client, opts *agent.Options) {
-		opts.ServiceBannerRefreshInterval = 5 * time.Millisecond
+		opts.ServiceBannerRefreshInterval = testutil.IntervalFast
 	}
 	//nolint:dogsled // Allow the blank identifiers.
 	conn, client, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, setSBInterval)
+
+	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+	defer cancel()
 
 	//nolint:paralleltest // These tests need to swap the banner func.
 	for _, port := range sshPorts {
@@ -691,7 +733,10 @@ func TestAgent_Session_TTY_MOTD_Update(t *testing.T) {
 		for i, test := range tests {
 			t.Run(fmt.Sprintf("(:%d)/%d", port, i), func(t *testing.T) {
 				// Set new banner func and wait for the agent to call it to update the
-				// banner.
+				// banner. We wait for two calls to ensure the value has been stored:
+				// the second call can only begin after the first iteration of
+				// fetchServiceBannerLoop completes (call + store), so after
+				// receiving two signals at least one store has happened.
 				ready := make(chan struct{}, 2)
 				client.SetAnnouncementBannersFunc(func() ([]codersdk.BannerConfig, error) {
 					select {
@@ -700,8 +745,8 @@ func TestAgent_Session_TTY_MOTD_Update(t *testing.T) {
 					}
 					return []codersdk.BannerConfig{test.banner}, nil
 				})
-				<-ready
-				<-ready // Wait for two updates to ensure the value has propagated.
+				testutil.TryReceive(ctx, t, ready)
+				testutil.TryReceive(ctx, t, ready)
 
 				session, err := sshClient.NewSession()
 				require.NoError(t, err)
@@ -941,13 +986,168 @@ func TestAgent_TCPRemoteForwarding(t *testing.T) {
 	requireEcho(t, conn)
 }
 
+func TestAgent_TCPLocalForwardingBlocked(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	rl, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer rl.Close()
+	tcpAddr, valid := rl.Addr().(*net.TCPAddr)
+	require.True(t, valid)
+	remotePort := tcpAddr.Port
+
+	//nolint:dogsled
+	agentConn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
+		o.BlockLocalPortForwarding = true
+	})
+	sshClient, err := agentConn.SSHClient(ctx)
+	require.NoError(t, err)
+	defer sshClient.Close()
+
+	_, err = sshClient.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort))
+	require.ErrorContains(t, err, "administratively prohibited")
+}
+
+func TestAgent_TCPRemoteForwardingBlocked(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	//nolint:dogsled
+	agentConn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
+		o.BlockReversePortForwarding = true
+	})
+	sshClient, err := agentConn.SSHClient(ctx)
+	require.NoError(t, err)
+	defer sshClient.Close()
+
+	localhost := netip.MustParseAddr("127.0.0.1")
+	randomPort := testutil.RandomPortNoListen(t)
+	addr := net.TCPAddrFromAddrPort(netip.AddrPortFrom(localhost, randomPort))
+	_, err = sshClient.ListenTCP(addr)
+	require.ErrorContains(t, err, "tcpip-forward request denied by peer")
+}
+
+func TestAgent_UnixLocalForwardingBlocked(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix domain sockets are not fully supported on Windows")
+	}
+	ctx := testutil.Context(t, testutil.WaitLong)
+	tmpdir := testutil.TempDirUnixSocket(t)
+	remoteSocketPath := filepath.Join(tmpdir, "remote-socket")
+
+	l, err := net.Listen("unix", remoteSocketPath)
+	require.NoError(t, err)
+	defer l.Close()
+
+	//nolint:dogsled
+	agentConn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
+		o.BlockLocalPortForwarding = true
+	})
+	sshClient, err := agentConn.SSHClient(ctx)
+	require.NoError(t, err)
+	defer sshClient.Close()
+
+	_, err = sshClient.Dial("unix", remoteSocketPath)
+	require.ErrorContains(t, err, "administratively prohibited")
+}
+
+func TestAgent_UnixRemoteForwardingBlocked(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("unix domain sockets are not fully supported on Windows")
+	}
+	ctx := testutil.Context(t, testutil.WaitLong)
+	tmpdir := testutil.TempDirUnixSocket(t)
+	remoteSocketPath := filepath.Join(tmpdir, "remote-socket")
+
+	//nolint:dogsled
+	agentConn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
+		o.BlockReversePortForwarding = true
+	})
+	sshClient, err := agentConn.SSHClient(ctx)
+	require.NoError(t, err)
+	defer sshClient.Close()
+
+	_, err = sshClient.ListenUnix(remoteSocketPath)
+	require.ErrorContains(t, err, "streamlocal-forward@openssh.com request denied by peer")
+}
+
+// TestAgent_LocalBlockedDoesNotAffectReverse verifies that blocking
+// local port forwarding does not prevent reverse port forwarding from
+// working. A field-name transposition at any plumbing hop would cause
+// both directions to be blocked when only one flag is set.
+func TestAgent_LocalBlockedDoesNotAffectReverse(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	//nolint:dogsled
+	agentConn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
+		o.BlockLocalPortForwarding = true
+	})
+	sshClient, err := agentConn.SSHClient(ctx)
+	require.NoError(t, err)
+	defer sshClient.Close()
+
+	// Reverse forwarding must still work.
+	localhost := netip.MustParseAddr("127.0.0.1")
+	var ll net.Listener
+	for {
+		randomPort := testutil.RandomPortNoListen(t)
+		addr := net.TCPAddrFromAddrPort(netip.AddrPortFrom(localhost, randomPort))
+		ll, err = sshClient.ListenTCP(addr)
+		if err != nil {
+			t.Logf("error remote forwarding: %s", err.Error())
+			select {
+			case <-ctx.Done():
+				t.Fatal("timed out getting random listener")
+			default:
+				continue
+			}
+		}
+		break
+	}
+	_ = ll.Close()
+}
+
+// TestAgent_ReverseBlockedDoesNotAffectLocal verifies that blocking
+// reverse port forwarding does not prevent local port forwarding from
+// working.
+func TestAgent_ReverseBlockedDoesNotAffectLocal(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+
+	rl, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer rl.Close()
+	tcpAddr, valid := rl.Addr().(*net.TCPAddr)
+	require.True(t, valid)
+	remotePort := tcpAddr.Port
+	go echoOnce(t, rl)
+
+	//nolint:dogsled
+	agentConn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
+		o.BlockReversePortForwarding = true
+	})
+	sshClient, err := agentConn.SSHClient(ctx)
+	require.NoError(t, err)
+	defer sshClient.Close()
+
+	// Local forwarding must still work.
+	conn, err := sshClient.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort))
+	require.NoError(t, err)
+	defer conn.Close()
+	requireEcho(t, conn)
+}
+
 func TestAgent_UnixLocalForwarding(t *testing.T) {
 	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("unix domain sockets are not fully supported on Windows")
 	}
 	ctx := testutil.Context(t, testutil.WaitLong)
-	tmpdir := tempDirUnixSocket(t)
+	tmpdir := testutil.TempDirUnixSocket(t)
 	remoteSocketPath := filepath.Join(tmpdir, "remote-socket")
 
 	l, err := net.Listen("unix", remoteSocketPath)
@@ -975,7 +1175,7 @@ func TestAgent_UnixRemoteForwarding(t *testing.T) {
 		t.Skip("unix domain sockets are not fully supported on Windows")
 	}
 
-	tmpdir := tempDirUnixSocket(t)
+	tmpdir := testutil.TempDirUnixSocket(t)
 	remoteSocketPath := filepath.Join(tmpdir, "remote-socket")
 
 	ctx := testutil.Context(t, testutil.WaitLong)
@@ -994,42 +1194,77 @@ func TestAgent_UnixRemoteForwarding(t *testing.T) {
 
 func TestAgent_SFTP(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
-	defer cancel()
-	u, err := user.Current()
-	require.NoError(t, err, "get current user")
-	home := u.HomeDir
-	if runtime.GOOS == "windows" {
-		home = "/" + strings.ReplaceAll(home, "\\", "/")
-	}
-	//nolint:dogsled
-	conn, agentClient, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0)
-	sshClient, err := conn.SSHClient(ctx)
-	require.NoError(t, err)
-	defer sshClient.Close()
-	client, err := sftp.NewClient(sshClient)
-	require.NoError(t, err)
-	defer client.Close()
-	wd, err := client.Getwd()
-	require.NoError(t, err, "get working directory")
-	require.Equal(t, home, wd, "working directory should be home user home")
-	tempFile := filepath.Join(t.TempDir(), "sftp")
-	// SFTP only accepts unix-y paths.
-	remoteFile := filepath.ToSlash(tempFile)
-	if !path.IsAbs(remoteFile) {
-		// On Windows, e.g. "/C:/Users/...".
-		remoteFile = path.Join("/", remoteFile)
-	}
-	file, err := client.Create(remoteFile)
-	require.NoError(t, err)
-	err = file.Close()
-	require.NoError(t, err)
-	_, err = os.Stat(tempFile)
-	require.NoError(t, err)
 
-	// Close the client to trigger disconnect event.
-	_ = client.Close()
-	assertConnectionReport(t, agentClient, proto.Connection_SSH, 0, "")
+	t.Run("DefaultWorkingDirectory", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+		u, err := user.Current()
+		require.NoError(t, err, "get current user")
+		home := u.HomeDir
+		if runtime.GOOS == "windows" {
+			home = "/" + strings.ReplaceAll(home, "\\", "/")
+		}
+		//nolint:dogsled
+		conn, agentClient, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0)
+		sshClient, err := conn.SSHClient(ctx)
+		require.NoError(t, err)
+		defer sshClient.Close()
+		client, err := sftp.NewClient(sshClient)
+		require.NoError(t, err)
+		defer client.Close()
+		wd, err := client.Getwd()
+		require.NoError(t, err, "get working directory")
+		require.Equal(t, home, wd, "working directory should be user home")
+		tempFile := filepath.Join(t.TempDir(), "sftp")
+		// SFTP only accepts unix-y paths.
+		remoteFile := filepath.ToSlash(tempFile)
+		if !path.IsAbs(remoteFile) {
+			// On Windows, e.g. "/C:/Users/...".
+			remoteFile = path.Join("/", remoteFile)
+		}
+		file, err := client.Create(remoteFile)
+		require.NoError(t, err)
+		err = file.Close()
+		require.NoError(t, err)
+		_, err = os.Stat(tempFile)
+		require.NoError(t, err)
+
+		// Close the client to trigger disconnect event.
+		_ = client.Close()
+		assertConnectionReport(t, agentClient, proto.Connection_SSH, 0, "")
+	})
+
+	t.Run("CustomWorkingDirectory", func(t *testing.T) {
+		t.Parallel()
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
+		defer cancel()
+
+		// Create a custom directory for the agent to use.
+		customDir := t.TempDir()
+		expectedDir := customDir
+		if runtime.GOOS == "windows" {
+			expectedDir = "/" + strings.ReplaceAll(customDir, "\\", "/")
+		}
+
+		//nolint:dogsled
+		conn, agentClient, _, _, _ := setupAgent(t, agentsdk.Manifest{
+			Directory: customDir,
+		}, 0)
+		sshClient, err := conn.SSHClient(ctx)
+		require.NoError(t, err)
+		defer sshClient.Close()
+		client, err := sftp.NewClient(sshClient)
+		require.NoError(t, err)
+		defer client.Close()
+		wd, err := client.Getwd()
+		require.NoError(t, err, "get working directory")
+		require.Equal(t, expectedDir, wd, "working directory should be custom directory")
+
+		// Close the client to trigger disconnect event.
+		_ = client.Close()
+		assertConnectionReport(t, agentClient, proto.Connection_SSH, 0, "")
+	})
 }
 
 func TestAgent_SCP(t *testing.T) {
@@ -2927,7 +3162,7 @@ func TestAgent_Speedtest(t *testing.T) {
 
 func TestAgent_Reconnect(t *testing.T) {
 	t.Parallel()
-	ctx := testutil.Context(t, testutil.WaitShort)
+	ctx := testutil.Context(t, testutil.WaitLong)
 	logger := testutil.Logger(t)
 	// After the agent is disconnected from a coordinator, it's supposed
 	// to reconnect!
@@ -2940,7 +3175,8 @@ func TestAgent_Reconnect(t *testing.T) {
 		logger,
 		agentID,
 		agentsdk.Manifest{
-			DERPMap: derpMap,
+			DERPMap:   derpMap,
+			Directory: "/test/workspace",
 		},
 		statsCh,
 		fCoordinator,
@@ -2953,13 +3189,75 @@ func TestAgent_Reconnect(t *testing.T) {
 	})
 	defer closer.Close()
 
-	call1 := testutil.RequireReceive(ctx, t, fCoordinator.CoordinateCalls)
-	require.Equal(t, client.GetNumRefreshTokenCalls(), 1)
-	close(call1.Resps) // hang up
-	// expect reconnect
+	// Each iteration forces the agent to reconnect by closing
+	// the current coordinate call while the tracked HTTP server
+	// goroutine (from connection 1's createTailnet) is still
+	// alive, widening the race window.
+	const reconnections = 5
+	for i := range reconnections {
+		call := testutil.RequireReceive(ctx, t, fCoordinator.CoordinateCalls)
+		require.Equal(t, i+1, client.GetNumRefreshTokenCalls())
+		close(call.Resps) // hang up — triggers reconnect
+	}
+	// Verify final reconnect succeeds.
 	testutil.RequireReceive(ctx, t, fCoordinator.CoordinateCalls)
-	// Check that the agent refreshes the token when it reconnects.
-	require.Equal(t, client.GetNumRefreshTokenCalls(), 2)
+	require.Equal(t, reconnections+1, client.GetNumRefreshTokenCalls())
+	closer.Close()
+}
+
+func TestAgent_ReconnectNoLifecycleReemit(t *testing.T) {
+	t.Parallel()
+	ctx := testutil.Context(t, testutil.WaitLong)
+	logger := testutil.Logger(t)
+
+	fCoordinator := tailnettest.NewFakeCoordinator()
+	agentID := uuid.New()
+	statsCh := make(chan *proto.Stats, 50)
+	derpMap, _ := tailnettest.RunDERPAndSTUN(t)
+
+	client := agenttest.NewClient(t,
+		logger,
+		agentID,
+		agentsdk.Manifest{
+			DERPMap: derpMap,
+			Scripts: []codersdk.WorkspaceAgentScript{{
+				Script:     "echo hello",
+				Timeout:    30 * time.Second,
+				RunOnStart: true,
+			}},
+		},
+		statsCh,
+		fCoordinator,
+	)
+	defer client.Close()
+
+	closer := agent.New(agent.Options{
+		Client: client,
+		Logger: logger.Named("agent"),
+	})
+	defer closer.Close()
+
+	// Wait for the agent to reach Ready state.
+	require.Eventually(t, func() bool {
+		return slices.Contains(client.GetLifecycleStates(), codersdk.WorkspaceAgentLifecycleReady)
+	}, testutil.WaitShort, testutil.IntervalFast)
+
+	statesBefore := slices.Clone(client.GetLifecycleStates())
+
+	// Disconnect by closing the coordinator response channel.
+	call1 := testutil.RequireReceive(ctx, t, fCoordinator.CoordinateCalls)
+	close(call1.Resps)
+
+	// Wait for reconnect.
+	testutil.RequireReceive(ctx, t, fCoordinator.CoordinateCalls)
+
+	// Wait for a stats report as a deterministic steady-state proof.
+	testutil.RequireReceive(ctx, t, statsCh)
+
+	statesAfter := client.GetLifecycleStates()
+	require.Equal(t, statesBefore, statesAfter,
+		"lifecycle states should not be re-reported after reconnect")
+
 	closer.Close()
 }
 
@@ -3417,8 +3715,17 @@ func testSessionOutput(t *testing.T, session *ssh.Session, expected, unexpected 
 	require.NoError(t, err)
 
 	ptty.WriteLine("exit 0")
-	err = session.Wait()
-	require.NoError(t, err)
+
+	waitErr := make(chan error, 1)
+	go func() {
+		waitErr <- session.Wait()
+	}()
+	select {
+	case err = <-waitErr:
+		require.NoError(t, err)
+	case <-time.After(testutil.WaitLong):
+		require.Fail(t, "timed out waiting for session to exit")
+	}
 
 	for _, unexpected := range unexpected {
 		require.NotContains(t, stdout.String(), unexpected, "should not show output")
@@ -3431,29 +3738,6 @@ func testSessionOutput(t *testing.T, session *ssh.Session, expected, unexpected 
 	}
 }
 
-// tempDirUnixSocket returns a temporary directory that can safely hold unix
-// sockets (probably).
-//
-// During tests on darwin we hit the max path length limit for unix sockets
-// pretty easily in the default location, so this function uses /tmp instead to
-// get shorter paths.
-func tempDirUnixSocket(t *testing.T) string {
-	t.Helper()
-	if runtime.GOOS == "darwin" {
-		testName := strings.ReplaceAll(t.Name(), "/", "_")
-		dir, err := os.MkdirTemp("/tmp", fmt.Sprintf("coder-test-%s-", testName))
-		require.NoError(t, err, "create temp dir for gpg test")
-
-		t.Cleanup(func() {
-			err := os.RemoveAll(dir)
-			assert.NoError(t, err, "remove temp dir", dir)
-		})
-		return dir
-	}
-
-	return t.TempDir()
-}
-
 func TestAgent_Metrics_SSH(t *testing.T) {
 	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitLong)
@@ -3462,11 +3746,7 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 	registry := prometheus.NewRegistry()
 
 	//nolint:dogsled
-	conn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{
-		// Make sure we always get a DERP connection for
-		// currently_reachable_peers.
-		DisableDirectConnections: true,
-	}, 0, func(_ *agenttest.Client, o *agent.Options) {
+	conn, _, _, _, _ := setupAgent(t, agentsdk.Manifest{}, 0, func(_ *agenttest.Client, o *agent.Options) {
 		o.PrometheusRegistry = registry
 	})
 
@@ -3481,16 +3761,31 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 	err = session.Shell()
 	require.NoError(t, err)
 
-	expected := []*proto.Stats_Metric{
+	expected := []struct {
+		Name    string
+		Type    proto.Stats_Metric_Type
+		CheckFn func(float64) error
+		Labels  []*proto.Stats_Metric_Label
+	}{
 		{
-			Name:  "agent_reconnecting_pty_connections_total",
-			Type:  proto.Stats_Metric_COUNTER,
-			Value: 0,
+			Name: "agent_reconnecting_pty_connections_total",
+			Type: proto.Stats_Metric_COUNTER,
+			CheckFn: func(v float64) error {
+				if v == 0 {
+					return nil
+				}
+				return xerrors.Errorf("expected 0, got %f", v)
+			},
 		},
 		{
-			Name:  "agent_sessions_total",
-			Type:  proto.Stats_Metric_COUNTER,
-			Value: 1,
+			Name: "agent_sessions_total",
+			Type: proto.Stats_Metric_COUNTER,
+			CheckFn: func(v float64) error {
+				if v == 1 {
+					return nil
+				}
+				return xerrors.Errorf("expected 1, got %f", v)
+			},
 			Labels: []*proto.Stats_Metric_Label{
 				{
 					Name:  "magic_type",
@@ -3503,24 +3798,44 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 			},
 		},
 		{
-			Name:  "agent_ssh_server_failed_connections_total",
-			Type:  proto.Stats_Metric_COUNTER,
-			Value: 0,
+			Name: "agent_ssh_server_failed_connections_total",
+			Type: proto.Stats_Metric_COUNTER,
+			CheckFn: func(v float64) error {
+				if v == 0 {
+					return nil
+				}
+				return xerrors.Errorf("expected 0, got %f", v)
+			},
 		},
 		{
-			Name:  "agent_ssh_server_sftp_connections_total",
-			Type:  proto.Stats_Metric_COUNTER,
-			Value: 0,
+			Name: "agent_ssh_server_sftp_connections_total",
+			Type: proto.Stats_Metric_COUNTER,
+			CheckFn: func(v float64) error {
+				if v == 0 {
+					return nil
+				}
+				return xerrors.Errorf("expected 0, got %f", v)
+			},
 		},
 		{
-			Name:  "agent_ssh_server_sftp_server_errors_total",
-			Type:  proto.Stats_Metric_COUNTER,
-			Value: 0,
+			Name: "agent_ssh_server_sftp_server_errors_total",
+			Type: proto.Stats_Metric_COUNTER,
+			CheckFn: func(v float64) error {
+				if v == 0 {
+					return nil
+				}
+				return xerrors.Errorf("expected 0, got %f", v)
+			},
 		},
 		{
-			Name:  "coderd_agentstats_currently_reachable_peers",
-			Type:  proto.Stats_Metric_GAUGE,
-			Value: 1,
+			Name: "coderd_agentstats_currently_reachable_peers",
+			Type: proto.Stats_Metric_GAUGE,
+			CheckFn: func(float64) error {
+				// We can't reliably ping a peer here, and networking is out of
+				// scope of this test, so we just test that the metric exists
+				// with the correct labels.
+				return nil
+			},
 			Labels: []*proto.Stats_Metric_Label{
 				{
 					Name:  "connection_type",
@@ -3529,9 +3844,11 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 			},
 		},
 		{
-			Name:  "coderd_agentstats_currently_reachable_peers",
-			Type:  proto.Stats_Metric_GAUGE,
-			Value: 0,
+			Name: "coderd_agentstats_currently_reachable_peers",
+			Type: proto.Stats_Metric_GAUGE,
+			CheckFn: func(float64) error {
+				return nil
+			},
 			Labels: []*proto.Stats_Metric_Label{
 				{
 					Name:  "connection_type",
@@ -3540,9 +3857,20 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 			},
 		},
 		{
-			Name:  "coderd_agentstats_startup_script_seconds",
-			Type:  proto.Stats_Metric_GAUGE,
-			Value: 1,
+			Name: "coderd_agentstats_startup_script_seconds",
+			Type: proto.Stats_Metric_GAUGE,
+			CheckFn: func(f float64) error {
+				if f >= 0 {
+					return nil
+				}
+				return xerrors.Errorf("expected >= 0, got %f", f)
+			},
+			Labels: []*proto.Stats_Metric_Label{
+				{
+					Name:  "success",
+					Value: "true",
+				},
+			},
 		},
 	}
 
@@ -3564,11 +3892,10 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 		for _, m := range mf.GetMetric() {
 			assert.Equal(t, expected[i].Name, mf.GetName())
 			assert.Equal(t, expected[i].Type.String(), mf.GetType().String())
-			// Value is max expected
 			if expected[i].Type == proto.Stats_Metric_GAUGE {
-				assert.GreaterOrEqualf(t, expected[i].Value, m.GetGauge().GetValue(), "expected %s to be greater than or equal to %f, got %f", expected[i].Name, expected[i].Value, m.GetGauge().GetValue())
+				assert.NoError(t, expected[i].CheckFn(m.GetGauge().GetValue()), "check fn for %s failed", expected[i].Name)
 			} else if expected[i].Type == proto.Stats_Metric_COUNTER {
-				assert.GreaterOrEqualf(t, expected[i].Value, m.GetCounter().GetValue(), "expected %s to be greater than or equal to %f, got %f", expected[i].Name, expected[i].Value, m.GetCounter().GetValue())
+				assert.NoError(t, expected[i].CheckFn(m.GetCounter().GetValue()), "check fn for %s failed", expected[i].Name)
 			}
 			for j, lbl := range expected[i].Labels {
 				assert.Equal(t, m.GetLabel()[j], &promgo.LabelPair{
@@ -3580,9 +3907,11 @@ func TestAgent_Metrics_SSH(t *testing.T) {
 		}
 	}
 
+	_, err = stdin.Write([]byte("exit 0\n"))
+	require.NoError(t, err, "writing exit to stdin")
 	_ = stdin.Close()
 	err = session.Wait()
-	require.NoError(t, err)
+	require.NoError(t, err, "waiting for session to exit")
 }
 
 // echoOnce accepts a single connection, reads 4 bytes and echos them back

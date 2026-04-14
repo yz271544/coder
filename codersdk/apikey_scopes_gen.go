@@ -29,6 +29,15 @@ const (
 	APIKeyScopeAuditLogAll                         APIKeyScope = "audit_log:*"
 	APIKeyScopeAuditLogCreate                      APIKeyScope = "audit_log:create"
 	APIKeyScopeAuditLogRead                        APIKeyScope = "audit_log:read"
+	APIKeyScopeBoundaryUsageAll                    APIKeyScope = "boundary_usage:*"
+	APIKeyScopeBoundaryUsageDelete                 APIKeyScope = "boundary_usage:delete"
+	APIKeyScopeBoundaryUsageRead                   APIKeyScope = "boundary_usage:read"
+	APIKeyScopeBoundaryUsageUpdate                 APIKeyScope = "boundary_usage:update"
+	APIKeyScopeChatAll                             APIKeyScope = "chat:*"
+	APIKeyScopeChatCreate                          APIKeyScope = "chat:create"
+	APIKeyScopeChatDelete                          APIKeyScope = "chat:delete"
+	APIKeyScopeChatRead                            APIKeyScope = "chat:read"
+	APIKeyScopeChatUpdate                          APIKeyScope = "chat:update"
 	APIKeyScopeCoderAll                            APIKeyScope = "coder:all"
 	APIKeyScopeCoderApikeysManageSelf              APIKeyScope = "coder:apikeys.manage_self"
 	APIKeyScopeCoderApplicationConnect             APIKeyScope = "coder:application_connect"
@@ -133,6 +142,11 @@ const (
 	APIKeyScopeTailnetCoordinatorDelete            APIKeyScope = "tailnet_coordinator:delete"
 	APIKeyScopeTailnetCoordinatorRead              APIKeyScope = "tailnet_coordinator:read"
 	APIKeyScopeTailnetCoordinatorUpdate            APIKeyScope = "tailnet_coordinator:update"
+	APIKeyScopeTaskAll                             APIKeyScope = "task:*"
+	APIKeyScopeTaskCreate                          APIKeyScope = "task:create"
+	APIKeyScopeTaskDelete                          APIKeyScope = "task:delete"
+	APIKeyScopeTaskRead                            APIKeyScope = "task:read"
+	APIKeyScopeTaskUpdate                          APIKeyScope = "task:update"
 	APIKeyScopeTemplateAll                         APIKeyScope = "template:*"
 	APIKeyScopeTemplateCreate                      APIKeyScope = "template:create"
 	APIKeyScopeTemplateDelete                      APIKeyScope = "template:delete"
@@ -167,10 +181,12 @@ const (
 	APIKeyScopeWorkspaceDelete                     APIKeyScope = "workspace:delete"
 	APIKeyScopeWorkspaceDeleteAgent                APIKeyScope = "workspace:delete_agent"
 	APIKeyScopeWorkspaceRead                       APIKeyScope = "workspace:read"
+	APIKeyScopeWorkspaceShare                      APIKeyScope = "workspace:share"
 	APIKeyScopeWorkspaceSsh                        APIKeyScope = "workspace:ssh"
 	APIKeyScopeWorkspaceStart                      APIKeyScope = "workspace:start"
 	APIKeyScopeWorkspaceStop                       APIKeyScope = "workspace:stop"
 	APIKeyScopeWorkspaceUpdate                     APIKeyScope = "workspace:update"
+	APIKeyScopeWorkspaceUpdateAgent                APIKeyScope = "workspace:update_agent"
 	APIKeyScopeWorkspaceAgentDevcontainersAll      APIKeyScope = "workspace_agent_devcontainers:*"
 	APIKeyScopeWorkspaceAgentDevcontainersCreate   APIKeyScope = "workspace_agent_devcontainers:create"
 	APIKeyScopeWorkspaceAgentResourceMonitorAll    APIKeyScope = "workspace_agent_resource_monitor:*"
@@ -184,10 +200,12 @@ const (
 	APIKeyScopeWorkspaceDormantDelete              APIKeyScope = "workspace_dormant:delete"
 	APIKeyScopeWorkspaceDormantDeleteAgent         APIKeyScope = "workspace_dormant:delete_agent"
 	APIKeyScopeWorkspaceDormantRead                APIKeyScope = "workspace_dormant:read"
+	APIKeyScopeWorkspaceDormantShare               APIKeyScope = "workspace_dormant:share"
 	APIKeyScopeWorkspaceDormantSsh                 APIKeyScope = "workspace_dormant:ssh"
 	APIKeyScopeWorkspaceDormantStart               APIKeyScope = "workspace_dormant:start"
 	APIKeyScopeWorkspaceDormantStop                APIKeyScope = "workspace_dormant:stop"
 	APIKeyScopeWorkspaceDormantUpdate              APIKeyScope = "workspace_dormant:update"
+	APIKeyScopeWorkspaceDormantUpdateAgent         APIKeyScope = "workspace_dormant:update_agent"
 	APIKeyScopeWorkspaceProxyAll                   APIKeyScope = "workspace_proxy:*"
 	APIKeyScopeWorkspaceProxyCreate                APIKeyScope = "workspace_proxy:create"
 	APIKeyScopeWorkspaceProxyDelete                APIKeyScope = "workspace_proxy:delete"
@@ -214,12 +232,22 @@ var PublicAPIKeyScopes = []APIKeyScope{
 	APIKeyScopeFileAll,
 	APIKeyScopeFileCreate,
 	APIKeyScopeFileRead,
+	APIKeyScopeOrganizationAll,
+	APIKeyScopeOrganizationDelete,
+	APIKeyScopeOrganizationRead,
+	APIKeyScopeOrganizationUpdate,
+	APIKeyScopeTaskAll,
+	APIKeyScopeTaskCreate,
+	APIKeyScopeTaskDelete,
+	APIKeyScopeTaskRead,
+	APIKeyScopeTaskUpdate,
 	APIKeyScopeTemplateAll,
 	APIKeyScopeTemplateCreate,
 	APIKeyScopeTemplateDelete,
 	APIKeyScopeTemplateRead,
 	APIKeyScopeTemplateUpdate,
 	APIKeyScopeTemplateUse,
+	APIKeyScopeUserRead,
 	APIKeyScopeUserReadPersonal,
 	APIKeyScopeUserUpdatePersonal,
 	APIKeyScopeUserSecretAll,

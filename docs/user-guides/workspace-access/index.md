@@ -12,12 +12,17 @@ dashboard.
 
 ![Workspace View](../../images/user-guides/workspace-view-connection-annotated.png)
 
-## Terminal
+## Web Terminal
 
-The terminal is implicitly enabled in Coder and allows you to access your
-workspace through the shell environment set by your template.
+The Web Terminal is a browser-based terminal that provides instant access to
+your workspace's shell environment. It uses [xterm.js](https://xtermjs.org/)
+and WebSocket technology for a responsive terminal experience with features
+like persistent sessions, Unicode support, and clickable URLs.
 
 ![Terminal Access](../../images/user-guides/terminal-access.png)
+
+Read the complete [Web Terminal documentation](./web-terminal.md) for
+customization options, keyboard shortcuts, and troubleshooting guides.
 
 ## SSH
 
@@ -96,6 +101,13 @@ Read more about [using Cursor with your workspace](./cursor.md).
 
 [Windsurf](./windsurf.md) is Codeium's code editor designed for AI-assisted development.
 Windsurf connects using the Coder extension.
+
+## Antigravity
+
+[Antigravity](https://antigravity.google/) is Google's desktop IDE.
+Antigravity connects using the Coder extension.
+
+Read more about [using Antigravity with your workspace](./antigravity.md).
 
 ## JetBrains IDEs
 

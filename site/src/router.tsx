@@ -1,5 +1,3 @@
-import { GlobalErrorBoundary } from "components/ErrorBoundary/GlobalErrorBoundary";
-import { TemplateRedirectController } from "pages/TemplatePage/TemplateRedirectController";
 import { lazy, Suspense } from "react";
 import {
 	createBrowserRouter,
@@ -7,7 +5,10 @@ import {
 	Navigate,
 	Outlet,
 	Route,
+	ScrollRestoration,
+	useLocation,
 } from "react-router";
+import { GlobalErrorBoundary } from "./components/ErrorBoundary/GlobalErrorBoundary";
 import { Loader } from "./components/Loader/Loader";
 import { RequireAuth } from "./contexts/auth/RequireAuth";
 import { DashboardLayout } from "./modules/dashboard/DashboardLayout";
@@ -18,6 +19,7 @@ import LoginOAuthDevicePage from "./pages/LoginOAuthDevicePage/LoginOAuthDeviceP
 import LoginPage from "./pages/LoginPage/LoginPage";
 import { SetupPage } from "./pages/SetupPage/SetupPage";
 import { TemplateLayout } from "./pages/TemplatePage/TemplateLayout";
+import { TemplateRedirectController } from "./pages/TemplatePage/TemplateRedirectController";
 import { TemplateSettingsLayout } from "./pages/TemplateSettingsPage/TemplateSettingsLayout";
 import TemplatesPage from "./pages/TemplatesPage/TemplatesPage";
 import UserSettingsLayout from "./pages/UserSettingsPage/Layout";
@@ -70,6 +72,7 @@ const WorkspaceProxyPage = lazy(
 const CreateUserPage = lazy(
 	() => import("./pages/CreateUserPage/CreateUserPage"),
 );
+const EditUserPage = lazy(() => import("./pages/EditUserPage/EditUserPage"));
 const WorkspaceBuildPage = lazy(
 	() => import("./pages/WorkspaceBuildPage/WorkspaceBuildPage"),
 );
@@ -103,8 +106,8 @@ const TemplateResourcesPage = lazy(
 	() =>
 		import("./pages/TemplatePage/TemplateResourcesPage/TemplateResourcesPage"),
 );
-const CreateWorkspaceExperimentRouter = lazy(
-	() => import("./pages/CreateWorkspacePage/CreateWorkspaceExperimentRouter"),
+const CreateWorkspacePage = lazy(
+	() => import("./pages/CreateWorkspacePage/CreateWorkspacePage"),
 );
 const OverviewPage = lazy(
 	() => import("./pages/DeploymentSettingsPage/OverviewPage/OverviewPage"),
@@ -163,6 +166,12 @@ const ObservabilitySettingsPage = lazy(
 			"./pages/DeploymentSettingsPage/ObservabilitySettingsPage/ObservabilitySettingsPage"
 		),
 );
+const AIGovernanceSettingsPage = lazy(
+	() =>
+		import(
+			"./pages/DeploymentSettingsPage/AIGovernanceSettingsPage/AIGovernanceSettingsPage"
+		),
+);
 const ExternalAuthPage = lazy(
 	() => import("./pages/ExternalAuthPage/ExternalAuthPage"),
 );
@@ -183,7 +192,7 @@ const CreateTemplateGalleryPage = lazy(
 	() => import("./pages/CreateTemplateGalleryPage/CreateTemplateGalleryPage"),
 );
 const StarterTemplatePage = lazy(
-	() => import("pages/StarterTemplatePage/StarterTemplatePage"),
+	() => import("./pages/StarterTemplatePage/StarterTemplatePage"),
 );
 const CreateTemplatePage = lazy(
 	() => import("./pages/CreateTemplatePage/CreateTemplatePage"),
@@ -252,6 +261,9 @@ const CreateGroupPage = lazy(
 	() => import("./pages/GroupsPage/CreateGroupPage"),
 );
 const GroupPage = lazy(() => import("./pages/GroupsPage/GroupPage"));
+const GroupMembersPage = lazy(
+	() => import("./pages/GroupsPage/GroupMembersPage"),
+);
 const GroupSettingsPage = lazy(
 	() => import("./pages/GroupsPage/GroupSettingsPage"),
 );
@@ -286,6 +298,10 @@ const TemplateEmbedExperimentRouter = lazy(
 const TemplateInsightsPage = lazy(
 	() =>
 		import("./pages/TemplatePage/TemplateInsightsPage/TemplateInsightsPage"),
+);
+const TemplatePrebuildsPage = lazy(
+	() =>
+		import("./pages/TemplatePage/TemplatePrebuildsPage/TemplatePrebuildsPage"),
 );
 const PremiumPage = lazy(
 	() => import("./pages/DeploymentSettingsPage/PremiumPage/PremiumPage"),
@@ -332,13 +348,73 @@ const ProvisionerJobsPage = lazy(
 			"./pages/OrganizationSettingsPage/OrganizationProvisionerJobsPage/OrganizationProvisionerJobsPage"
 		),
 );
+const AgentsPage = lazy(() => import("./pages/AgentsPage/AgentsPage"));
+const AgentChatPage = lazy(() => import("./pages/AgentsPage/AgentChatPage"));
+const AgentEmbedPage = lazy(() => import("./pages/AgentsPage/AgentEmbedPage"));
+const AgentCreatePage = lazy(
+	() => import("./pages/AgentsPage/AgentCreatePage"),
+);
+const AgentSettingsPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsPage"),
+);
+const AgentSettingsBehaviorPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsBehaviorPage"),
+);
+const AgentSettingsProvidersPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsProvidersPage"),
+);
+const AgentSettingsAPIKeysPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsAPIKeysPage"),
+);
+const AgentSettingsModelsPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsModelsPage"),
+);
+const AgentSettingsMCPServersPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsMCPServersPage"),
+);
+const AgentSettingsSpendPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsSpendPage"),
+);
+const AgentSettingsInsightsPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsInsightsPage"),
+);
+const AgentSettingsTemplatesPage = lazy(
+	() => import("./pages/AgentsPage/AgentSettingsTemplatesPage"),
+);
+const AgentAnalyticsPage = lazy(
+	() => import("./pages/AgentsPage/AgentAnalyticsPage"),
+);
+
+import {
+	AgentChatPageSkeleton,
+	AgentsPageSkeleton,
+} from "./pages/AgentsPage/components/AgentsSkeletons";
+
 const TasksPage = lazy(() => import("./pages/TasksPage/TasksPage"));
 const TaskPage = lazy(() => import("./pages/TaskPage/TaskPage"));
+const AIBridgeLayout = lazy(
+	() => import("./pages/AIBridgePage/AIBridgeLayout"),
+);
+const AIBridgeRequestLogsPage = lazy(
+	() => import("./pages/AIBridgePage/RequestLogsPage/RequestLogsPage"),
+);
 
-const RoutesWithSuspense = () => {
+const AIBridgeSessionsLayout = lazy(
+	() => import("./pages/AIBridgePage/AIBridgeSessionsLayout"),
+);
+
+const AIBridgeListSessionsPage = lazy(
+	() => import("./pages/AIBridgePage/ListSessionsPage/ListSessionsPage"),
+);
+const AIBridgeSessionThreadsPage = lazy(
+	() => import("./pages/AIBridgePage/SessionThreadsPage/SessionThreadsPage"),
+);
+
+const GlobalLayout = () => {
 	return (
 		<Suspense fallback={<Loader fullscreen />}>
 			<Outlet />
+			<ScrollRestoration />
 		</Suspense>
 	);
 };
@@ -355,9 +431,10 @@ const templateRouter = () => {
 					<Route path="versions" element={<TemplateVersionsPage />} />
 					<Route path="embed" element={<TemplateEmbedExperimentRouter />} />
 					<Route path="insights" element={<TemplateInsightsPage />} />
+					<Route path="prebuilds" element={<TemplatePrebuildsPage />} />
 				</Route>
 
-				<Route path="workspace" element={<CreateWorkspaceExperimentRouter />} />
+				<Route path="workspace" element={<CreateWorkspacePage />} />
 
 				<Route path="settings" element={<TemplateSettingsLayout />}>
 					<Route index element={<TemplateSettingsPage />} />
@@ -383,19 +460,24 @@ const groupsRouter = () => {
 				<Route index element={<GroupsPage />} />
 
 				<Route path="create" element={<CreateGroupPage />} />
-				<Route path=":groupName" element={<GroupPage />} />
-				<Route path=":groupName/settings" element={<GroupSettingsPage />} />
+				<Route path=":groupName" element={<GroupPage />}>
+					<Route index element={<GroupMembersPage />} />
+					<Route path="settings" element={<GroupSettingsPage />} />
+				</Route>
 			</Route>
 		</Route>
 	);
 };
 
+/** Redirect that preserves the current query string. */
+const NavigateWithSearch = ({ to }: { to: string }) => {
+	const location = useLocation();
+	return <Navigate to={{ pathname: to, search: location.search }} replace />;
+};
+
 export const router = createBrowserRouter(
 	createRoutesFromChildren(
-		<Route
-			element={<RoutesWithSuspense />}
-			errorElement={<GlobalErrorBoundary />}
-		>
+		<Route element={<GlobalLayout />} errorElement={<GlobalErrorBoundary />}>
 			<Route path="login" element={<LoginPage />} />
 			<Route path="login/device" element={<LoginOAuthDevicePage />} />
 			<Route path="setup" element={<SetupPage />} />
@@ -480,6 +562,10 @@ export const router = createBrowserRouter(
 								path="observability"
 								element={<ObservabilitySettingsPage />}
 							/>
+							<Route
+								path="ai-governance"
+								element={<AIGovernanceSettingsPage />}
+							/>
 							<Route path="network" element={<NetworkSettingsPage />} />
 							<Route path="userauth" element={<UserAuthSettingsPage />} />
 							<Route
@@ -508,8 +594,11 @@ export const router = createBrowserRouter(
 							</Route>
 						</Route>
 
-						<Route path="users" element={<UsersPage />} />
-						<Route path="users/create" element={<CreateUserPage />} />
+						<Route path="users">
+							<Route index element={<UsersPage />} />
+							<Route path="create" element={<CreateUserPage />} />
+							<Route path=":user" element={<EditUserPage />} />
+						</Route>
 
 						{groupsRouter()}
 
@@ -557,6 +646,16 @@ export const router = createBrowserRouter(
 						</Route>
 					</Route>
 
+					<Route path="/aibridge" element={<AIBridgeLayout />}>
+						<Route index element={<Navigate to="request-logs" replace />} />
+						<Route path="request-logs" element={<AIBridgeRequestLogsPage />} />
+					</Route>
+
+					<Route path="/aibridge/sessions" element={<AIBridgeSessionsLayout />}>
+						<Route index element={<AIBridgeListSessionsPage />} />
+						<Route path=":sessionId" element={<AIBridgeSessionThreadsPage />} />
+					</Route>
+
 					<Route path="/health" element={<HealthLayout />}>
 						<Route index element={<Navigate to="access-url" replace />} />
 						<Route path="access-url" element={<AccessURLPage />} />
@@ -597,7 +696,60 @@ export const router = createBrowserRouter(
 				/>
 				<Route path="/cli-auth" element={<CliAuthPage />} />
 				<Route path="/icons" element={<IconsPage />} />
-				<Route path="/tasks/:username/:workspace" element={<TaskPage />} />
+				<Route path="/tasks/:username/:taskId" element={<TaskPage />} />
+				<Route
+					path="/agents"
+					element={
+						<Suspense fallback={<AgentsPageSkeleton />}>
+							<AgentsPage />
+						</Suspense>
+					}
+				>
+					<Route index element={<AgentCreatePage />} />
+					<Route path="settings" element={<AgentSettingsPage />}>
+						<Route index element={<AgentSettingsBehaviorPage />} />
+						<Route path="behavior" element={<AgentSettingsBehaviorPage />} />
+						<Route path="api-keys" element={<AgentSettingsAPIKeysPage />} />
+						<Route path="providers" element={<AgentSettingsProvidersPage />} />
+						<Route path="models" element={<AgentSettingsModelsPage />} />
+						<Route
+							path="mcp-servers"
+							element={<AgentSettingsMCPServersPage />}
+						/>
+						<Route path="spend" element={<AgentSettingsSpendPage />} />
+						<Route path="limits" element={<Navigate to="spend" replace />} />
+						<Route path="usage" element={<NavigateWithSearch to="spend" />} />
+						<Route path="insights" element={<AgentSettingsInsightsPage />} />
+						<Route path="templates" element={<AgentSettingsTemplatesPage />} />
+					</Route>
+					<Route path="analytics" element={<AgentAnalyticsPage />} />
+					<Route
+						path=":agentId"
+						element={
+							<Suspense fallback={<AgentChatPageSkeleton />}>
+								<AgentChatPage />
+							</Suspense>
+						}
+					/>
+				</Route>
+			</Route>
+
+			<Route
+				path="/agents/:agentId/embed"
+				element={
+					<Suspense fallback={<AgentChatPageSkeleton />}>
+						<AgentEmbedPage />
+					</Suspense>
+				}
+			>
+				<Route
+					index
+					element={
+						<Suspense fallback={<AgentChatPageSkeleton />}>
+							<AgentChatPage />
+						</Suspense>
+					}
+				/>
 			</Route>
 		</Route>,
 	),

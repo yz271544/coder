@@ -16,22 +16,19 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/moby/moby/pkg/namesgenerator"
 	"github.com/sqlc-dev/pqtype"
 	"github.com/zclconf/go-cty/cty"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	archivefs "github.com/coder/coder/v2/archive/fs"
-	"github.com/coder/coder/v2/coderd/dynamicparameters"
-	"github.com/coder/preview"
-
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/database/provisionerjobs"
+	"github.com/coder/coder/v2/coderd/dynamicparameters"
 	"github.com/coder/coder/v2/coderd/externalauth"
 	"github.com/coder/coder/v2/coderd/httpapi"
 	"github.com/coder/coder/v2/coderd/httpmw"
@@ -39,11 +36,13 @@ import (
 	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
 	"github.com/coder/coder/v2/coderd/tracing"
+	"github.com/coder/coder/v2/coderd/util/namesgenerator"
 	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/examples"
 	"github.com/coder/coder/v2/provisioner/terraform/tfparse"
 	"github.com/coder/coder/v2/provisionersdk"
+	"github.com/coder/preview"
 )
 
 // @Summary Get template version by ID
@@ -657,6 +656,7 @@ func (api *API) templateVersionDryRunResources(rw http.ResponseWriter, r *http.R
 // @Param before query int false "Before Unix timestamp"
 // @Param after query int false "After Unix timestamp"
 // @Param follow query bool false "Follow log stream"
+// @Param format query string false "Log output format. Accepted: 'json' (default), 'text' (plain text with RFC3339 timestamps and ANSI colors). Not supported with follow=true." Enums(json,text)
 // @Success 200 {array} codersdk.ProvisionerJobLog
 // @Router /templateversions/{templateversion}/dry-run/{jobID}/logs [get]
 func (api *API) templateVersionDryRunLogs(rw http.ResponseWriter, r *http.Request) {
@@ -1609,9 +1609,13 @@ func (api *API) postTemplateVersionsByOrganization(rw http.ResponseWriter, r *ht
 	var matchedProvisioners codersdk.MatchedProvisioners
 	err = api.Database.InTx(func(tx database.Store) error {
 		jobID := uuid.New()
-
 		templateVersionID := uuid.New()
+
 		jobInput, err := json.Marshal(provisionerdserver.TemplateVersionImportJob{
+			TemplateID: uuid.NullUUID{
+				UUID:  req.TemplateID,
+				Valid: req.TemplateID != uuid.Nil,
+			},
 			TemplateVersionID:  templateVersionID,
 			UserVariableValues: req.UserVariableValues,
 		})
@@ -1696,7 +1700,7 @@ func (api *API) postTemplateVersionsByOrganization(rw http.ResponseWriter, r *ht
 		}
 
 		if req.Name == "" {
-			req.Name = namesgenerator.GetRandomName(1)
+			req.Name = namesgenerator.NameDigitWith("_")
 		}
 
 		err = tx.InsertTemplateVersion(ctx, database.InsertTemplateVersionParams{
@@ -1810,13 +1814,22 @@ func (api *API) dynamicTemplateVersionTags(ctx context.Context, rw http.Response
 		tfVarValues[variable.Name] = cty.StringVal(variable.Value)
 	}
 
-	output, diags := preview.Preview(ctx, preview.Input{
+	input := preview.Input{
 		PlanJSON:        nil, // Template versions are before `terraform plan`
 		ParameterValues: nil, // No user-specified parameters
 		Owner:           *ownerData,
 		Logger:          stdslog.New(stdslog.DiscardHandler),
 		TFVars:          tfVarValues,
-	}, files)
+	}
+	output, diags := preview.Preview(ctx, input, files)
+	if output != nil {
+		// ValidatePrebuilds iterates through the presets and validate their values. This
+		// ensures the prebuild can actually succeed in a workspace build. The failure
+		// diagnostics are added to the existing presets, and checked by
+		// 'dynamicparameters.CheckPresets'
+		preview.ValidatePrebuilds(ctx, input, output.Presets, files)
+	}
+
 	tagErr := dynamicparameters.CheckTags(output, diags)
 	if tagErr != nil {
 		code, resp := tagErr.Response()
@@ -1925,6 +1938,7 @@ func (api *API) templateVersionResources(rw http.ResponseWriter, r *http.Request
 // @Param before query int false "Before log id"
 // @Param after query int false "After log id"
 // @Param follow query bool false "Follow log stream"
+// @Param format query string false "Log output format. Accepted: 'json' (default), 'text' (plain text with RFC3339 timestamps and ANSI colors). Not supported with follow=true." Enums(json,text)
 // @Success 200 {array} codersdk.ProvisionerJobLog
 // @Router /templateversions/{templateversion}/logs [get]
 func (api *API) templateVersionLogs(rw http.ResponseWriter, r *http.Request) {
@@ -1958,6 +1972,7 @@ func convertTemplateVersion(version database.TemplateVersion, job codersdk.Provi
 		CreatedBy: codersdk.MinimalUser{
 			ID:        version.CreatedBy,
 			Username:  version.CreatedByUsername,
+			Name:      version.CreatedByName,
 			AvatarURL: version.CreatedByAvatarURL,
 		},
 		Archived:            version.Archived,

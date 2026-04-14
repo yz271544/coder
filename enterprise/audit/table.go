@@ -25,8 +25,10 @@ var AuditActionMap = map[string][]codersdk.AuditAction{
 	"Workspace":       {codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
 	"WorkspaceBuild":  {codersdk.AuditActionStart, codersdk.AuditActionStop},
 	"Group":           {codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
-	"APIKey":          {codersdk.AuditActionLogin, codersdk.AuditActionLogout, codersdk.AuditActionRegister, codersdk.AuditActionCreate, codersdk.AuditActionDelete},
+	"APIKey":          {codersdk.AuditActionLogin, codersdk.AuditActionLogout, codersdk.AuditActionRegister, codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
 	"License":         {codersdk.AuditActionCreate, codersdk.AuditActionDelete},
+	"Task":            {codersdk.AuditActionCreate, codersdk.AuditActionWrite, codersdk.AuditActionDelete},
+	"AiSeatState":     {codersdk.AuditActionCreate},
 }
 
 type Action string
@@ -61,12 +63,14 @@ var auditableResourcesTypes = map[any]map[string]Action{
 		"roles":           ActionTrack,
 	},
 	&database.CustomRole{}: {
-		"name":             ActionTrack,
-		"display_name":     ActionTrack,
-		"site_permissions": ActionTrack,
-		"org_permissions":  ActionTrack,
-		"user_permissions": ActionTrack,
-		"organization_id":  ActionIgnore, // Never changes.
+		"name":               ActionTrack,
+		"display_name":       ActionTrack,
+		"site_permissions":   ActionTrack,
+		"org_permissions":    ActionTrack,
+		"user_permissions":   ActionTrack,
+		"member_permissions": ActionTrack,
+		"organization_id":    ActionIgnore, // Never changes.
+		"is_system":          ActionIgnore, // Never changes.
 
 		"id":         ActionIgnore,
 		"created_at": ActionIgnore,
@@ -116,6 +120,7 @@ var auditableResourcesTypes = map[any]map[string]Action{
 		"activity_bump":                     ActionTrack,
 		"use_classic_parameter_flow":        ActionTrack,
 		"cors_behavior":                     ActionTrack,
+		"disable_module_cache":              ActionTrack,
 	},
 	&database.TemplateVersion{}: {
 		"id":                      ActionTrack,
@@ -156,6 +161,8 @@ var auditableResourcesTypes = map[any]map[string]Action{
 		"hashed_one_time_passcode":     ActionIgnore,
 		"one_time_passcode_expires_at": ActionTrack,
 		"is_system":                    ActionTrack, // Should never change, but track it anyway.
+		"is_service_account":           ActionTrack, // Should never change, but track it anyway.
+		"chat_spend_limit_micros":      ActionTrack,
 	},
 	&database.WorkspaceTable{}: {
 		"id":                 ActionTrack,
@@ -186,7 +193,6 @@ var auditableResourcesTypes = map[any]map[string]Action{
 		"build_number":               ActionIgnore,
 		"transition":                 ActionIgnore,
 		"initiator_id":               ActionIgnore,
-		"provisioner_state":          ActionIgnore,
 		"job_id":                     ActionIgnore,
 		"deadline":                   ActionIgnore,
 		"reason":                     ActionIgnore,
@@ -197,18 +203,18 @@ var auditableResourcesTypes = map[any]map[string]Action{
 		"initiator_by_name":          ActionIgnore,
 		"template_version_preset_id": ActionIgnore, // Never changes.
 		"has_ai_task":                ActionIgnore, // Never changes.
-		"ai_task_sidebar_app_id":     ActionIgnore, // Never changes.
 		"has_external_agent":         ActionIgnore, // Never changes.
 	},
 	&database.AuditableGroup{}: {
-		"id":              ActionTrack,
-		"name":            ActionTrack,
-		"display_name":    ActionTrack,
-		"organization_id": ActionIgnore, // Never changes.
-		"avatar_url":      ActionTrack,
-		"quota_allowance": ActionTrack,
-		"members":         ActionTrack,
-		"source":          ActionIgnore,
+		"id":                      ActionTrack,
+		"name":                    ActionTrack,
+		"display_name":            ActionTrack,
+		"organization_id":         ActionIgnore, // Never changes.
+		"avatar_url":              ActionTrack,
+		"quota_allowance":         ActionTrack,
+		"members":                 ActionTrack,
+		"source":                  ActionIgnore,
+		"chat_spend_limit_micros": ActionTrack,
 	},
 	&database.APIKey{}: {
 		"id":               ActionIgnore,
@@ -309,15 +315,16 @@ var auditableResourcesTypes = map[any]map[string]Action{
 		"secret_prefix":  ActionIgnore,
 	},
 	&database.Organization{}: {
-		"id":           ActionIgnore,
-		"name":         ActionTrack,
-		"description":  ActionTrack,
-		"deleted":      ActionTrack,
-		"created_at":   ActionIgnore,
-		"updated_at":   ActionTrack,
-		"is_default":   ActionTrack,
-		"display_name": ActionTrack,
-		"icon":         ActionTrack,
+		"id":                         ActionIgnore,
+		"name":                       ActionTrack,
+		"description":                ActionTrack,
+		"deleted":                    ActionTrack,
+		"created_at":                 ActionIgnore,
+		"updated_at":                 ActionTrack,
+		"is_default":                 ActionTrack,
+		"display_name":               ActionTrack,
+		"icon":                       ActionTrack,
+		"shareable_workspace_owners": ActionTrack,
 	},
 	&database.NotificationTemplate{}: {
 		"id":                 ActionIgnore,
@@ -346,6 +353,30 @@ var auditableResourcesTypes = map[any]map[string]Action{
 	&idpsync.RoleSyncSettings{}: {
 		"field":   ActionTrack,
 		"mapping": ActionTrack,
+	},
+	&database.AiSeatState{}: {
+		"user_id":                ActionTrack,
+		"first_used_at":          ActionTrack,
+		"last_event_type":        ActionTrack,
+		"last_event_description": ActionTrack,
+
+		// Since the audit log only fires on the first event, these fields will always
+		// match "first_used_at".
+		"last_used_at": ActionIgnore,
+		"updated_at":   ActionIgnore,
+	},
+	&database.TaskTable{}: {
+		"id":                  ActionTrack,
+		"organization_id":     ActionIgnore, // Never changes.
+		"owner_id":            ActionTrack,
+		"name":                ActionTrack,
+		"display_name":        ActionTrack,
+		"workspace_id":        ActionTrack,
+		"template_version_id": ActionTrack,
+		"template_parameters": ActionTrack,
+		"prompt":              ActionTrack,
+		"created_at":          ActionIgnore, // Never changes.
+		"deleted_at":          ActionIgnore, // Changes, but is implicit when a delete event is fired.
 	},
 }
 

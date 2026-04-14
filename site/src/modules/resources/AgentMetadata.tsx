@@ -1,13 +1,3 @@
-import Skeleton from "@mui/material/Skeleton";
-import Tooltip from "@mui/material/Tooltip";
-import { watchAgentMetadata } from "api/api";
-import type {
-	ServerSentEvent,
-	WorkspaceAgent,
-	WorkspaceAgentMetadata,
-} from "api/typesGenerated";
-import { displayError } from "components/GlobalSnackbar/utils";
-import { Stack } from "components/Stack/Stack";
 import dayjs from "dayjs";
 import {
 	type FC,
@@ -17,8 +7,22 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { cn } from "utils/cn";
-import type { OneWayWebSocket } from "utils/OneWayWebSocket";
+import { toast } from "sonner";
+import { watchAgentMetadata } from "#/api/api";
+import type {
+	ServerSentEvent,
+	WorkspaceAgent,
+	WorkspaceAgentMetadata,
+} from "#/api/typesGenerated";
+import { Skeleton } from "#/components/Skeleton/Skeleton";
+import { Stack } from "#/components/Stack/Stack";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
+import { cn } from "#/utils/cn";
+import type { OneWayWebSocket } from "#/utils/OneWayWebSocket";
 
 type ItemStatus = "stale" | "valid" | "loading";
 
@@ -83,15 +87,18 @@ export const AgentMetadata: FC<AgentMetadataProps> = ({
 
 				retries++;
 				if (retries >= maxSocketErrorRetryCount) {
-					displayError(
-						"Unexpected disconnect while watching Metadata changes. Please try refreshing the page.",
+					toast.error(
+						"Unexpected disconnect while watching Metadata changes.",
+						{
+							description: "Please try refreshing the page.",
+						},
 					);
 					return;
 				}
 
-				displayError(
-					"Unexpected disconnect while watching Metadata changes. Creating new connection...",
-				);
+				toast.error("Unexpected disconnect while watching Metadata changes.", {
+					description: "Creating new connection...",
+				});
 				timeoutId = window.setTimeout(() => {
 					createNewConnection();
 				}, 3_000);
@@ -99,9 +106,9 @@ export const AgentMetadata: FC<AgentMetadataProps> = ({
 
 			socket.addEventListener("message", (e) => {
 				if (e.parseError) {
-					displayError(
-						"Unable to process newest response from server. Please try refreshing the page.",
-					);
+					toast.error("Unable to process newest response from server.", {
+						description: "Please try refreshing the page.",
+					});
 					return;
 				}
 
@@ -134,18 +141,18 @@ const AgentMetadataSkeleton: FC = () => {
 	return (
 		<Stack alignItems="baseline" direction="row" spacing={6}>
 			<div className="leading-relaxed flex flex-col overflow-visible flex-shrink-0">
-				<Skeleton width={40} height={12} variant="text" />
-				<Skeleton width={65} height={14} variant="text" />
+				<Skeleton width={40} height={6} variant="text" />
+				<Skeleton width={65} height={8} variant="text" />
 			</div>
 
 			<div className="leading-relaxed flex flex-col overflow-visible flex-shrink-0">
-				<Skeleton width={40} height={12} variant="text" />
-				<Skeleton width={65} height={14} variant="text" />
+				<Skeleton width={40} height={6} variant="text" />
+				<Skeleton width={65} height={8} variant="text" />
 			</div>
 
 			<div className="leading-relaxed flex flex-col overflow-visible flex-shrink-0">
-				<Skeleton width={40} height={12} variant="text" />
-				<Skeleton width={65} height={14} variant="text" />
+				<Skeleton width={40} height={6} variant="text" />
+				<Skeleton width={65} height={8} variant="text" />
 			</div>
 		</Stack>
 	);
@@ -183,10 +190,15 @@ const MetadataItem: FC<MetadataItemProps> = ({ item }) => {
 		status === "loading" ? (
 			<Skeleton width={65} height={12} variant="text" className="mt-[6px]" />
 		) : status === "stale" ? (
-			<Tooltip title="This data is stale and no longer up to date">
-				<StaticWidth className="text-ellipsis overflow-hidden whitespace-nowrap max-w-64 text-sm text-content-disabled cursor-pointer">
-					{item.result.value}
-				</StaticWidth>
+			<Tooltip>
+				<TooltipTrigger asChild>
+					<StaticWidth className="text-ellipsis overflow-hidden whitespace-nowrap max-w-64 text-sm text-content-disabled cursor-pointer">
+						{item.result.value}
+					</StaticWidth>
+				</TooltipTrigger>
+				<TooltipContent side="bottom">
+					This data is stale and no longer up to date
+				</TooltipContent>
 			</Tooltip>
 		) : (
 			<StaticWidth

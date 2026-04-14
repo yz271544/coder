@@ -9,10 +9,8 @@ import (
 
 	"golang.org/x/xerrors"
 
-	"github.com/coder/websocket"
-
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/sloghuman"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/sloghuman"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/codersdk/workspacesdk"
@@ -22,6 +20,7 @@ import (
 	"github.com/coder/coder/v2/scaletest/workspacebuild"
 	"github.com/coder/coder/v2/tailnet"
 	tailnetproto "github.com/coder/coder/v2/tailnet/proto"
+	"github.com/coder/websocket"
 )
 
 type Runner struct {
@@ -116,6 +115,10 @@ func (r *Runner) Run(ctx context.Context, id string, logs io.Writer) error {
 		workspaceBuildConfig.OrganizationID = r.cfg.User.OrganizationID
 		workspaceBuildConfig.UserID = newUser.ID.String()
 		workspaceBuildConfig.Request.Name = workspaceName
+		// We'll watch for completion ourselves via the tailnet workspace
+		// updates stream.
+		workspaceBuildConfig.NoWaitForAgents = true
+		workspaceBuildConfig.NoWaitForBuild = true
 
 		runner := workspacebuild.NewRunner(newUserClient, workspaceBuildConfig)
 		r.workspacebuildRunners = append(r.workspacebuildRunners, runner)

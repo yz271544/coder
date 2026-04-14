@@ -1,4 +1,9 @@
-// biome-ignore lint/style/noRestrictedImports: createTheme
+/**
+ * @deprecated MUI light theme is deprecated. Migrate to Tailwind CSS theme system.
+ * This file provides MUI theme configuration for legacy compatibility only.
+ */
+
+/** @deprecated MUI createTheme is deprecated. Migrate to Tailwind CSS theme system. */
 import { createTheme } from "@mui/material/styles";
 import { BODY_FONT_FAMILY, borderRadius } from "../constants";
 import { components } from "../mui";
@@ -161,18 +166,6 @@ const muiTheme = createTheme({
 				},
 			},
 		},
-		MuiSwitch: {
-			...components.MuiSwitch,
-			styleOverrides: {
-				root: {
-					".Mui-focusVisible .MuiSwitch-thumb": {
-						// Had to thicken outline to make sure that the focus color didn't
-						// bleed into the thumb and was still easily-visible
-						boxShadow: `0 0 0 3px ${tw.blue[600]}`,
-					},
-				},
-			},
-		},
 		MuiTooltip: {
 			styleOverrides: {
 				tooltip: ({ theme }) => ({
@@ -184,15 +177,6 @@ const muiTheme = createTheme({
 					padding: "8px 16px",
 					boxShadow: "0 1px 4px #0001",
 				}),
-			},
-		},
-		MuiIconButton: {
-			styleOverrides: {
-				root: {
-					"&.Mui-focusVisible": {
-						boxShadow: `0 0 0 2px ${tw.blue[600]}`,
-					},
-				},
 			},
 		},
 	},

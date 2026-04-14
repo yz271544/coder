@@ -350,6 +350,21 @@ GROUP BY
 -- GetTemplateAppInsightsByTemplate is used for Prometheus metrics. Keep
 -- in sync with GetTemplateAppInsights and UpsertTemplateUsageStats.
 WITH
+	filtered_stats AS (
+		SELECT
+		was.workspace_id,
+		was.user_id,
+		was.agent_id,
+		was.access_method,
+		was.slug_or_port,
+		was.session_started_at,
+		was.session_ended_at
+		FROM
+			workspace_app_stats AS was
+		WHERE
+			was.session_ended_at >= @start_time::timestamptz
+			AND was.session_started_at <  @end_time::timestamptz
+	),
 	-- This CTE is used to explode app usage into minute buckets, then
 	-- flatten the users app usage within the template so that usage in
 	-- multiple workspaces under one template is only counted once for
@@ -357,45 +372,45 @@ WITH
 	app_insights AS (
 		SELECT
 			w.template_id,
-			was.user_id,
+			fs.user_id,
 			-- Both app stats and agent stats track web terminal usage, but
 			-- by different means. The app stats value should be more
 			-- accurate so we don't want to discard it just yet.
 			CASE
-				WHEN was.access_method = 'terminal'
+				WHEN fs.access_method = 'terminal'
 				THEN '[terminal]' -- Unique name, app names can't contain brackets.
-				ELSE was.slug_or_port
+				ELSE fs.slug_or_port
 			END::text AS app_name,
 			COALESCE(wa.display_name, '') AS display_name,
 			(wa.slug IS NOT NULL)::boolean AS is_app,
 			COUNT(DISTINCT s.minute_bucket) AS app_minutes
 		FROM
-			workspace_app_stats AS was
+			filtered_stats AS fs
 		JOIN
 			workspaces AS w
 		ON
-			w.id = was.workspace_id
+			w.id = fs.workspace_id
 		-- We do a left join here because we want to include user IDs that have used
 		-- e.g. ports when counting active users.
 		LEFT JOIN
 			workspace_apps wa
 		ON
-			wa.agent_id = was.agent_id
-			AND wa.slug = was.slug_or_port
+			wa.agent_id = fs.agent_id
+			AND wa.slug = fs.slug_or_port
 		-- Generate a series of minute buckets for each session for computing the
 		-- mintes/bucket.
 		CROSS JOIN
 			generate_series(
-				date_trunc('minute', was.session_started_at),
+				date_trunc('minute', fs.session_started_at),
 				-- Subtract 1 μs to avoid creating an extra series.
-				date_trunc('minute', was.session_ended_at - '1 microsecond'::interval),
+				date_trunc('minute', fs.session_ended_at - '1 microsecond'::interval),
 				'1 minute'::interval
 			) AS s(minute_bucket)
 		WHERE
 			s.minute_bucket >= @start_time::timestamptz
 			AND s.minute_bucket < @end_time::timestamptz
 		GROUP BY
-			w.template_id, was.user_id, was.access_method, was.slug_or_port, wa.display_name, wa.slug
+			w.template_id, fs.user_id, fs.access_method, fs.slug_or_port, wa.display_name, wa.slug
 	)
 
 SELECT
@@ -480,37 +495,52 @@ WITH
 		FROM
 			template_usage_stats
 	),
+	filtered_app_stats AS (
+        SELECT
+            was.workspace_id,
+            was.user_id,
+            was.agent_id,
+            was.access_method,
+            was.slug_or_port,
+            was.session_started_at,
+            was.session_ended_at
+        FROM
+            workspace_app_stats AS was
+        WHERE
+            was.session_ended_at >= (SELECT t FROM latest_start)
+            AND was.session_started_at < NOW()
+    ),
 	workspace_app_stat_buckets AS (
 		SELECT
 			-- Truncate the minute to the nearest half hour, this is the bucket size
 			-- for the data.
 			date_trunc('hour', s.minute_bucket) + trunc(date_part('minute', s.minute_bucket) / 30) * 30 * '1 minute'::interval AS time_bucket,
 			w.template_id,
-			was.user_id,
+			fas.user_id,
 			-- Both app stats and agent stats track web terminal usage, but
 			-- by different means. The app stats value should be more
 			-- accurate so we don't want to discard it just yet.
 			CASE
-				WHEN was.access_method = 'terminal'
+				WHEN fas.access_method = 'terminal'
 				THEN '[terminal]' -- Unique name, app names can't contain brackets.
-				ELSE was.slug_or_port
+				ELSE fas.slug_or_port
 			END AS app_name,
 			COUNT(DISTINCT s.minute_bucket) AS app_minutes,
 			-- Store each unique minute bucket for later merge between datasets.
 			array_agg(DISTINCT s.minute_bucket) AS minute_buckets
 		FROM
-			workspace_app_stats AS was
+			filtered_app_stats AS fas
 		JOIN
 			workspaces AS w
 		ON
-			w.id = was.workspace_id
+			w.id = fas.workspace_id
 		-- Generate a series of minute buckets for each session for computing the
 		-- mintes/bucket.
 		CROSS JOIN
 			generate_series(
-				date_trunc('minute', was.session_started_at),
+				date_trunc('minute', fas.session_started_at),
 				-- Subtract 1 μs to avoid creating an extra series.
-				date_trunc('minute', was.session_ended_at - '1 microsecond'::interval),
+				date_trunc('minute', fas.session_ended_at - '1 microsecond'::interval),
 				'1 minute'::interval
 			) AS s(minute_bucket)
 		WHERE
@@ -519,7 +549,7 @@ WITH
 			s.minute_bucket >= (SELECT t FROM latest_start)
 			AND s.minute_bucket < NOW()
 		GROUP BY
-			time_bucket, w.template_id, was.user_id, was.access_method, was.slug_or_port
+			time_bucket, w.template_id, fas.user_id, fas.access_method, fas.slug_or_port
 	),
 	agent_stats_buckets AS (
 		SELECT
@@ -775,90 +805,70 @@ GROUP BY utp.num, utp.template_ids, utp.name, utp.type, utp.display_name, utp.de
 -- name: GetUserStatusCounts :many
 -- GetUserStatusCounts returns the count of users in each status over time.
 -- The time range is inclusively defined by the start_time and end_time parameters.
---
--- Bucketing:
--- Between the start_time and end_time, we include each timestamp where a user's status changed or they were deleted.
--- We do not bucket these results by day or some other time unit. This is because such bucketing would hide potentially
--- important patterns. If a user was active for 23 hours and 59 minutes, and then suspended, a daily bucket would hide this.
--- A daily bucket would also have required us to carefully manage the timezone of the bucket based on the timezone of the user.
---
--- Accumulation:
--- We do not start counting from 0 at the start_time. We check the last status change before the start_time for each user. As such,
--- the result shows the total number of users in each status on any particular day.
 WITH
-	-- dates_of_interest defines all points in time that are relevant to the query.
-	-- It includes the start_time, all status changes, all deletions, and the end_time.
-dates_of_interest AS (
-	SELECT date FROM generate_series(
-		@start_time::timestamptz,
-		@end_time::timestamptz,
-		(CASE WHEN @interval::int <= 0 THEN 3600 * 24 ELSE @interval::int END || ' seconds')::interval
-	) AS date
+system_users AS (
+    SELECT id FROM users WHERE is_system = TRUE
 ),
-	-- latest_status_before_range defines the status of each user before the start_time.
-	-- We do not include users who were deleted before the start_time. We use this to ensure that
-	-- we correctly count users prior to the start_time for a complete graph.
+	-- dates_of_interest generates the dates that will represent the horizontal axis of the chart.
+dates_of_interest AS (
+  SELECT timezone(@tz::text, gs_local) AS date
+  FROM generate_series(
+    timezone(@tz::text, @start_time::timestamptz),
+    timezone(@tz::text, @end_time::timestamptz),
+    interval '1 day'
+  ) AS gs_local
+),
+	-- latest_status_before_range selects the last status of each user before the start_time.
+	-- This represents the status of all users at the start of the time range.
 latest_status_before_range AS (
     SELECT
         DISTINCT usc.user_id,
         usc.new_status,
-        usc.changed_at,
-        ud.deleted
+        usc.changed_at
     FROM user_status_changes usc
 	LEFT JOIN LATERAL (
 		SELECT COUNT(*) > 0 AS deleted
 		FROM user_deleted ud
 		WHERE ud.user_id = usc.user_id AND (ud.deleted_at < usc.changed_at OR ud.deleted_at < @start_time)
 	) AS ud ON true
-    WHERE usc.changed_at < @start_time::timestamptz
+    WHERE usc.user_id NOT IN (SELECT id FROM system_users)
+        AND NOT ud.deleted
+        AND usc.changed_at < @start_time::timestamptz
     ORDER BY usc.user_id, usc.changed_at DESC
 ),
-	-- status_changes_during_range defines the status of each user during the start_time and end_time.
-	-- If a user is deleted during the time range, we count status changes between the start_time and the deletion date.
-	-- Theoretically, it should probably not be possible to update the status of a deleted user, but we
-	-- need to ensure that this is enforced, so that a change in business logic later does not break this graph.
+	-- status_changes_during_range selects the statuses of each user during the start_time and end_time.
 status_changes_during_range AS (
     SELECT
         usc.user_id,
         usc.new_status,
-        usc.changed_at,
-        ud.deleted
+        usc.changed_at
     FROM user_status_changes usc
 	LEFT JOIN LATERAL (
 		SELECT COUNT(*) > 0 AS deleted
 		FROM user_deleted ud
 		WHERE ud.user_id = usc.user_id AND ud.deleted_at < usc.changed_at
 	) AS ud ON true
-    WHERE usc.changed_at >= @start_time::timestamptz
+    WHERE usc.user_id NOT IN (SELECT id FROM system_users)
+        AND NOT ud.deleted
+        AND usc.changed_at >= @start_time::timestamptz
         AND usc.changed_at <= @end_time::timestamptz
 ),
-	-- relevant_status_changes defines the status of each user at any point in time.
-	-- It includes the status of each user before the start_time, and the status of each user during the start_time and end_time.
 relevant_status_changes AS (
-    SELECT
-        user_id,
-        new_status,
-        changed_at
+    SELECT user_id, new_status, changed_at
     FROM latest_status_before_range
-    WHERE NOT deleted
 
     UNION ALL
 
-    SELECT
-        user_id,
-        new_status,
-        changed_at
+    SELECT user_id, new_status, changed_at
     FROM status_changes_during_range
-    WHERE NOT deleted
 ),
-	-- statuses defines all the distinct statuses that were present just before and during the time range.
-	-- This is used to ensure that we have a series for every relevant status.
+	-- statuses selects all the distinct statuses that were present just before and during the time range.
+	-- Each status will have a series on the chart.
 statuses AS (
 	SELECT DISTINCT new_status FROM relevant_status_changes
 ),
-	-- We only want to count the latest status change for each user on each date and then filter them by the relevant status.
-	-- We use the row_number function to ensure that we only count the latest status change for each user on each date.
-	-- We then filter the status changes by the relevant status in the final select statement below.
+	-- ranked_status_change_per_user_per_date selects the latest status change for each user on each date.
+	-- The last status for a user on every given date will be counted.
 ranked_status_change_per_user_per_date AS (
 	SELECT
 	d.date,

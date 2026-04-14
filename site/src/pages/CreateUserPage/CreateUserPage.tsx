@@ -1,16 +1,14 @@
-import { authMethods, createUser } from "api/queries/users";
-import { displaySuccess } from "components/GlobalSnackbar/utils";
-import { Margins } from "components/Margins/Margins";
-import { useDashboard } from "modules/dashboard/useDashboard";
 import type { FC } from "react";
 import { useMutation, useQuery, useQueryClient } from "react-query";
 import { useNavigate } from "react-router";
-import { pageTitle } from "utils/page";
+import { toast } from "sonner";
+import { getErrorDetail, getErrorMessage } from "#/api/errors";
+import { authMethods, createUser } from "#/api/queries/users";
+import { Margins } from "#/components/Margins/Margins";
+import { useDashboard } from "#/modules/dashboard/useDashboard";
+import { useFeatureVisibility } from "#/modules/dashboard/useFeatureVisibility";
+import { pageTitle } from "#/utils/page";
 import { CreateUserForm } from "./CreateUserForm";
-
-const _Language = {
-	unknownError: "Oops, an unknown error occurred.",
-};
 
 const CreateUserPage: FC = () => {
 	const navigate = useNavigate();
@@ -18,6 +16,7 @@ const CreateUserPage: FC = () => {
 	const createUserMutation = useMutation(createUser(queryClient));
 	const authMethodsQuery = useQuery(authMethods());
 	const { showOrganizations } = useDashboard();
+	const { service_accounts: serviceAccountsEnabled } = useFeatureVisibility();
 
 	return (
 		<Margins>
@@ -27,23 +26,41 @@ const CreateUserPage: FC = () => {
 				error={createUserMutation.error}
 				isLoading={createUserMutation.isPending}
 				onSubmit={async (user) => {
-					await createUserMutation.mutateAsync({
-						username: user.username,
-						name: user.name,
-						email: user.email,
-						organization_ids: [user.organization],
-						login_type: user.login_type,
-						password: user.password,
-						user_status: null,
+					const mutation = createUserMutation.mutateAsync(
+						{
+							username: user.username,
+							name: user.name,
+							email: user.email,
+							organization_ids: [user.organization],
+							login_type: user.login_type,
+							password: user.password,
+							user_status: null,
+							service_account: user.service_account,
+						},
+						{
+							onSuccess: () => {
+								navigate("..", { relative: "path" });
+							},
+						},
+					);
+					toast.promise(mutation, {
+						loading: `Creating user "${user.username}"...`,
+						success: `User "${user.username}" created successfully.`,
+						error: (e) => ({
+							message: getErrorMessage(
+								e,
+								`Failed to create user "${user.username}".`,
+							),
+							description: getErrorDetail(e),
+						}),
 					});
-					displaySuccess("Successfully created user.");
-					navigate("..", { relative: "path" });
 				}}
 				onCancel={() => {
 					navigate("..", { relative: "path" });
 				}}
 				authMethods={authMethodsQuery.data}
 				showOrganizations={showOrganizations}
+				serviceAccountsEnabled={serviceAccountsEnabled}
 			/>
 		</Margins>
 	);

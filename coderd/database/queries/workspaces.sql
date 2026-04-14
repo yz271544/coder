@@ -117,7 +117,6 @@ SELECT
 	latest_build.error as latest_build_error,
 	latest_build.transition as latest_build_transition,
 	latest_build.job_status as latest_build_status,
-	latest_build.has_ai_task as latest_build_has_ai_task,
 	latest_build.has_external_agent as latest_build_has_external_agent
 FROM
 	workspaces_expanded as workspaces
@@ -293,7 +292,7 @@ WHERE
 	-- Filter by agent status
 	-- has-agent: is only applicable for workspaces in "start" transition. Stopped and deleted workspaces don't have agents.
 	AND CASE
-		WHEN @has_agent :: text != '' THEN
+		WHEN array_length(@has_agent_statuses :: text[], 1) > 0 THEN
 			(
 				SELECT COUNT(*)
 				FROM
@@ -307,7 +306,7 @@ WHERE
 					latest_build.transition = 'start'::workspace_transition AND
 					-- Filter out deleted sub agents.
 					workspace_agents.deleted = FALSE AND
-					@has_agent = (
+					(
 						CASE
 							WHEN workspace_agents.first_connected_at IS NULL THEN
 								CASE
@@ -325,7 +324,7 @@ WHERE
 							ELSE
 								NULL
 						END
-					)
+					) = ANY(@has_agent_statuses :: text[])
 			) > 0
 		ELSE true
 	END
@@ -351,25 +350,19 @@ WHERE
 			  (latest_build.template_version_id = template.active_version_id) = sqlc.narg('using_active') :: boolean
 		  ELSE true
 	END
-	-- Filter by has_ai_task in latest build
+	-- Filter by has_ai_task, checks if this is a task workspace.
 	AND CASE
-		WHEN sqlc.narg('has_ai_task') :: boolean IS NOT NULL THEN
-			(COALESCE(latest_build.has_ai_task, false) OR (
-				-- If the build has no AI task, it means that the provisioner job is in progress
-				-- and we don't know if it has an AI task yet. In this case, we optimistically
-				-- assume that it has an AI task if the AI Prompt parameter is not empty. This
-				-- lets the AI Task frontend spawn a task and see it immediately after instead of
-				-- having to wait for the build to complete.
-				latest_build.has_ai_task IS NULL AND
-				latest_build.completed_at IS NULL AND
-				EXISTS (
-					SELECT 1
-					FROM workspace_build_parameters
-					WHERE workspace_build_parameters.workspace_build_id = latest_build.id
-					AND workspace_build_parameters.name = 'AI Prompt'
-					AND workspace_build_parameters.value != ''
-				)
-			)) = (sqlc.narg('has_ai_task') :: boolean)
+		WHEN sqlc.narg('has_ai_task')::boolean IS NOT NULL
+		THEN sqlc.narg('has_ai_task')::boolean = EXISTS (
+			SELECT
+				1
+			FROM
+				tasks
+			WHERE
+				-- Consider all tasks, deleting a task does not turn the
+				-- workspace into a non-task workspace.
+				tasks.workspace_id = workspaces.id
+		)
 		ELSE true
 	END
 	-- Filter by has_external_agent in latest build
@@ -396,6 +389,7 @@ WHERE
 			workspaces.group_acl ? (@shared_with_group_id :: uuid) :: text
 		ELSE true
 	END
+
 	-- Authorize Filter clause will be injected below in GetAuthorizedWorkspaces
 	-- @authorize_filter
 ), filtered_workspaces_order AS (
@@ -405,7 +399,7 @@ WHERE
 		filtered_workspaces fw
 	ORDER BY
 		-- To ensure that 'favorite' workspaces show up first in the list only for their owner.
-		CASE WHEN owner_id = @requester_id AND favorite THEN 0 ELSE 1 END ASC,
+		CASE WHEN favorite AND owner_username = (SELECT users.username FROM users WHERE users.id = @requester_id) THEN 0 ELSE 1 END ASC,
 		(latest_build_completed_at IS NOT NULL AND
 			latest_build_canceled_at IS NULL AND
 			latest_build_error IS NULL AND
@@ -457,6 +451,9 @@ WHERE
 		'', -- template_display_name
 		'', -- template_icon
 		'', -- template_description
+		'00000000-0000-0000-0000-000000000000'::uuid, -- task_id
+		'{}'::jsonb, -- group_acl_display_info
+		'{}'::jsonb, -- user_acl_display_info
 		-- Extra columns added to `filtered_workspaces`
 		'00000000-0000-0000-0000-000000000000'::uuid, -- template_version_id
 		'', -- template_version_name
@@ -465,7 +462,6 @@ WHERE
 		'', -- latest_build_error
 		'start'::workspace_transition, -- latest_build_transition
 		'unknown'::provisioner_job_status, -- latest_build_status
-		false, -- latest_build_has_ai_task
 		false -- latest_build_has_external_agent
 	WHERE
 		@with_summary :: boolean = true
@@ -853,6 +849,7 @@ SET
 WHERE
     template_id = @template_id
 	AND dormant_at IS NOT NULL
+	AND deleted = false
 	-- Prebuilt workspaces (identified by having the prebuilds system user as owner_id)
 	-- should not have their dormant or deleting at set, as these are handled by the
     -- prebuilds reconciliation loop.
@@ -951,6 +948,21 @@ SET
 WHERE
 	id = @id;
 
+-- name: DeleteWorkspaceACLsByOrganization :exec
+UPDATE
+	workspaces
+SET
+	group_acl = '{}'::jsonb,
+	user_acl = '{}'::jsonb
+WHERE
+	organization_id = @organization_id
+	AND (
+		NOT @exclude_service_accounts::boolean
+		OR owner_id NOT IN (
+			SELECT id FROM users WHERE is_service_account = true
+		)
+	);
+
 -- name: GetRegularWorkspaceCreateMetrics :many
 -- Count regular workspaces: only those whose first successful 'start' build
 -- was not initiated by the prebuild system user.
@@ -983,3 +995,23 @@ WHERE
 	AND fsb.initiator_id != 'c42fdf75-3097-471c-8c33-fb52454d81c0'::uuid
 GROUP BY t.name, COALESCE(tvp.name, ''), o.name
 ORDER BY t.name, preset_name, o.name;
+
+-- name: GetWorkspacesForWorkspaceMetrics :many
+SELECT
+    u.username as owner_username,
+    t.name as template_name,
+    tv.name as template_version_name,
+    pj.job_status as latest_build_status,
+    wb.transition as latest_build_transition
+FROM workspaces w
+JOIN users u ON w.owner_id = u.id
+JOIN templates t ON w.template_id = t.id
+JOIN workspace_builds wb ON w.id = wb.workspace_id
+JOIN provisioner_jobs pj ON wb.job_id = pj.id
+LEFT JOIN template_versions tv ON wb.template_version_id = tv.id
+WHERE w.deleted = false
+AND wb.build_number = (
+    SELECT MAX(wb2.build_number)
+    FROM workspace_builds wb2
+    WHERE wb2.workspace_id = w.id
+);

@@ -5,14 +5,14 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
+	"github.com/coder/coder/v2/coderd/httpapi"
 	"github.com/coder/coder/v2/coderd/httpmw"
+	"github.com/coder/coder/v2/coderd/rbac"
 	"github.com/coder/coder/v2/coderd/rbac/policy"
 	"github.com/coder/coder/v2/codersdk"
-
-	"github.com/coder/coder/v2/coderd/httpapi"
-	"github.com/coder/coder/v2/coderd/rbac"
 )
 
 // AssignableSiteRoles returns all site wide roles that can be assigned.
@@ -35,15 +35,25 @@ func (api *API) AssignableSiteRoles(rw http.ResponseWriter, r *http.Request) {
 	dbCustomRoles, err := api.Database.CustomRoles(ctx, database.CustomRolesParams{
 		LookupRoles: nil,
 		// Only site wide custom roles to be included
-		ExcludeOrgRoles: true,
-		OrganizationID:  uuid.Nil,
+		ExcludeOrgRoles:    true,
+		OrganizationID:     uuid.Nil,
+		IncludeSystemRoles: false,
 	})
 	if err != nil {
 		httpapi.InternalServerError(rw, err)
 		return
 	}
 
-	httpapi.Write(ctx, rw, http.StatusOK, assignableRoles(actorRoles.Roles, rbac.SiteBuiltInRoles(), dbCustomRoles))
+	siteRoles := rbac.SiteBuiltInRoles()
+	// Include the agents-access role only when the agents
+	// experiment is enabled or this is a dev build, matching
+	// the RequireExperimentWithDevBypass gate on chat routes.
+	if api.Experiments.Enabled(codersdk.ExperimentAgents) || buildinfo.IsDev() {
+		siteRoles = append(siteRoles, rbac.AgentsAccessRole())
+	}
+
+	httpapi.Write(ctx, rw, http.StatusOK,
+		assignableRoles(actorRoles.Roles, siteRoles, dbCustomRoles))
 }
 
 // assignableOrgRoles returns all org wide roles that can be assigned.
@@ -68,9 +78,10 @@ func (api *API) assignableOrgRoles(rw http.ResponseWriter, r *http.Request) {
 
 	roles := rbac.OrganizationRoles(organization.ID)
 	dbCustomRoles, err := api.Database.CustomRoles(ctx, database.CustomRolesParams{
-		LookupRoles:     nil,
-		ExcludeOrgRoles: false,
-		OrganizationID:  organization.ID,
+		LookupRoles:        nil,
+		ExcludeOrgRoles:    false,
+		OrganizationID:     organization.ID,
+		IncludeSystemRoles: false,
 	})
 	if err != nil {
 		httpapi.InternalServerError(rw, err)

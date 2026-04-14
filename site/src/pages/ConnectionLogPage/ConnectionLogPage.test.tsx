@@ -1,19 +1,19 @@
+import { screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
+import { API } from "#/api/api";
+import { DEFAULT_RECORDS_PER_PAGE } from "#/components/PaginationWidget/utils";
 import {
 	MockConnectedSSHConnectionLog,
 	MockDisconnectedSSHConnectionLog,
 	MockEntitlementsWithConnectionLog,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	renderWithAuth,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { server } from "testHelpers/server";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { API } from "api/api";
-import { DEFAULT_RECORDS_PER_PAGE } from "components/PaginationWidget/utils";
-import { HttpResponse, http } from "msw";
-import * as CreateDayString from "utils/createDayString";
+} from "#/testHelpers/renderHelpers";
+import { server } from "#/testHelpers/server";
+import * as CreateDayString from "#/utils/createDayString";
 import ConnectionLogPage from "./ConnectionLogPage";
 
 interface RenderPageOptions {
@@ -47,7 +47,7 @@ const renderPage = async ({ filter, page }: RenderPageOptions = {}) => {
 describe("ConnectionLogPage", () => {
 	beforeEach(() => {
 		// Mocking the dayjs module within the createDayString file
-		const mock = jest.spyOn(CreateDayString, "createDayString");
+		const mock = vi.spyOn(CreateDayString, "createDayString");
 		mock.mockImplementation(() => "a minute ago");
 
 		// Mock the entitlements
@@ -61,7 +61,7 @@ describe("ConnectionLogPage", () => {
 	it("renders page 5", async () => {
 		// Given
 		const page = 5;
-		const getConnectionLogsSpy = jest
+		const getConnectionLogsSpy = vi
 			.spyOn(API, "getConnectionLogs")
 			.mockResolvedValue({
 				connection_logs: [
@@ -69,6 +69,7 @@ describe("ConnectionLogPage", () => {
 					MockDisconnectedSSHConnectionLog,
 				],
 				count: 2,
+				count_cap: 0,
 			});
 
 		// When
@@ -90,14 +91,15 @@ describe("ConnectionLogPage", () => {
 
 	describe("Filtering", () => {
 		it("filters by URL", async () => {
-			const getConnectionLogsSpy = jest
+			const getConnectionLogsSpy = vi
 				.spyOn(API, "getConnectionLogs")
 				.mockResolvedValue({
 					connection_logs: [MockConnectedSSHConnectionLog],
 					count: 1,
+					count_cap: 0,
 				});
 
-			const query = "type:ssh status:connected";
+			const query = "type:ssh status:ongoing";
 			await renderPage({ filter: query });
 
 			expect(getConnectionLogsSpy).toHaveBeenCalledWith({
@@ -110,11 +112,11 @@ describe("ConnectionLogPage", () => {
 		it("resets page to 1 when filter is changed", async () => {
 			await renderPage({ page: 2 });
 
-			const getConnectionLogsSpy = jest.spyOn(API, "getConnectionLogs");
+			const getConnectionLogsSpy = vi.spyOn(API, "getConnectionLogs");
 			getConnectionLogsSpy.mockClear();
 
 			const filterField = screen.getByLabelText("Filter");
-			const query = "type:ssh status:connected";
+			const query = "type:ssh status:ongoing";
 			await userEvent.type(filterField, query);
 
 			await waitFor(() =>

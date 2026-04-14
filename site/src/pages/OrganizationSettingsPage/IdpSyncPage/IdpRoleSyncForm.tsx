@@ -1,24 +1,35 @@
-import type { Organization, Role, RoleSyncSettings } from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import { Combobox } from "components/Combobox/Combobox";
-import { Input } from "components/Input/Input";
-import { Label } from "components/Label/Label";
-import {
-	MultiSelectCombobox,
-	type Option,
-} from "components/MultiSelectCombobox/MultiSelectCombobox";
-import { Spinner } from "components/Spinner/Spinner";
-import { TableCell, TableRow } from "components/Table/Table";
-import {
-	Tooltip,
-	TooltipContent,
-	TooltipProvider,
-	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
 import { useFormik } from "formik";
 import { Plus, Trash, TriangleAlert } from "lucide-react";
 import { type FC, type KeyboardEventHandler, useId, useState } from "react";
 import * as Yup from "yup";
+import type {
+	Organization,
+	Role,
+	RoleSyncSettings,
+} from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
+import {
+	Combobox,
+	ComboboxButton,
+	ComboboxContent,
+	ComboboxInput,
+	ComboboxItem,
+	ComboboxList,
+	ComboboxTrigger,
+} from "#/components/Combobox/Combobox";
+import { Input } from "#/components/Input/Input";
+import { Label } from "#/components/Label/Label";
+import {
+	MultiSelectCombobox,
+	type Option,
+} from "#/components/MultiSelectCombobox/MultiSelectCombobox";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { TableCell, TableRow } from "#/components/Table/Table";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipTrigger,
+} from "#/components/Tooltip/Tooltip";
 import { ExportPolicyButton } from "./ExportPolicyButton";
 import { IdpMappingTable } from "./IdpMappingTable";
 import { IdpPillList } from "./IdpPillList";
@@ -156,7 +167,9 @@ export const IdpRoleSyncForm: FC<IdpRoleSyncFormProps> = ({
 					</p>
 				</div>
 				{form.errors.field && (
-					<p className="text-content-danger text-sm m-0">{form.errors.field}</p>
+					<p className="text-content-destructive text-sm m-0">
+						{form.errors.field}
+					</p>
 				)}
 				<div className="flex flex-row gap-2 justify-between items-start">
 					<div className="grid items-center gap-1 w-72">
@@ -165,19 +178,48 @@ export const IdpRoleSyncForm: FC<IdpRoleSyncFormProps> = ({
 						</Label>
 						{claimFieldValues ? (
 							<Combobox
-								value={idpRoleName}
-								options={claimFieldValues}
-								placeholder="Select IdP role"
 								open={open}
 								onOpenChange={setOpen}
-								inputValue={comboInputValue}
-								onInputChange={setComboInputValue}
-								onKeyDown={handleKeyDown}
-								onSelect={(value) => {
-									setIdpRoleName(value);
-									setOpen(false);
-								}}
-							/>
+								value={idpRoleName}
+								onValueChange={(value) => setIdpRoleName(value ?? "")}
+							>
+								<ComboboxTrigger asChild>
+									<ComboboxButton
+										className="w-72"
+										selectedOption={
+											idpRoleName
+												? { label: idpRoleName, value: idpRoleName }
+												: undefined
+										}
+										placeholder="Select IdP role"
+									/>
+								</ComboboxTrigger>
+								<ComboboxContent className="w-72">
+									<ComboboxInput
+										value={comboInputValue}
+										onValueChange={setComboInputValue}
+										placeholder="Search..."
+										onKeyDown={handleKeyDown}
+									/>
+									<ComboboxList>
+										{claimFieldValues
+											.filter((value) =>
+												value
+													.toLowerCase()
+													.includes(comboInputValue.toLowerCase()),
+											)
+											.map((value) => (
+												<ComboboxItem
+													key={value}
+													value={value}
+													onSelect={() => setComboInputValue("")}
+												>
+													{value}
+												</ComboboxItem>
+											))}
+									</ComboboxList>
+								</ComboboxContent>
+							</Combobox>
 						) : (
 							<Input
 								id={`${id}-idp-role-name`}
@@ -234,14 +276,14 @@ export const IdpRoleSyncForm: FC<IdpRoleSyncFormProps> = ({
 							}}
 						>
 							<Spinner loading={form.isSubmitting}>
-								<Plus size={14} />
+								<Plus />
 							</Spinner>
 							Add IdP role
 						</Button>
 					</div>
 				</div>
 				{form.errors.mapping && (
-					<p className="text-content-danger text-sm m-0">
+					<p className="text-content-destructive text-sm m-0">
 						{Object.values(form.errors.mapping || {})}
 					</p>
 				)}
@@ -285,23 +327,21 @@ const RoleRow: FC<RoleRowProps> = ({
 				<div className="flex flex-row items-center gap-2 text-content-primary">
 					{idpRole}
 					{!exists && (
-						<TooltipProvider>
-							<Tooltip>
-								<TooltipTrigger asChild>
-									<TriangleAlert className="size-icon-xs cursor-pointer text-content-warning" />
-								</TooltipTrigger>
-								<TooltipContent
-									align="start"
-									alignOffset={-8}
-									sideOffset={8}
-									className="p-2 text-xs text-content-secondary max-w-sm"
-								>
-									This value has not be seen in the specified claim field
-									before. You might want to check your IdP configuration and
-									ensure that this value is not misspelled.
-								</TooltipContent>
-							</Tooltip>
-						</TooltipProvider>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<TriangleAlert className="size-icon-xs cursor-pointer text-content-warning" />
+							</TooltipTrigger>
+							<TooltipContent
+								align="start"
+								alignOffset={-8}
+								sideOffset={8}
+								className="p-2 text-xs text-content-secondary max-w-sm"
+							>
+								This value has not be seen in the specified claim field before.
+								You might want to check your IdP configuration and ensure that
+								this value is not misspelled.
+							</TooltipContent>
+						</Tooltip>
 					)}
 				</div>
 			</TableCell>

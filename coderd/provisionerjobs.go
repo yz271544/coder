@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
@@ -87,7 +87,7 @@ func (api *API) provisionerJobs(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httpapi.Write(ctx, rw, http.StatusOK, db2sdk.List(jobs, convertProvisionerJobWithQueuePosition))
+	httpapi.Write(ctx, rw, http.StatusOK, slice.List(jobs, convertProvisionerJobWithQueuePosition))
 }
 
 // handleAuthAndFetchProvisionerJobs is an internal method shared by
@@ -157,7 +157,29 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 		logger   = api.Logger.With(slog.F("job_id", job.ID))
 		follow   = r.URL.Query().Has("follow")
 		afterRaw = r.URL.Query().Get("after")
+		format   = r.URL.Query().Get("format")
 	)
+
+	// Validate format parameter.
+	if format == "" {
+		format = "json"
+	}
+	if format != "json" && format != "text" {
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
+			Message: "Invalid format parameter.",
+			Detail:  "Allowed values are \"json\" and \"text\".",
+		})
+		return
+	}
+
+	// Text format is not supported with streaming.
+	if format == "text" && follow {
+		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
+			Message: "Text format is not supported with follow mode.",
+			Detail:  "Use format=json or omit the follow parameter.",
+		})
+		return
+	}
 
 	var after int64
 	// Only fetch logs created after the time provided.
@@ -176,7 +198,7 @@ func (api *API) provisionerJobLogs(rw http.ResponseWriter, r *http.Request, job 
 	}
 
 	if !follow {
-		fetchAndWriteLogs(ctx, api.Database, job.ID, after, rw)
+		fetchAndWriteLogs(ctx, api.Database, job.ID, after, rw, format)
 		return
 	}
 
@@ -413,10 +435,13 @@ func convertProvisionerJobWithQueuePosition(pj database.GetProvisionerJobsByOrga
 	if pj.WorkspaceID.Valid {
 		job.Metadata.WorkspaceID = &pj.WorkspaceID.UUID
 	}
+	if pj.WorkspaceBuildTransition.Valid {
+		job.Metadata.WorkspaceBuildTransition = codersdk.WorkspaceTransition(pj.WorkspaceBuildTransition.WorkspaceTransition)
+	}
 	return job
 }
 
-func fetchAndWriteLogs(ctx context.Context, db database.Store, jobID uuid.UUID, after int64, rw http.ResponseWriter) {
+func fetchAndWriteLogs(ctx context.Context, db database.Store, jobID uuid.UUID, after int64, rw http.ResponseWriter, format string) {
 	logs, err := db.GetProvisionerLogsAfterID(ctx, database.GetProvisionerLogsAfterIDParams{
 		JobID:        jobID,
 		CreatedAfter: after,
@@ -430,6 +455,16 @@ func fetchAndWriteLogs(ctx context.Context, db database.Store, jobID uuid.UUID, 
 	}
 	if logs == nil {
 		logs = []database.ProvisionerJobLog{}
+	}
+
+	if format == "text" {
+		rw.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		rw.WriteHeader(http.StatusOK)
+		for _, log := range logs {
+			_, _ = rw.Write([]byte(db2sdk.ProvisionerJobLog(log).Text()))
+			_, _ = rw.Write([]byte("\n"))
+		}
+		return
 	}
 	httpapi.Write(ctx, rw, http.StatusOK, convertProvisionerJobLogs(logs))
 }
@@ -544,7 +579,7 @@ func (f *logFollower) follow() {
 		return
 	}
 	defer f.conn.Close(websocket.StatusNormalClosure, "done")
-	go httpapi.Heartbeat(f.ctx, f.conn)
+	go httpapi.HeartbeatClose(f.ctx, f.logger, cancel, f.conn)
 	f.enc = wsjson.NewEncoder[codersdk.ProvisionerJobLog](f.conn, websocket.MessageText)
 
 	// query for logs once right away, so we can get historical data from before
@@ -555,7 +590,7 @@ func (f *logFollower) follow() {
 			f.logger.Error(f.ctx, "failed to query logs", slog.Error(err))
 			err = f.conn.Close(websocket.StatusInternalError, err.Error())
 			if err != nil {
-				f.logger.Warn(f.ctx, "failed to close webscoket", slog.Error(err))
+				f.logger.Warn(f.ctx, "failed to close websocket", slog.Error(err))
 			}
 		}
 		return
@@ -582,7 +617,7 @@ func (f *logFollower) follow() {
 			f.logger.Error(f.ctx, "dropped or corrupted notification", slog.Error(err))
 			err = f.conn.Close(websocket.StatusInternalError, err.Error())
 			if err != nil {
-				f.logger.Warn(f.ctx, "failed to close webscoket", slog.Error(err))
+				f.logger.Warn(f.ctx, "failed to close websocket", slog.Error(err))
 			}
 			return
 		case <-f.ctx.Done():
@@ -602,7 +637,7 @@ func (f *logFollower) follow() {
 					f.logger.Error(f.ctx, "failed to query logs", slog.Error(err))
 					err = f.conn.Close(websocket.StatusInternalError, httpapi.WebsocketCloseSprintf("%s", err.Error()))
 					if err != nil {
-						f.logger.Warn(f.ctx, "failed to close webscoket", slog.Error(err))
+						f.logger.Warn(f.ctx, "failed to close websocket", slog.Error(err))
 					}
 				}
 				return

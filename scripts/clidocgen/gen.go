@@ -1,6 +1,7 @@
 package main
 
 import (
+	_ "embed"
 	"fmt"
 	"io"
 	"os"
@@ -8,11 +9,10 @@ import (
 	"strings"
 	"text/template"
 
-	_ "embed"
-
 	"github.com/acarl005/stripansi"
 
 	"github.com/coder/coder/v2/buildinfo"
+	"github.com/coder/coder/v2/scripts/atomicwrite"
 	"github.com/coder/flog"
 	"github.com/coder/serpent"
 )
@@ -126,24 +126,21 @@ func genTree(dir string, cmd *serpent.Command, wroteLog map[string]*serpent.Comm
 	}
 
 	path := filepath.Join(dir, fmtDocFilename(cmd))
-	// Write out root.
-	fi, err := os.OpenFile(
-		path,
-		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644,
-	)
+
+	var buf strings.Builder
+	err := writeCommand(&buf, cmd)
 	if err != nil {
 		return err
 	}
-	defer fi.Close()
 
-	err = writeCommand(fi, cmd)
+	err = atomicwrite.File(path, []byte(buf.String()))
 	if err != nil {
 		return err
 	}
 
 	flog.Successf(
 		"wrote\t%s",
-		fi.Name(),
+		path,
 	)
 	wroteLog[path] = cmd
 	for _, sub := range cmd.Children {

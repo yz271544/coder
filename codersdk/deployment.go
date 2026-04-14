@@ -14,19 +14,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/uuid"
 	"golang.org/x/mod/semver"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
 	"golang.org/x/xerrors"
 
-	"github.com/coreos/go-oidc/v3/oidc"
-
-	"github.com/coder/serpent"
-
 	"github.com/coder/coder/v2/buildinfo"
 	"github.com/coder/coder/v2/coderd/agentmetrics"
 	"github.com/coder/coder/v2/coderd/workspaceapps/appurl"
+	"github.com/coder/serpent"
 )
 
 // Entitlement represents whether a feature is licensed.
@@ -59,6 +57,111 @@ func (e Entitlement) Weight() int {
 	}
 }
 
+// Addon represents a grouping of features used for additional license SKUs.
+// It is complementary to FeatureSet and similar in implementation, allowing
+// features to be grouped together dynamically. Unlike FeatureSet, licenses
+// can have multiple addons. This also means that entitlements don't require
+// reissuing when new features are added to an addon.
+type Addon string
+
+const (
+	AddonAIGovernance Addon = "ai_governance"
+)
+
+var (
+	// AddonsNames must be kept in-sync with the Addon enum above.
+	AddonsNames = []Addon{
+		AddonAIGovernance,
+	}
+
+	// AddonsMap is a map of all addon names for quick lookups.
+	AddonsMap = func() map[Addon]struct{} {
+		addonsMap := make(map[Addon]struct{}, len(AddonsNames))
+		for _, addon := range AddonsNames {
+			addonsMap[addon] = struct{}{}
+		}
+		return addonsMap
+	}()
+)
+
+// Features returns all the features that are part of the addon.
+func (a Addon) Features() []FeatureName {
+	switch a {
+	case AddonAIGovernance:
+		// Return all AI Governance features.
+		var features []FeatureName
+		for _, featureName := range FeatureNames {
+			if featureName.IsAIGovernanceAddon() {
+				features = append(features, featureName)
+			}
+		}
+		return features
+	default:
+		return nil
+	}
+}
+
+// ValidateDependencies validates the dependencies of the addon
+// and returns a list of errors for the missing dependencies.
+func (a Addon) ValidateDependencies(features map[FeatureName]Feature) []string {
+	errors := []string{}
+
+	// Candidate for a switch statement once we have more addons.
+	if a == AddonAIGovernance {
+		requiredFeatures := []FeatureName{
+			FeatureAIGovernanceUserLimit,
+		}
+
+		for _, featureName := range requiredFeatures {
+			feature, ok := features[featureName]
+			if !ok {
+				errors = append(errors,
+					fmt.Sprintf(
+						"Feature %s must be set when using the %s addon.",
+						featureName.Humanize(),
+						a.Humanize(),
+					),
+				)
+				continue
+			}
+			// For limit features, check if the Limit is set (not nil).
+			// For usage period features, check if the Limit is set.
+			if featureName.UsesLimit() || featureName.UsesUsagePeriod() {
+				if feature.Limit == nil {
+					errors = append(errors,
+						fmt.Sprintf(
+							"Feature %s must be set when using the %s addon.",
+							featureName.Humanize(),
+							a.Humanize(),
+						),
+					)
+				}
+			} else if feature.Entitlement == EntitlementNotEntitled {
+				// For non-limit features, check if the feature is entitled.
+				errors = append(errors,
+					fmt.Sprintf(
+						"Feature %s must be set when using the %s addon.",
+						featureName.Humanize(),
+						a.Humanize(),
+					),
+				)
+			}
+		}
+	}
+
+	return errors
+}
+
+// Humanize returns the addon name in a human-readable format.
+func (a Addon) Humanize() string {
+	switch a {
+	case AddonAIGovernance:
+		return "AI Governance"
+	default:
+		return strings.Title(strings.ReplaceAll(string(a), "_", " "))
+	}
+}
+
 // FeatureName represents the internal name of a feature.
 // To add a new feature, add it to this set of enums as well as the FeatureNames
 // array below.
@@ -80,6 +183,7 @@ const (
 	FeatureWorkspaceProxy             FeatureName = "workspace_proxy"
 	FeatureExternalTokenEncryption    FeatureName = "external_token_encryption"
 	FeatureWorkspaceBatchActions      FeatureName = "workspace_batch_actions"
+	FeatureTaskBatchActions           FeatureName = "task_batch_actions"
 	FeatureAccessControl              FeatureName = "access_control"
 	FeatureControlSharedPorts         FeatureName = "control_shared_ports"
 	FeatureCustomRoles                FeatureName = "custom_roles"
@@ -91,6 +195,9 @@ const (
 	FeatureManagedAgentLimit      FeatureName = "managed_agent_limit"
 	FeatureWorkspaceExternalAgent FeatureName = "workspace_external_agent"
 	FeatureAIBridge               FeatureName = "aibridge"
+	FeatureBoundary               FeatureName = "boundary"
+	FeatureServiceAccounts        FeatureName = "service_accounts"
+	FeatureAIGovernanceUserLimit  FeatureName = "ai_governance_user_limit"
 )
 
 var (
@@ -111,6 +218,7 @@ var (
 		FeatureUserRoleManagement,
 		FeatureExternalTokenEncryption,
 		FeatureWorkspaceBatchActions,
+		FeatureTaskBatchActions,
 		FeatureAccessControl,
 		FeatureControlSharedPorts,
 		FeatureCustomRoles,
@@ -119,6 +227,9 @@ var (
 		FeatureManagedAgentLimit,
 		FeatureWorkspaceExternalAgent,
 		FeatureAIBridge,
+		FeatureBoundary,
+		FeatureServiceAccounts,
+		FeatureAIGovernanceUserLimit,
 	}
 
 	// FeatureNamesMap is a map of all feature names for quick lookups.
@@ -140,6 +251,8 @@ func (n FeatureName) Humanize() string {
 		return "SCIM"
 	case FeatureAIBridge:
 		return "AI Bridge"
+	case FeatureAIGovernanceUserLimit:
+		return "AI Governance User Limit"
 	default:
 		return strings.Title(strings.ReplaceAll(string(n), "_", " "))
 	}
@@ -157,11 +270,14 @@ func (n FeatureName) AlwaysEnable() bool {
 		FeatureExternalProvisionerDaemons: true,
 		FeatureAppearance:                 true,
 		FeatureWorkspaceBatchActions:      true,
+		FeatureTaskBatchActions:           true,
 		FeatureHighAvailability:           true,
 		FeatureCustomRoles:                true,
 		FeatureMultipleOrganizations:      true,
 		FeatureWorkspacePrebuilds:         true,
 		FeatureWorkspaceExternalAgent:     true,
+		FeatureBoundary:                   true,
+		FeatureServiceAccounts:            true,
 	}[n]
 }
 
@@ -169,7 +285,7 @@ func (n FeatureName) AlwaysEnable() bool {
 func (n FeatureName) Enterprise() bool {
 	switch n {
 	// Add all features that should be excluded in the Enterprise feature set.
-	case FeatureMultipleOrganizations, FeatureCustomRoles:
+	case FeatureMultipleOrganizations, FeatureCustomRoles, FeatureServiceAccounts:
 		return false
 	default:
 		return true
@@ -180,8 +296,9 @@ func (n FeatureName) Enterprise() bool {
 // be included in any feature sets (as they are not boolean features).
 func (n FeatureName) UsesLimit() bool {
 	return map[FeatureName]bool{
-		FeatureUserLimit:         true,
-		FeatureManagedAgentLimit: true,
+		FeatureUserLimit:             true,
+		FeatureManagedAgentLimit:     true,
+		FeatureAIGovernanceUserLimit: true,
 	}[n]
 }
 
@@ -190,6 +307,20 @@ func (n FeatureName) UsesUsagePeriod() bool {
 	return map[FeatureName]bool{
 		FeatureManagedAgentLimit: true,
 	}[n]
+}
+
+// IsAIGovernanceAddon returns true if the feature is an AI Governance addon feature.
+func (n FeatureName) IsAIGovernanceAddon() bool {
+	return n == FeatureAIBridge || n == FeatureBoundary
+}
+
+// IsAddon returns true if the feature is an addon feature.
+func (n FeatureName) IsAddonFeature() bool {
+	features := []FeatureName{}
+	for addon := range AddonsMap {
+		features = append(features, addon.Features()...)
+	}
+	return slices.Contains(features, n)
 }
 
 // FeatureSet represents a grouping of features. Rather than manually
@@ -216,6 +347,7 @@ func (set FeatureSet) Features() []FeatureName {
 		copy(enterpriseFeatures, FeatureNames)
 		// Remove the selection
 		enterpriseFeatures = slices.DeleteFunc(enterpriseFeatures, func(f FeatureName) bool {
+			// TODO: In future release, restore the f.IsAddonFeature() check.
 			return !f.Enterprise() || f.UsesLimit()
 		})
 
@@ -225,6 +357,7 @@ func (set FeatureSet) Features() []FeatureName {
 		copy(premiumFeatures, FeatureNames)
 		// Remove the selection
 		premiumFeatures = slices.DeleteFunc(premiumFeatures, func(f FeatureName) bool {
+			// TODO: In future release, restore the f.IsAddonFeature() check.
 			return f.UsesLimit()
 		})
 		// FeatureSetPremium is just all features.
@@ -242,10 +375,6 @@ type Feature struct {
 
 	// Below is only for features that use usage periods.
 
-	// SoftLimit is the soft limit of the feature, and is only used for showing
-	// included limits in the dashboard. No license validation or warnings are
-	// generated from this value.
-	SoftLimit *int64 `json:"soft_limit,omitempty"`
 	// UsagePeriod denotes that the usage is a counter that accumulates over
 	// this period (and most likely resets with the issuance of the next
 	// license).
@@ -441,6 +570,10 @@ var PostgresAuthDrivers = []string{
 	string(PostgresAuthAWSIAMRDS),
 }
 
+// PostgresConnMaxIdleAuto is the value for auto-computing max idle connections
+// based on max open connections.
+const PostgresConnMaxIdleAuto = "auto"
+
 // DeploymentValues is the central configuration values the coder server.
 type DeploymentValues struct {
 	Verbose             serpent.Bool   `json:"verbose,omitempty"`
@@ -449,62 +582,69 @@ type DeploymentValues struct {
 	DocsURL             serpent.URL    `json:"docs_url,omitempty"`
 	RedirectToAccessURL serpent.Bool   `json:"redirect_to_access_url,omitempty"`
 	// HTTPAddress is a string because it may be set to zero to disable.
-	HTTPAddress                     serpent.String                       `json:"http_address,omitempty" typescript:",notnull"`
-	AutobuildPollInterval           serpent.Duration                     `json:"autobuild_poll_interval,omitempty"`
-	JobReaperDetectorInterval       serpent.Duration                     `json:"job_hang_detector_interval,omitempty"`
-	DERP                            DERP                                 `json:"derp,omitempty" typescript:",notnull"`
-	Prometheus                      PrometheusConfig                     `json:"prometheus,omitempty" typescript:",notnull"`
-	Pprof                           PprofConfig                          `json:"pprof,omitempty" typescript:",notnull"`
-	ProxyTrustedHeaders             serpent.StringArray                  `json:"proxy_trusted_headers,omitempty" typescript:",notnull"`
-	ProxyTrustedOrigins             serpent.StringArray                  `json:"proxy_trusted_origins,omitempty" typescript:",notnull"`
-	CacheDir                        serpent.String                       `json:"cache_directory,omitempty" typescript:",notnull"`
-	EphemeralDeployment             serpent.Bool                         `json:"ephemeral_deployment,omitempty" typescript:",notnull"`
-	PostgresURL                     serpent.String                       `json:"pg_connection_url,omitempty" typescript:",notnull"`
-	PostgresAuth                    string                               `json:"pg_auth,omitempty" typescript:",notnull"`
-	OAuth2                          OAuth2Config                         `json:"oauth2,omitempty" typescript:",notnull"`
-	OIDC                            OIDCConfig                           `json:"oidc,omitempty" typescript:",notnull"`
-	Telemetry                       TelemetryConfig                      `json:"telemetry,omitempty" typescript:",notnull"`
-	TLS                             TLSConfig                            `json:"tls,omitempty" typescript:",notnull"`
-	Trace                           TraceConfig                          `json:"trace,omitempty" typescript:",notnull"`
-	HTTPCookies                     HTTPCookieConfig                     `json:"http_cookies,omitempty" typescript:",notnull"`
-	StrictTransportSecurity         serpent.Int64                        `json:"strict_transport_security,omitempty" typescript:",notnull"`
-	StrictTransportSecurityOptions  serpent.StringArray                  `json:"strict_transport_security_options,omitempty" typescript:",notnull"`
-	SSHKeygenAlgorithm              serpent.String                       `json:"ssh_keygen_algorithm,omitempty" typescript:",notnull"`
-	MetricsCacheRefreshInterval     serpent.Duration                     `json:"metrics_cache_refresh_interval,omitempty" typescript:",notnull"`
-	AgentStatRefreshInterval        serpent.Duration                     `json:"agent_stat_refresh_interval,omitempty" typescript:",notnull"`
-	AgentFallbackTroubleshootingURL serpent.URL                          `json:"agent_fallback_troubleshooting_url,omitempty" typescript:",notnull"`
-	BrowserOnly                     serpent.Bool                         `json:"browser_only,omitempty" typescript:",notnull"`
-	SCIMAPIKey                      serpent.String                       `json:"scim_api_key,omitempty" typescript:",notnull"`
-	ExternalTokenEncryptionKeys     serpent.StringArray                  `json:"external_token_encryption_keys,omitempty" typescript:",notnull"`
-	Provisioner                     ProvisionerConfig                    `json:"provisioner,omitempty" typescript:",notnull"`
-	RateLimit                       RateLimitConfig                      `json:"rate_limit,omitempty" typescript:",notnull"`
-	Experiments                     serpent.StringArray                  `json:"experiments,omitempty" typescript:",notnull"`
-	UpdateCheck                     serpent.Bool                         `json:"update_check,omitempty" typescript:",notnull"`
-	Swagger                         SwaggerConfig                        `json:"swagger,omitempty" typescript:",notnull"`
-	Logging                         LoggingConfig                        `json:"logging,omitempty" typescript:",notnull"`
-	Dangerous                       DangerousConfig                      `json:"dangerous,omitempty" typescript:",notnull"`
-	DisablePathApps                 serpent.Bool                         `json:"disable_path_apps,omitempty" typescript:",notnull"`
-	Sessions                        SessionLifetime                      `json:"session_lifetime,omitempty" typescript:",notnull"`
-	DisablePasswordAuth             serpent.Bool                         `json:"disable_password_auth,omitempty" typescript:",notnull"`
-	Support                         SupportConfig                        `json:"support,omitempty" typescript:",notnull"`
-	ExternalAuthConfigs             serpent.Struct[[]ExternalAuthConfig] `json:"external_auth,omitempty" typescript:",notnull"`
-	SSHConfig                       SSHConfig                            `json:"config_ssh,omitempty" typescript:",notnull"`
-	WgtunnelHost                    serpent.String                       `json:"wgtunnel_host,omitempty" typescript:",notnull"`
-	DisableOwnerWorkspaceExec       serpent.Bool                         `json:"disable_owner_workspace_exec,omitempty" typescript:",notnull"`
-	ProxyHealthStatusInterval       serpent.Duration                     `json:"proxy_health_status_interval,omitempty" typescript:",notnull"`
-	EnableTerraformDebugMode        serpent.Bool                         `json:"enable_terraform_debug_mode,omitempty" typescript:",notnull"`
-	UserQuietHoursSchedule          UserQuietHoursScheduleConfig         `json:"user_quiet_hours_schedule,omitempty" typescript:",notnull"`
-	WebTerminalRenderer             serpent.String                       `json:"web_terminal_renderer,omitempty" typescript:",notnull"`
-	AllowWorkspaceRenames           serpent.Bool                         `json:"allow_workspace_renames,omitempty" typescript:",notnull"`
-	Healthcheck                     HealthcheckConfig                    `json:"healthcheck,omitempty" typescript:",notnull"`
-	CLIUpgradeMessage               serpent.String                       `json:"cli_upgrade_message,omitempty" typescript:",notnull"`
-	TermsOfServiceURL               serpent.String                       `json:"terms_of_service_url,omitempty" typescript:",notnull"`
-	Notifications                   NotificationsConfig                  `json:"notifications,omitempty" typescript:",notnull"`
-	AdditionalCSPPolicy             serpent.StringArray                  `json:"additional_csp_policy,omitempty" typescript:",notnull"`
-	WorkspaceHostnameSuffix         serpent.String                       `json:"workspace_hostname_suffix,omitempty" typescript:",notnull"`
-	Prebuilds                       PrebuildsConfig                      `json:"workspace_prebuilds,omitempty" typescript:",notnull"`
-	HideAITasks                     serpent.Bool                         `json:"hide_ai_tasks,omitempty" typescript:",notnull"`
-	AI                              AIConfig                             `json:"ai,omitempty"`
+	HTTPAddress                             serpent.String                       `json:"http_address,omitempty" typescript:",notnull"`
+	AutobuildPollInterval                   serpent.Duration                     `json:"autobuild_poll_interval,omitempty"`
+	JobReaperDetectorInterval               serpent.Duration                     `json:"job_hang_detector_interval,omitempty"`
+	DERP                                    DERP                                 `json:"derp,omitempty" typescript:",notnull"`
+	Prometheus                              PrometheusConfig                     `json:"prometheus,omitempty" typescript:",notnull"`
+	Pprof                                   PprofConfig                          `json:"pprof,omitempty" typescript:",notnull"`
+	ProxyTrustedHeaders                     serpent.StringArray                  `json:"proxy_trusted_headers,omitempty" typescript:",notnull"`
+	ProxyTrustedOrigins                     serpent.StringArray                  `json:"proxy_trusted_origins,omitempty" typescript:",notnull"`
+	CacheDir                                serpent.String                       `json:"cache_directory,omitempty" typescript:",notnull"`
+	EphemeralDeployment                     serpent.Bool                         `json:"ephemeral_deployment,omitempty" typescript:",notnull"`
+	PostgresURL                             serpent.String                       `json:"pg_connection_url,omitempty" typescript:",notnull"`
+	PostgresAuth                            string                               `json:"pg_auth,omitempty" typescript:",notnull"`
+	PostgresConnMaxOpen                     serpent.Int64                        `json:"pg_conn_max_open,omitempty" typescript:",notnull"`
+	PostgresConnMaxIdle                     serpent.String                       `json:"pg_conn_max_idle,omitempty" typescript:",notnull"`
+	OAuth2                                  OAuth2Config                         `json:"oauth2,omitempty" typescript:",notnull"`
+	OIDC                                    OIDCConfig                           `json:"oidc,omitempty" typescript:",notnull"`
+	Telemetry                               TelemetryConfig                      `json:"telemetry,omitempty" typescript:",notnull"`
+	TLS                                     TLSConfig                            `json:"tls,omitempty" typescript:",notnull"`
+	Trace                                   TraceConfig                          `json:"trace,omitempty" typescript:",notnull"`
+	HTTPCookies                             HTTPCookieConfig                     `json:"http_cookies,omitempty" typescript:",notnull"`
+	StrictTransportSecurity                 serpent.Int64                        `json:"strict_transport_security,omitempty" typescript:",notnull"`
+	StrictTransportSecurityOptions          serpent.StringArray                  `json:"strict_transport_security_options,omitempty" typescript:",notnull"`
+	SSHKeygenAlgorithm                      serpent.String                       `json:"ssh_keygen_algorithm,omitempty" typescript:",notnull"`
+	MetricsCacheRefreshInterval             serpent.Duration                     `json:"metrics_cache_refresh_interval,omitempty" typescript:",notnull"`
+	AgentStatRefreshInterval                serpent.Duration                     `json:"agent_stat_refresh_interval,omitempty" typescript:",notnull"`
+	AgentFallbackTroubleshootingURL         serpent.URL                          `json:"agent_fallback_troubleshooting_url,omitempty" typescript:",notnull"`
+	BrowserOnly                             serpent.Bool                         `json:"browser_only,omitempty" typescript:",notnull"`
+	SCIMAPIKey                              serpent.String                       `json:"scim_api_key,omitempty" typescript:",notnull"`
+	ExternalTokenEncryptionKeys             serpent.StringArray                  `json:"external_token_encryption_keys,omitempty" typescript:",notnull"`
+	Provisioner                             ProvisionerConfig                    `json:"provisioner,omitempty" typescript:",notnull"`
+	RateLimit                               RateLimitConfig                      `json:"rate_limit,omitempty" typescript:",notnull"`
+	Experiments                             serpent.StringArray                  `json:"experiments,omitempty" typescript:",notnull"`
+	UpdateCheck                             serpent.Bool                         `json:"update_check,omitempty" typescript:",notnull"`
+	Swagger                                 SwaggerConfig                        `json:"swagger,omitempty" typescript:",notnull"`
+	Logging                                 LoggingConfig                        `json:"logging,omitempty" typescript:",notnull"`
+	Dangerous                               DangerousConfig                      `json:"dangerous,omitempty" typescript:",notnull"`
+	DisablePathApps                         serpent.Bool                         `json:"disable_path_apps,omitempty" typescript:",notnull"`
+	Sessions                                SessionLifetime                      `json:"session_lifetime,omitempty" typescript:",notnull"`
+	DisablePasswordAuth                     serpent.Bool                         `json:"disable_password_auth,omitempty" typescript:",notnull"`
+	Support                                 SupportConfig                        `json:"support,omitempty" typescript:",notnull"`
+	EnableAuthzRecording                    serpent.Bool                         `json:"enable_authz_recording,omitempty" typescript:",notnull"`
+	ExternalAuthConfigs                     serpent.Struct[[]ExternalAuthConfig] `json:"external_auth,omitempty" typescript:",notnull"`
+	ExternalAuthGithubDefaultProviderEnable serpent.Bool                         `json:"external_auth_github_default_provider_enable,omitempty" typescript:",notnull"`
+	SSHConfig                               SSHConfig                            `json:"config_ssh,omitempty" typescript:",notnull"`
+	WgtunnelHost                            serpent.String                       `json:"wgtunnel_host,omitempty" typescript:",notnull"`
+	DisableOwnerWorkspaceExec               serpent.Bool                         `json:"disable_owner_workspace_exec,omitempty" typescript:",notnull"`
+	DisableWorkspaceSharing                 serpent.Bool                         `json:"disable_workspace_sharing,omitempty" typescript:",notnull"`
+	ProxyHealthStatusInterval               serpent.Duration                     `json:"proxy_health_status_interval,omitempty" typescript:",notnull"`
+	EnableTerraformDebugMode                serpent.Bool                         `json:"enable_terraform_debug_mode,omitempty" typescript:",notnull"`
+	UserQuietHoursSchedule                  UserQuietHoursScheduleConfig         `json:"user_quiet_hours_schedule,omitempty" typescript:",notnull"`
+	WebTerminalRenderer                     serpent.String                       `json:"web_terminal_renderer,omitempty" typescript:",notnull"`
+	AllowWorkspaceRenames                   serpent.Bool                         `json:"allow_workspace_renames,omitempty" typescript:",notnull"`
+	Healthcheck                             HealthcheckConfig                    `json:"healthcheck,omitempty" typescript:",notnull"`
+	Retention                               RetentionConfig                      `json:"retention,omitempty" typescript:",notnull"`
+	CLIUpgradeMessage                       serpent.String                       `json:"cli_upgrade_message,omitempty" typescript:",notnull"`
+	TermsOfServiceURL                       serpent.String                       `json:"terms_of_service_url,omitempty" typescript:",notnull"`
+	Notifications                           NotificationsConfig                  `json:"notifications,omitempty" typescript:",notnull"`
+	AdditionalCSPPolicy                     serpent.StringArray                  `json:"additional_csp_policy,omitempty" typescript:",notnull"`
+	WorkspaceHostnameSuffix                 serpent.String                       `json:"workspace_hostname_suffix,omitempty" typescript:",notnull"`
+	Prebuilds                               PrebuildsConfig                      `json:"workspace_prebuilds,omitempty" typescript:",notnull"`
+	HideAITasks                             serpent.Bool                         `json:"hide_ai_tasks,omitempty" typescript:",notnull"`
+	AI                                      AIConfig                             `json:"ai,omitempty"`
+	StatsCollection                         StatsCollectionConfig                `json:"stats_collection,omitempty" typescript:",notnull"`
 
 	Config      serpent.YAMLConfigPath `json:"config,omitempty" typescript:",notnull"`
 	WriteConfig serpent.Bool           `json:"write_config,omitempty" typescript:",notnull"`
@@ -604,6 +744,14 @@ type DERPConfig struct {
 	Path            serpent.String `json:"path" typescript:",notnull"`
 }
 
+type UsageStatsConfig struct {
+	Enable serpent.Bool `json:"enable" typescript:",notnull"`
+}
+
+type StatsCollectionConfig struct {
+	UsageStats UsageStatsConfig `json:"usage_stats" tyescript:",notnull"`
+}
+
 type PrometheusConfig struct {
 	Enable                serpent.Bool        `json:"enable" typescript:",notnull"`
 	Address               serpent.HostPort    `json:"address" typescript:",notnull"`
@@ -674,6 +822,11 @@ type OIDCConfig struct {
 	IconURL                   serpent.URL                            `json:"icon_url" typescript:",notnull"`
 	SignupsDisabledText       serpent.String                         `json:"signups_disabled_text" typescript:",notnull"`
 	SkipIssuerChecks          serpent.Bool                           `json:"skip_issuer_checks" typescript:",notnull"`
+
+	// RedirectURL is optional, defaulting to 'ACCESS_URL'. Only useful in niche
+	// situations where the OIDC callback domain is different from the ACCESS_URL
+	// domain.
+	RedirectURL serpent.URL `json:"redirect_url" typescript:",notnull"`
 }
 
 type TelemetryConfig struct {
@@ -704,14 +857,87 @@ type TraceConfig struct {
 	DataDog         serpent.Bool   `json:"data_dog" typescript:",notnull"`
 }
 
+const cookieHostPrefix = "__Host-"
+
 type HTTPCookieConfig struct {
-	Secure   serpent.Bool `json:"secure_auth_cookie,omitempty" typescript:",notnull"`
-	SameSite string       `json:"same_site,omitempty" typescript:",notnull"`
+	Secure           serpent.Bool `json:"secure_auth_cookie,omitempty" typescript:",notnull"`
+	SameSite         string       `json:"same_site,omitempty" typescript:",notnull"`
+	EnableHostPrefix bool         `json:"host_prefix,omitempty" typescript:",notnull"`
+}
+
+// cookiesToPrefix is the set of cookies that should be prefixed with the host prefix if EnableHostPrefix is true.
+// This is a constant, do not ever mutate it.
+var cookiesToPrefix = map[string]struct{}{
+	SessionTokenCookie: {},
+}
+
+// Middleware handles some cookie mutation the requests.
+//
+// For performance of this, see 'BenchmarkHTTPCookieConfigMiddleware'
+// This code is executed on every request, so efficiency is important.
+// If making changes, please consider the performance implications and run benchmarks.
+func (cfg *HTTPCookieConfig) Middleware(next http.Handler) http.Handler {
+	prefixed := make(map[string]struct{})
+	for name := range cookiesToPrefix {
+		prefixed[cookieHostPrefix+name] = struct{}{}
+	}
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if !cfg.EnableHostPrefix {
+			// If a deployment has this config on, then turned it off. Then some old __Host-
+			// cookies could exist on the browsers of the clients. These cookies have no
+			// impact, so we are going to ignore them if they exist (niche scenario)
+			next.ServeHTTP(rw, r)
+			return
+		}
+
+		// When 'EnableHostPrefix', some cookies are set with a `__Host-` prefix. This
+		// middleware will strip any prefixes, so the backend is unaware of this security
+		// feature.
+		//
+		// This code also handles any unprefixed cookies that are now invalid.
+		cookies := r.Cookies()
+		for i, c := range cookies {
+			// If any cookies that should be prefixed are found without the prefix, remove
+			// them from the client and the request. This is usually from a migration where
+			// the prefix was just turned on. In any case, these cookies MUST be dropped
+			if _, ok := cookiesToPrefix[c.Name]; ok {
+				// Remove the cookie from the client to prevent any future requests from sending it.
+				http.SetCookie(rw, &http.Cookie{
+					MaxAge: -1, // Delete
+					Name:   c.Name,
+					Path:   "/",
+				})
+				// And remove it from the request so the rest of the code doesn't see it.
+				cookies[i] = nil
+			}
+
+			// Only strip prefix's from the cookies we care about. Let other `__Host-` cookies be
+			if _, ok := prefixed[c.Name]; ok {
+				c.Name = strings.TrimPrefix(c.Name, cookieHostPrefix)
+			}
+		}
+
+		// r.Cookies() returns copies, so we need to rebuild the header.
+		r.Header.Del("Cookie")
+		for _, c := range cookies {
+			if c != nil {
+				r.AddCookie(c)
+			}
+		}
+
+		next.ServeHTTP(rw, r)
+	})
 }
 
 func (cfg *HTTPCookieConfig) Apply(c *http.Cookie) *http.Cookie {
 	c.Secure = cfg.Secure.Value()
 	c.SameSite = cfg.HTTPSameSite()
+	if cfg.EnableHostPrefix {
+		// Only prefix the cookies we want to be prefixed.
+		if _, ok := cookiesToPrefix[c.Name]; ok {
+			c.Name = cookieHostPrefix + c.Name
+		}
+	}
 	return c
 }
 
@@ -747,9 +973,12 @@ type ExternalAuthConfig struct {
 	ExtraTokenKeys      []string `json:"-" yaml:"extra_token_keys"`
 	DeviceFlow          bool     `json:"device_flow" yaml:"device_flow"`
 	DeviceCodeURL       string   `json:"device_code_url" yaml:"device_code_url"`
-	MCPURL              string   `json:"mcp_url" yaml:"mcp_url"`
-	MCPToolAllowRegex   string   `json:"mcp_tool_allow_regex" yaml:"mcp_tool_allow_regex"`
-	MCPToolDenyRegex    string   `json:"mcp_tool_deny_regex" yaml:"mcp_tool_deny_regex"`
+	// Deprecated: Injected MCP in AI Bridge is deprecated and will be removed in a future release.
+	MCPURL string `json:"mcp_url" yaml:"mcp_url"`
+	// Deprecated: Injected MCP in AI Bridge is deprecated and will be removed in a future release.
+	MCPToolAllowRegex string `json:"mcp_tool_allow_regex" yaml:"mcp_tool_allow_regex"`
+	// Deprecated: Injected MCP in AI Bridge is deprecated and will be removed in a future release.
+	MCPToolDenyRegex string `json:"mcp_tool_deny_regex" yaml:"mcp_tool_deny_regex"`
 	// Regex allows API requesters to match an auth config by
 	// a string (e.g. coder.com) instead of by it's type.
 	//
@@ -757,10 +986,17 @@ type ExternalAuthConfig struct {
 	// 'Username for "https://github.com":'
 	// And sending it to the Coder server to match against the Regex.
 	Regex string `json:"regex" yaml:"regex"`
+	// APIBaseURL is the base URL for provider REST API calls
+	// (e.g., "https://api.github.com" for GitHub). Derived from
+	// defaults when not explicitly configured.
+	APIBaseURL string `json:"api_base_url" yaml:"api_base_url"`
 	// DisplayName is shown in the UI to identify the auth config.
 	DisplayName string `json:"display_name" yaml:"display_name"`
 	// DisplayIcon is a URL to an icon to display in the UI.
 	DisplayIcon string `json:"display_icon" yaml:"display_icon"`
+	// CodeChallengeMethodsSupported lists the PKCE code challenge methods
+	// The only one supported by Coder is "S256".
+	CodeChallengeMethodsSupported []string `json:"code_challenge_methods_supported" yaml:"code_challenge_methods_supported"`
 }
 
 type ProvisionerConfig struct {
@@ -807,6 +1043,28 @@ type UserQuietHoursScheduleConfig struct {
 type HealthcheckConfig struct {
 	Refresh           serpent.Duration `json:"refresh" typescript:",notnull"`
 	ThresholdDatabase serpent.Duration `json:"threshold_database" typescript:",notnull"`
+}
+
+// RetentionConfig contains configuration for data retention policies.
+// These settings control how long various types of data are retained in the database
+// before being automatically purged. Setting a value to 0 disables retention for that
+// data type (data is kept indefinitely).
+type RetentionConfig struct {
+	// AuditLogs controls how long audit log entries are retained.
+	// Set to 0 to disable (keep indefinitely).
+	AuditLogs serpent.Duration `json:"audit_logs" typescript:",notnull"`
+	// ConnectionLogs controls how long connection log entries are retained.
+	// Set to 0 to disable (keep indefinitely).
+	ConnectionLogs serpent.Duration `json:"connection_logs" typescript:",notnull"`
+	// APIKeys controls how long expired API keys are retained before being deleted.
+	// Keys are only deleted if they have been expired for at least this duration.
+	// Defaults to 7 days to preserve existing behavior.
+	APIKeys serpent.Duration `json:"api_keys" typescript:",notnull"`
+	// WorkspaceAgentLogs controls how long workspace agent logs are retained.
+	// Logs are deleted if the agent hasn't connected within this period.
+	// Logs from the latest build are always retained regardless of age.
+	// Defaults to 7 days to preserve existing behavior.
+	WorkspaceAgentLogs serpent.Duration `json:"workspace_agent_logs" typescript:",notnull"`
 }
 
 type NotificationsConfig struct {
@@ -984,7 +1242,7 @@ func DefaultSupportLinks(docsURL string) []LinkConfig {
 		},
 		{
 			Name:   "Join the Coder Discord",
-			Target: "https://coder.com/chat?utm_source=coder&utm_medium=coder&utm_campaign=server-footer",
+			Target: "https://discord.gg/coder",
 			Icon:   "chat",
 		},
 		{
@@ -996,7 +1254,11 @@ func DefaultSupportLinks(docsURL string) []LinkConfig {
 }
 
 func removeTrailingVersionInfo(v string) string {
-	return strings.Split(strings.Split(v, "-")[0], "+")[0]
+	// Strip build metadata (everything after '+').
+	v, _, _ = strings.Cut(v, "+")
+	// Strip '-devel' suffix if present.
+	v = strings.TrimSuffix(v, "-devel")
+	return v
 }
 
 func DefaultDocsURL() string {
@@ -1044,13 +1306,23 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 		}
 		deploymentGroupIntrospection = serpent.Group{
 			Name:        "Introspection",
-			Description: `Configure logging, tracing, and metrics exporting.`,
+			Description: `Configure logging, tracing, stat collection, and metrics exporting.`,
 			YAML:        "introspection",
 		}
 		deploymentGroupIntrospectionPPROF = serpent.Group{
 			Parent: &deploymentGroupIntrospection,
 			Name:   "pprof",
 			YAML:   "pprof",
+		}
+		deploymentGroupIntrospectionStatsCollection = serpent.Group{
+			Parent: &deploymentGroupIntrospection,
+			Name:   "Stats Collection",
+			YAML:   "statsCollection",
+		}
+		deploymentGroupIntrospectionStatsCollectionUsageStats = serpent.Group{
+			Parent: &deploymentGroupIntrospectionStatsCollection,
+			Name:   "Usage Stats",
+			YAML:   "usageStats",
 		}
 		deploymentGroupIntrospectionPrometheus = serpent.Group{
 			Parent: &deploymentGroupIntrospection,
@@ -1172,9 +1444,23 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Parent: &deploymentGroupNotifications,
 			YAML:   "inbox",
 		}
+		deploymentGroupChat = serpent.Group{
+			Name:        "Chat",
+			YAML:        "chat",
+			Description: "Configure the background chat processing daemon.",
+		}
 		deploymentGroupAIBridge = serpent.Group{
-			Name: "AIBridge",
+			Name: "AI Bridge",
 			YAML: "aibridge",
+		}
+		deploymentGroupAIBridgeProxy = serpent.Group{
+			Name: "AI Bridge Proxy",
+			YAML: "aibridgeproxy",
+		}
+		deploymentGroupRetention = serpent.Group{
+			Name:        "Retention",
+			Description: "Configure data retention policies for various database tables. Retention policies automatically purge old data to reduce database size and improve performance. Setting a retention duration to 0 disables automatic purging for that data type.",
+			YAML:        "retention",
 		}
 	)
 
@@ -1187,7 +1473,8 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 		Value:       &c.HTTPAddress,
 		Group:       &deploymentGroupNetworkingHTTP,
 		YAML:        "httpAddress",
-		Annotations: serpent.Annotations{}.Mark(annotationExternalProxies, "true"),
+		Annotations: serpent.Annotations{}.
+			Mark(annotationExternalProxies, "true"),
 	}
 	tlsBindAddress := serpent.Option{
 		Name:        "TLS Address",
@@ -1356,6 +1643,17 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 		Value:       &c.Telemetry.Enable,
 		Group:       &deploymentGroupTelemetry,
 		YAML:        "enable",
+	}
+	workspaceHostnameSuffix := serpent.Option{
+		Name:        "Workspace Hostname Suffix",
+		Description: "Workspace hostnames use this suffix in SSH config and Coder Connect on Coder Desktop. By default it is coder, resulting in names like myworkspace.coder.",
+		Flag:        "workspace-hostname-suffix",
+		Env:         "CODER_WORKSPACE_HOSTNAME_SUFFIX",
+		YAML:        "workspaceHostnameSuffix",
+		Group:       &deploymentGroupClient,
+		Value:       &c.WorkspaceHostnameSuffix,
+		Hidden:      false,
+		Default:     "coder",
 	}
 	opts := serpent.OptionSet{
 		{
@@ -1638,8 +1936,7 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Env:   "CODER_BLOCK_DIRECT",
 			Value: &c.DERP.Config.BlockDirect,
 			Group: &deploymentGroupNetworkingDERP,
-			YAML:  "blockDirect", Annotations: serpent.Annotations{}.
-				Mark(annotationExternalProxies, "true"),
+			YAML:  "blockDirect", Annotations: serpent.Annotations{}.Mark(annotationExternalProxies, "true"),
 		},
 		{
 			Name:        "DERP Force WebSockets",
@@ -1667,6 +1964,16 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Value:       &c.DERP.Config.Path,
 			Group:       &deploymentGroupNetworkingDERP,
 			YAML:        "configPath",
+		},
+		{
+			Name:        "Stats Collection Usage Stats Enable",
+			Description: "Enable the collection of application and workspace usage along with the associated API endpoints and the template insights page. Disabling this will also disable traffic and connection insights in the deployment stats shown to admins in the bottom bar of the Coder UI, and will prevent Prometheus collection of these values.",
+			Flag:        "stats-collection-usage-stats-enable",
+			Env:         "CODER_STATS_COLLECTION_USAGE_STATS_ENABLE",
+			Default:     "true",
+			Value:       &c.StatsCollection.UsageStats.Enable,
+			Group:       &deploymentGroupIntrospectionStatsCollectionUsageStats,
+			YAML:        "enable",
 		},
 		// TODO: support Git Auth settings.
 		// Prometheus settings
@@ -2153,6 +2460,21 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Group: &deploymentGroupOIDC,
 			YAML:  "dangerousSkipIssuerChecks",
 		},
+		{
+			Name: "OIDC Redirect URL",
+			Description: "Optional override of the default redirect url which uses the deployment's access url. " +
+				"Useful in situations where a deployment has more than 1 domain. Using this setting can also break OIDC, so use with caution.",
+			Required:   false,
+			Flag:       "oidc-redirect-url",
+			Env:        "CODER_OIDC_REDIRECT_URL",
+			YAML:       "oidc-redirect-url",
+			Value:      &c.OIDC.RedirectURL,
+			Group:      &deploymentGroupOIDC,
+			UseInstead: nil,
+			// In most deployments, this setting can only complicate and break OIDC.
+			// So hide it, and only surface it to the small number of users that need it.
+			Hidden: true,
+		},
 		// Telemetry settings
 		telemetryEnable,
 		{
@@ -2168,6 +2490,8 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Group:      &deploymentGroupTelemetry,
 			UseInstead: []serpent.Option{telemetryEnable},
 		},
+		// For local development testing, see scripts/telemetry-server which
+		// provides a mock server that prints received telemetry as JSON.
 		{
 			Name:        "Telemetry URL",
 			Description: "URL to send telemetry.",
@@ -2558,10 +2882,37 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			YAML:        "pgAuth",
 		},
 		{
+			Name:        "Postgres Connection Max Open",
+			Description: "Maximum number of open connections to the database. Defaults to 10.",
+			Flag:        "postgres-conn-max-open",
+			Env:         "CODER_PG_CONN_MAX_OPEN",
+			Default:     "10",
+			Value: serpent.Validate(&c.PostgresConnMaxOpen, func(value *serpent.Int64) error {
+				if value.Value() <= 0 {
+					return xerrors.New("must be greater than zero")
+				}
+				return nil
+			}),
+			YAML: "pgConnMaxOpen",
+		},
+		{
+			Name: "Postgres Connection Max Idle",
+			Description: "Maximum number of idle connections to the database. Set to \"auto\" (the default) to use max open / 3. " +
+				"Value must be greater or equal to 0; 0 means explicitly no idle connections.",
+			Flag:    "postgres-conn-max-idle",
+			Env:     "CODER_PG_CONN_MAX_IDLE",
+			Default: PostgresConnMaxIdleAuto,
+			Value:   &c.PostgresConnMaxIdle,
+			YAML:    "pgConnMaxIdle",
+		},
+		{
 			Name:        "Secure Auth Cookie",
 			Description: "Controls if the 'Secure' property is set on browser session cookies.",
 			Flag:        "secure-auth-cookie",
 			Env:         "CODER_SECURE_AUTH_COOKIE",
+			DefaultFn: func() string {
+				return strconv.FormatBool(c.AccessURL.Scheme == "https")
+			},
 			Value:       &c.HTTPCookies.Secure,
 			Group:       &deploymentGroupNetworking,
 			YAML:        "secureAuthCookie",
@@ -2577,6 +2928,19 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Default:     "lax",
 			Group:       &deploymentGroupNetworking,
 			YAML:        "sameSiteAuthCookie",
+			Annotations: serpent.Annotations{}.Mark(annotationExternalProxies, "true"),
+		},
+		{
+			Name:        "__Host Prefix Cookies",
+			Description: "Recommended to be enabled. Enables `__Host-` prefix for cookies to guarantee they are only set by the right domain. This change is disruptive to any workspaces built before release 2.31, requiring a workspace restart.",
+			Flag:        "host-prefix-cookie",
+			Env:         "CODER_HOST_PREFIX_COOKIE",
+			Value:       serpent.BoolOf(&c.HTTPCookies.EnableHostPrefix),
+			// Ideally this is true, however any frontend interactions with the coder api would be broken.
+			// So for compatibility reasons, this is set to false.
+			Default:     "false",
+			Group:       &deploymentGroupNetworking,
+			YAML:        "hostPrefixCookie",
 			Annotations: serpent.Annotations{}.Mark(annotationExternalProxies, "true"),
 		},
 		{
@@ -2697,6 +3061,15 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 			Annotations: serpent.Annotations{}.Mark(annotationExternalProxies, "true"),
 		},
 		{
+			Name:        "Disable Workspace Sharing",
+			Description: `Disable workspace sharing. Workspace ACL checking is disabled and only owners can have ssh, apps and terminal access to workspaces. Access based on the 'owner' role is also allowed unless disabled via --disable-owner-workspace-access.`,
+			Flag:        "disable-workspace-sharing",
+			Env:         "CODER_DISABLE_WORKSPACE_SHARING",
+
+			Value: &c.DisableWorkspaceSharing,
+			YAML:  "disableWorkspaceSharing",
+		},
+		{
 			Name:        "Session Duration",
 			Description: "The token expiry duration for browser sessions. Sessions may last longer if they are actively making requests, but this functionality can be disabled via --disable-session-expiry-refresh.",
 			Flag:        "session-duration",
@@ -2739,26 +3112,17 @@ func (c *DeploymentValues) Options() serpent.OptionSet {
 		},
 		{
 			Name:        "SSH Host Prefix",
-			Description: "The SSH deployment prefix is used in the Host of the ssh config.",
+			Description: "Deprecated: use workspace-hostname-suffix instead. The SSH deployment prefix is used in the Host of the ssh config.",
 			Flag:        "ssh-hostname-prefix",
 			Env:         "CODER_SSH_HOSTNAME_PREFIX",
 			YAML:        "sshHostnamePrefix",
 			Group:       &deploymentGroupClient,
 			Value:       &c.SSHConfig.DeploymentName,
-			Hidden:      false,
+			Hidden:      true,
 			Default:     "coder.",
+			UseInstead:  serpent.OptionSet{workspaceHostnameSuffix},
 		},
-		{
-			Name:        "Workspace Hostname Suffix",
-			Description: "Workspace hostnames use this suffix in SSH config and Coder Connect on Coder Desktop. By default it is coder, resulting in names like myworkspace.coder.",
-			Flag:        "workspace-hostname-suffix",
-			Env:         "CODER_WORKSPACE_HOSTNAME_SUFFIX",
-			YAML:        "workspaceHostnameSuffix",
-			Group:       &deploymentGroupClient,
-			Value:       &c.WorkspaceHostnameSuffix,
-			Hidden:      false,
-			Default:     "coder",
-		},
+		workspaceHostnameSuffix,
 		{
 			Name: "SSH Config Options",
 			Description: "These SSH config options will override the default SSH config options. " +
@@ -2808,6 +3172,15 @@ Write out the current server config as YAML to stdout.`,
 			Flag:        "external-auth-providers",
 			Value:       &c.ExternalAuthConfigs,
 			Hidden:      true,
+		},
+		{
+			Name:        "External Auth GitHub Default Provider Enable",
+			Description: "Enable the default GitHub external auth provider managed by Coder.",
+			Flag:        "external-auth-github-default-provider-enable",
+			Env:         "CODER_EXTERNAL_AUTH_GITHUB_DEFAULT_PROVIDER_ENABLE",
+			YAML:        "externalAuthGithubDefaultProviderEnable",
+			Value:       &c.ExternalAuthGithubDefaultProviderEnable,
+			Default:     "true",
 		},
 		{
 			Name:        "Custom wgtunnel Host",
@@ -2861,13 +3234,16 @@ Write out the current server config as YAML to stdout.`,
 			YAML:        "webTerminalRenderer",
 		},
 		{
-			Name:        "Allow Workspace Renames",
-			Description: "DEPRECATED: Allow users to rename their workspaces. Use only for temporary compatibility reasons, this will be removed in a future release.",
-			Flag:        "allow-workspace-renames",
-			Env:         "CODER_ALLOW_WORKSPACE_RENAMES",
-			Default:     "false",
-			Value:       &c.AllowWorkspaceRenames,
-			YAML:        "allowWorkspaceRenames",
+			Name: "Allow Workspace Renames",
+			Description: "Allow users to rename their workspaces. " +
+				"WARNING: Renaming a workspace can cause Terraform resources that depend on the " +
+				"workspace name to be destroyed and recreated, potentially causing data loss. " +
+				"Only enable this if your templates do not use workspace names in resource identifiers, or if you understand the risks.",
+			Flag:    "allow-workspace-renames",
+			Env:     "CODER_ALLOW_WORKSPACE_RENAMES",
+			Default: "false",
+			Value:   &c.AllowWorkspaceRenames,
+			YAML:    "allowWorkspaceRenames",
 		},
 		// Healthcheck Options
 		{
@@ -3236,21 +3612,41 @@ Write out the current server config as YAML to stdout.`,
 			Group:       &deploymentGroupClient,
 			YAML:        "hideAITasks",
 		},
-
-		// AIBridge Options
+		// Chat Options
 		{
-			Name:        "AIBridge Enabled",
-			Description: fmt.Sprintf("Whether to start an in-memory aibridged instance (%q experiment must be enabled, too).", ExperimentAIBridge),
+			Name:        "Chat: Acquire Batch Size",
+			Description: "How many pending chats a worker should acquire per polling cycle.",
+			Flag:        "chat-acquire-batch-size",
+			Env:         "CODER_CHAT_ACQUIRE_BATCH_SIZE",
+			Value:       &c.AI.Chat.AcquireBatchSize,
+			Default:     "10",
+			Group:       &deploymentGroupChat,
+			YAML:        "acquireBatchSize",
+			Hidden:      true, // Hidden because most operators should not need to modify this.
+		},
+		{
+			Name:        "Chat: Debug Logging Enabled",
+			Description: "Force chat debug logging on for every chat, bypassing the runtime admin and user opt-in settings.",
+			Flag:        "chat-debug-logging-enabled",
+			Env:         "CODER_CHAT_DEBUG_LOGGING_ENABLED",
+			Value:       &c.AI.Chat.DebugLoggingEnabled,
+			Default:     "false",
+			Group:       &deploymentGroupChat,
+			YAML:        "debugLoggingEnabled",
+		},
+		// AI Bridge Options
+		{
+			Name:        "AI Bridge Enabled",
+			Description: "Whether to start an in-memory aibridged instance.",
 			Flag:        "aibridge-enabled",
 			Env:         "CODER_AIBRIDGE_ENABLED",
 			Value:       &c.AI.BridgeConfig.Enabled,
 			Default:     "false",
 			Group:       &deploymentGroupAIBridge,
 			YAML:        "enabled",
-			Hidden:      true,
 		},
 		{
-			Name:        "AIBridge OpenAI Base URL",
+			Name:        "AI Bridge OpenAI Base URL",
 			Description: "The base URL of the OpenAI API.",
 			Flag:        "aibridge-openai-base-url",
 			Env:         "CODER_AIBRIDGE_OPENAI_BASE_URL",
@@ -3258,40 +3654,392 @@ Write out the current server config as YAML to stdout.`,
 			Default:     "https://api.openai.com/v1/",
 			Group:       &deploymentGroupAIBridge,
 			YAML:        "openai_base_url",
-			Hidden:      true,
 		},
 		{
-			Name:        "AIBridge OpenAI Key",
+			Name:        "AI Bridge OpenAI Key",
 			Description: "The key to authenticate against the OpenAI API.",
 			Flag:        "aibridge-openai-key",
 			Env:         "CODER_AIBRIDGE_OPENAI_KEY",
 			Value:       &c.AI.BridgeConfig.OpenAI.Key,
 			Default:     "",
 			Group:       &deploymentGroupAIBridge,
-			YAML:        "openai_key",
-			Hidden:      true,
+			Annotations: serpent.Annotations{}.Mark(annotationSecretKey, "true"),
 		},
 		{
-			Name:        "AIBridge Anthropic Base URL",
+			Name:        "AI Bridge Anthropic Base URL",
 			Description: "The base URL of the Anthropic API.",
 			Flag:        "aibridge-anthropic-base-url",
 			Env:         "CODER_AIBRIDGE_ANTHROPIC_BASE_URL",
 			Value:       &c.AI.BridgeConfig.Anthropic.BaseURL,
 			Default:     "https://api.anthropic.com/",
 			Group:       &deploymentGroupAIBridge,
-			YAML:        "base_url",
-			Hidden:      true,
+			YAML:        "anthropic_base_url",
 		},
 		{
-			Name:        "AIBridge Anthropic KEY",
+			Name:        "AI Bridge Anthropic Key",
 			Description: "The key to authenticate against the Anthropic API.",
 			Flag:        "aibridge-anthropic-key",
 			Env:         "CODER_AIBRIDGE_ANTHROPIC_KEY",
 			Value:       &c.AI.BridgeConfig.Anthropic.Key,
 			Default:     "",
 			Group:       &deploymentGroupAIBridge,
-			YAML:        "key",
+			Annotations: serpent.Annotations{}.Mark(annotationSecretKey, "true"),
+		},
+		{
+			Name: "AI Bridge Bedrock Base URL",
+			Description: "The base URL to use for the AWS Bedrock API. Use this setting to specify an exact URL to use. Takes precedence " +
+				"over CODER_AIBRIDGE_BEDROCK_REGION.",
+			Flag:    "aibridge-bedrock-base-url",
+			Env:     "CODER_AIBRIDGE_BEDROCK_BASE_URL",
+			Value:   &c.AI.BridgeConfig.Bedrock.BaseURL,
+			Default: "",
+			Group:   &deploymentGroupAIBridge,
+			YAML:    "bedrock_base_url",
+		},
+		{
+			Name: "AI Bridge Bedrock Region",
+			Description: "The AWS Bedrock API region to use. Constructs a base URL to use for the AWS Bedrock API in the form of " +
+				"'https://bedrock-runtime.<region>.amazonaws.com'.",
+			Flag:    "aibridge-bedrock-region",
+			Env:     "CODER_AIBRIDGE_BEDROCK_REGION",
+			Value:   &c.AI.BridgeConfig.Bedrock.Region,
+			Default: "",
+			Group:   &deploymentGroupAIBridge,
+			YAML:    "bedrock_region",
+		},
+		{
+			Name:        "AI Bridge Bedrock Access Key",
+			Description: "The access key to authenticate against the AWS Bedrock API.",
+			Flag:        "aibridge-bedrock-access-key",
+			Env:         "CODER_AIBRIDGE_BEDROCK_ACCESS_KEY",
+			Value:       &c.AI.BridgeConfig.Bedrock.AccessKey,
+			Default:     "",
+			Group:       &deploymentGroupAIBridge,
+			Annotations: serpent.Annotations{}.Mark(annotationSecretKey, "true"),
+		},
+		{
+			Name:        "AI Bridge Bedrock Access Key Secret",
+			Description: "The access key secret to use with the access key to authenticate against the AWS Bedrock API.",
+			Flag:        "aibridge-bedrock-access-key-secret",
+			Env:         "CODER_AIBRIDGE_BEDROCK_ACCESS_KEY_SECRET",
+			Value:       &c.AI.BridgeConfig.Bedrock.AccessKeySecret,
+			Default:     "",
+			Group:       &deploymentGroupAIBridge,
+			Annotations: serpent.Annotations{}.Mark(annotationSecretKey, "true"),
+		},
+		{
+			Name:        "AI Bridge Bedrock Model",
+			Description: "The model to use when making requests to the AWS Bedrock API.",
+			Flag:        "aibridge-bedrock-model",
+			Env:         "CODER_AIBRIDGE_BEDROCK_MODEL",
+			Value:       &c.AI.BridgeConfig.Bedrock.Model,
+			Default:     "global.anthropic.claude-sonnet-4-5-20250929-v1:0", // See https://docs.claude.com/en/api/claude-on-amazon-bedrock#accessing-bedrock.
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "bedrock_model",
+		},
+		{
+			Name:        "AI Bridge Bedrock Small Fast Model",
+			Description: "The small fast model to use when making requests to the AWS Bedrock API. Claude Code uses Haiku-class models to perform background tasks. See https://docs.claude.com/en/docs/claude-code/settings#environment-variables.",
+			Flag:        "aibridge-bedrock-small-fastmodel",
+			Env:         "CODER_AIBRIDGE_BEDROCK_SMALL_FAST_MODEL",
+			Value:       &c.AI.BridgeConfig.Bedrock.SmallFastModel,
+			Default:     "global.anthropic.claude-haiku-4-5-20251001-v1:0", // See https://docs.claude.com/en/api/claude-on-amazon-bedrock#accessing-bedrock.
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "bedrock_small_fast_model",
+		},
+		{
+			Name:        "AI Bridge Inject Coder MCP tools",
+			Description: "Deprecated: Injected MCP in AI Bridge is deprecated and will be removed in a future release. Whether to inject Coder's MCP tools into intercepted AI Bridge requests (requires the \"oauth2\" and \"mcp-server-http\" experiments to be enabled).",
+			Flag:        "aibridge-inject-coder-mcp-tools",
+			Env:         "CODER_AIBRIDGE_INJECT_CODER_MCP_TOOLS",
+			Value:       &c.AI.BridgeConfig.InjectCoderMCPTools,
+			Default:     "false",
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "inject_coder_mcp_tools",
 			Hidden:      true,
+		},
+		{
+			Name:        "AI Bridge Data Retention Duration",
+			Description: "Length of time to retain data such as interceptions and all related records (token, prompt, tool use).",
+			Flag:        "aibridge-retention",
+			Env:         "CODER_AIBRIDGE_RETENTION",
+			Value:       &c.AI.BridgeConfig.Retention,
+			Default:     "60d",
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "retention",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name:        "AI Bridge Max Concurrency",
+			Description: "Maximum number of concurrent AI Bridge requests per replica. Set to 0 to disable (unlimited).",
+			Flag:        "aibridge-max-concurrency",
+			Env:         "CODER_AIBRIDGE_MAX_CONCURRENCY",
+			Value:       &c.AI.BridgeConfig.MaxConcurrency,
+			Default:     "0",
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "max_concurrency",
+		},
+		{
+			Name:        "AI Bridge Rate Limit",
+			Description: "Maximum number of AI Bridge requests per second per replica. Set to 0 to disable (unlimited).",
+			Flag:        "aibridge-rate-limit",
+			Env:         "CODER_AIBRIDGE_RATE_LIMIT",
+			Value:       &c.AI.BridgeConfig.RateLimit,
+			Default:     "0",
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "rate_limit",
+		},
+		{
+			Name:        "AI Bridge Structured Logging",
+			Description: "Emit structured logs for AI Bridge interception records. Use this for exporting these records to external SIEM or observability systems.",
+			Flag:        "aibridge-structured-logging",
+			Env:         "CODER_AIBRIDGE_STRUCTURED_LOGGING",
+			Value:       &c.AI.BridgeConfig.StructuredLogging,
+			Default:     "false",
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "structured_logging",
+		},
+		{
+			Name: "AI Bridge Send Actor Headers",
+			Description: "Once enabled, extra headers will be added to upstream requests to identify the user (actor) making requests to AI Bridge. " +
+				"This is only needed if you are using a proxy between AI Bridge and an upstream AI provider. " +
+				"This will send X-Ai-Bridge-Actor-Id (the ID of the user making the request) and X-Ai-Bridge-Actor-Metadata-Username (their username).",
+			Flag:    "aibridge-send-actor-headers",
+			Env:     "CODER_AIBRIDGE_SEND_ACTOR_HEADERS",
+			Value:   &c.AI.BridgeConfig.SendActorHeaders,
+			Default: "false",
+			Group:   &deploymentGroupAIBridge,
+			YAML:    "send_actor_headers",
+		},
+		{
+			Name:        "AI Bridge Circuit Breaker Enabled",
+			Description: "Enable the circuit breaker to protect against cascading failures from upstream AI provider rate limits (429, 503, 529 overloaded).",
+			Flag:        "aibridge-circuit-breaker-enabled",
+			Env:         "CODER_AIBRIDGE_CIRCUIT_BREAKER_ENABLED",
+			Value:       &c.AI.BridgeConfig.CircuitBreakerEnabled,
+			Default:     "false",
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "circuit_breaker_enabled",
+		},
+		{
+			Name:        "AI Bridge Circuit Breaker Failure Threshold",
+			Description: "Number of consecutive failures that triggers the circuit breaker to open.",
+			Flag:        "aibridge-circuit-breaker-failure-threshold",
+			Env:         "CODER_AIBRIDGE_CIRCUIT_BREAKER_FAILURE_THRESHOLD",
+			Value: serpent.Validate(&c.AI.BridgeConfig.CircuitBreakerFailureThreshold, func(value *serpent.Int64) error {
+				if value.Value() <= 0 || value.Value() > 100 {
+					return xerrors.New("must be between 1 and 100")
+				}
+				return nil
+			}),
+			Default: "5",
+			Hidden:  true,
+			Group:   &deploymentGroupAIBridge,
+			YAML:    "circuit_breaker_failure_threshold",
+		},
+		{
+			Name:        "AI Bridge Circuit Breaker Interval",
+			Description: "Cyclic period of the closed state for clearing internal failure counts.",
+			Flag:        "aibridge-circuit-breaker-interval",
+			Env:         "CODER_AIBRIDGE_CIRCUIT_BREAKER_INTERVAL",
+			Value:       &c.AI.BridgeConfig.CircuitBreakerInterval,
+			Default:     "10s",
+			Hidden:      true,
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "circuit_breaker_interval",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name:        "AI Bridge Circuit Breaker Timeout",
+			Description: "How long the circuit breaker stays open before transitioning to half-open state.",
+			Flag:        "aibridge-circuit-breaker-timeout",
+			Env:         "CODER_AIBRIDGE_CIRCUIT_BREAKER_TIMEOUT",
+			Value:       &c.AI.BridgeConfig.CircuitBreakerTimeout,
+			Default:     "30s",
+			Hidden:      true,
+			Group:       &deploymentGroupAIBridge,
+			YAML:        "circuit_breaker_timeout",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name:        "AI Bridge Circuit Breaker Max Requests",
+			Description: "Maximum number of requests allowed in half-open state before deciding to close or re-open the circuit.",
+			Flag:        "aibridge-circuit-breaker-max-requests",
+			Env:         "CODER_AIBRIDGE_CIRCUIT_BREAKER_MAX_REQUESTS",
+			Value: serpent.Validate(&c.AI.BridgeConfig.CircuitBreakerMaxRequests, func(value *serpent.Int64) error {
+				if value.Value() <= 0 || value.Value() > 100 {
+					return xerrors.New("must be between 1 and 100")
+				}
+				return nil
+			}),
+			Default: "3",
+			Hidden:  true,
+			Group:   &deploymentGroupAIBridge,
+			YAML:    "circuit_breaker_max_requests",
+		},
+
+		// AI Bridge Proxy Options
+		{
+			Name:        "AI Bridge Proxy Enabled",
+			Description: "Enable the AI Bridge MITM Proxy for intercepting and decrypting AI provider requests.",
+			Flag:        "aibridge-proxy-enabled",
+			Env:         "CODER_AIBRIDGE_PROXY_ENABLED",
+			Value:       &c.AI.BridgeProxyConfig.Enabled,
+			Default:     "false",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "enabled",
+		},
+		{
+			Name:        "AI Bridge Proxy Listen Address",
+			Description: "The address the AI Bridge Proxy will listen on.",
+			Flag:        "aibridge-proxy-listen-addr",
+			Env:         "CODER_AIBRIDGE_PROXY_LISTEN_ADDR",
+			Value:       &c.AI.BridgeProxyConfig.ListenAddr,
+			Default:     ":8888",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "listen_addr",
+		},
+		{
+			Name:        "AI Bridge Proxy TLS Certificate File",
+			Description: "Path to the TLS certificate file for the AI Bridge Proxy listener. Must be set together with AI Bridge Proxy TLS Key File.",
+			Flag:        "aibridge-proxy-tls-cert-file",
+			Env:         "CODER_AIBRIDGE_PROXY_TLS_CERT_FILE",
+			Value:       &c.AI.BridgeProxyConfig.TLSCertFile,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "tls_cert_file",
+		},
+		{
+			Name:        "AI Bridge Proxy TLS Key File",
+			Description: "Path to the TLS private key file for the AI Bridge Proxy listener. Must be set together with AI Bridge Proxy TLS Certificate File.",
+			Flag:        "aibridge-proxy-tls-key-file",
+			Env:         "CODER_AIBRIDGE_PROXY_TLS_KEY_FILE",
+			Value:       &c.AI.BridgeProxyConfig.TLSKeyFile,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "tls_key_file",
+		},
+		{
+			Name:        "AI Bridge Proxy MITM CA Certificate File",
+			Description: "Path to the CA certificate file used to intercept (MITM) HTTPS traffic from AI clients. This CA must be trusted by AI clients for the proxy to decrypt their requests.",
+			Flag:        "aibridge-proxy-cert-file",
+			Env:         "CODER_AIBRIDGE_PROXY_CERT_FILE",
+			Value:       &c.AI.BridgeProxyConfig.MITMCertFile,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "cert_file",
+		},
+		{
+			Name:        "AI Bridge Proxy MITM CA Key File",
+			Description: "Path to the CA private key file used to intercept (MITM) HTTPS traffic from AI clients.",
+			Flag:        "aibridge-proxy-key-file",
+			Env:         "CODER_AIBRIDGE_PROXY_KEY_FILE",
+			Value:       &c.AI.BridgeProxyConfig.MITMKeyFile,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "key_file",
+		},
+		{
+			Name: "AI Bridge Proxy Domain Allowlist",
+			Description: "Comma-separated list of AI provider domains for which HTTPS traffic will be decrypted and routed through AI Bridge. " +
+				"Requests to other domains will be tunneled directly without decryption. " +
+				"Supported domains: api.anthropic.com, api.openai.com, api.individual.githubcopilot.com, api.business.githubcopilot.com, api.enterprise.githubcopilot.com, chatgpt.com.",
+			Flag:    "aibridge-proxy-domain-allowlist",
+			Env:     "CODER_AIBRIDGE_PROXY_DOMAIN_ALLOWLIST",
+			Value:   &c.AI.BridgeProxyConfig.DomainAllowlist,
+			Default: "api.anthropic.com,api.openai.com,api.individual.githubcopilot.com,api.business.githubcopilot.com,api.enterprise.githubcopilot.com,chatgpt.com",
+			Hidden:  true,
+			Group:   &deploymentGroupAIBridgeProxy,
+			YAML:    "domain_allowlist",
+		},
+		{
+			Name:        "AI Bridge Proxy Upstream Proxy",
+			Description: "URL of an upstream HTTP proxy to chain tunneled (non-allowlisted) requests through. Format: http://[user:pass@]host:port or https://[user:pass@]host:port.",
+			Flag:        "aibridge-proxy-upstream",
+			Env:         "CODER_AIBRIDGE_PROXY_UPSTREAM",
+			Value:       &c.AI.BridgeProxyConfig.UpstreamProxy,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "upstream_proxy",
+		},
+		{
+			Name:        "AI Bridge Proxy Upstream Proxy CA",
+			Description: "Path to a PEM-encoded CA certificate to trust for the upstream proxy's TLS connection. Only needed for HTTPS upstream proxies with certificates not trusted by the system. If not provided, the system certificate pool is used.",
+			Flag:        "aibridge-proxy-upstream-ca",
+			Env:         "CODER_AIBRIDGE_PROXY_UPSTREAM_CA",
+			Value:       &c.AI.BridgeProxyConfig.UpstreamProxyCA,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "upstream_proxy_ca",
+		},
+		{
+			Name:        "AI Bridge Proxy Allowed Private CIDRs",
+			Description: "Comma-separated list of CIDR ranges that are permitted even though they fall within blocked private/reserved IP ranges. By default all private ranges are blocked to prevent SSRF attacks. Use this to allow access to specific internal networks.",
+			Flag:        "aibridge-proxy-allowed-private-cidrs",
+			Env:         "CODER_AIBRIDGE_PROXY_ALLOWED_PRIVATE_CIDRS",
+			Value:       &c.AI.BridgeProxyConfig.AllowedPrivateCIDRs,
+			Default:     "",
+			Group:       &deploymentGroupAIBridgeProxy,
+			YAML:        "allowed_private_cidrs",
+		},
+
+		// Retention settings
+		{
+			Name:        "Audit Logs Retention",
+			Description: "How long audit log entries are retained. Set to 0 to disable (keep indefinitely). We advise keeping audit logs for at least a year, and in accordance with your compliance requirements.",
+			Flag:        "audit-logs-retention",
+			Env:         "CODER_AUDIT_LOGS_RETENTION",
+			Value:       &c.Retention.AuditLogs,
+			Default:     "0",
+			Group:       &deploymentGroupRetention,
+			YAML:        "audit_logs",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name:        "Connection Logs Retention",
+			Description: "How long connection log entries are retained. Set to 0 to disable (keep indefinitely).",
+			Flag:        "connection-logs-retention",
+			Env:         "CODER_CONNECTION_LOGS_RETENTION",
+			Value:       &c.Retention.ConnectionLogs,
+			Default:     "0",
+			Group:       &deploymentGroupRetention,
+			YAML:        "connection_logs",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name:        "API Keys Retention",
+			Description: "How long expired API keys are retained before being deleted. Keeping expired keys allows the backend to return a more helpful error when a user tries to use an expired key. Set to 0 to disable automatic deletion of expired keys.",
+			Flag:        "api-keys-retention",
+			Env:         "CODER_API_KEYS_RETENTION",
+			Value:       &c.Retention.APIKeys,
+			Default:     "7d",
+			Group:       &deploymentGroupRetention,
+			YAML:        "api_keys",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name:        "Workspace Agent Logs Retention",
+			Description: "How long workspace agent logs are retained. Logs from non-latest builds are deleted if the agent hasn't connected within this period. Logs from the latest build are always retained. Set to 0 to disable automatic deletion.",
+			Flag:        "workspace-agent-logs-retention",
+			Env:         "CODER_WORKSPACE_AGENT_LOGS_RETENTION",
+			Value:       &c.Retention.WorkspaceAgentLogs,
+			Default:     "7d",
+			Group:       &deploymentGroupRetention,
+			YAML:        "workspace_agent_logs",
+			Annotations: serpent.Annotations{}.Mark(annotationFormatDuration, "true"),
+		},
+		{
+			Name: "Enable Authorization Recordings",
+			Description: "All api requests will have a header including all authorization calls made during the request. " +
+				"This is used for debugging purposes and only available for dev builds.",
+			Required: false,
+			Flag:     "enable-authz-recordings",
+			Env:      "CODER_ENABLE_AUTHZ_RECORDINGS",
+			Default:  "false",
+			Value:    &c.EnableAuthzRecording,
+			// Do not show this option ever. It is a developer tool only, and not to be
+			// used externally.
+			Hidden: true,
 		},
 	}
 
@@ -3302,6 +4050,21 @@ type AIBridgeConfig struct {
 	Enabled   serpent.Bool            `json:"enabled" typescript:",notnull"`
 	OpenAI    AIBridgeOpenAIConfig    `json:"openai" typescript:",notnull"`
 	Anthropic AIBridgeAnthropicConfig `json:"anthropic" typescript:",notnull"`
+	Bedrock   AIBridgeBedrockConfig   `json:"bedrock" typescript:",notnull"`
+	// Deprecated: Injected MCP in AI Bridge is deprecated and will be removed in a future release.
+	InjectCoderMCPTools serpent.Bool     `json:"inject_coder_mcp_tools" typescript:",notnull"`
+	Retention           serpent.Duration `json:"retention" typescript:",notnull"`
+	MaxConcurrency      serpent.Int64    `json:"max_concurrency" typescript:",notnull"`
+	RateLimit           serpent.Int64    `json:"rate_limit" typescript:",notnull"`
+	StructuredLogging   serpent.Bool     `json:"structured_logging" typescript:",notnull"`
+	SendActorHeaders    serpent.Bool     `json:"send_actor_headers" typescript:",notnull"`
+	// Circuit breaker protects against cascading failures from upstream AI
+	// provider rate limits (429, 503, 529 overloaded).
+	CircuitBreakerEnabled          serpent.Bool     `json:"circuit_breaker_enabled" typescript:",notnull"`
+	CircuitBreakerFailureThreshold serpent.Int64    `json:"circuit_breaker_failure_threshold" typescript:",notnull"`
+	CircuitBreakerInterval         serpent.Duration `json:"circuit_breaker_interval" typescript:",notnull"`
+	CircuitBreakerTimeout          serpent.Duration `json:"circuit_breaker_timeout" typescript:",notnull"`
+	CircuitBreakerMaxRequests      serpent.Int64    `json:"circuit_breaker_max_requests" typescript:",notnull"`
 }
 
 type AIBridgeOpenAIConfig struct {
@@ -3314,8 +4077,37 @@ type AIBridgeAnthropicConfig struct {
 	Key     serpent.String `json:"key" typescript:",notnull"`
 }
 
+type AIBridgeBedrockConfig struct {
+	BaseURL         serpent.String `json:"base_url" typescript:",notnull"`
+	Region          serpent.String `json:"region" typescript:",notnull"`
+	AccessKey       serpent.String `json:"access_key" typescript:",notnull"`
+	AccessKeySecret serpent.String `json:"access_key_secret" typescript:",notnull"`
+	Model           serpent.String `json:"model" typescript:",notnull"`
+	SmallFastModel  serpent.String `json:"small_fast_model" typescript:",notnull"`
+}
+
+type AIBridgeProxyConfig struct {
+	Enabled             serpent.Bool        `json:"enabled" typescript:",notnull"`
+	ListenAddr          serpent.String      `json:"listen_addr" typescript:",notnull"`
+	TLSCertFile         serpent.String      `json:"tls_cert_file" typescript:",notnull"`
+	TLSKeyFile          serpent.String      `json:"tls_key_file" typescript:",notnull"`
+	MITMCertFile        serpent.String      `json:"cert_file" typescript:",notnull"`
+	MITMKeyFile         serpent.String      `json:"key_file" typescript:",notnull"`
+	DomainAllowlist     serpent.StringArray `json:"domain_allowlist" typescript:",notnull"`
+	UpstreamProxy       serpent.String      `json:"upstream_proxy" typescript:",notnull"`
+	UpstreamProxyCA     serpent.String      `json:"upstream_proxy_ca" typescript:",notnull"`
+	AllowedPrivateCIDRs serpent.StringArray `json:"allowed_private_cidrs" typescript:",notnull"`
+}
+
+type ChatConfig struct {
+	AcquireBatchSize    serpent.Int64 `json:"acquire_batch_size" typescript:",notnull"`
+	DebugLoggingEnabled serpent.Bool  `json:"debug_logging_enabled" typescript:",notnull"`
+}
+
 type AIConfig struct {
-	BridgeConfig AIBridgeConfig `json:"bridge,omitempty"`
+	BridgeConfig      AIBridgeConfig      `json:"bridge,omitempty"`
+	BridgeProxyConfig AIBridgeProxyConfig `json:"aibridge_proxy,omitempty"`
+	Chat              ChatConfig          `json:"chat,omitempty" typescript:",notnull"`
 }
 
 type SupportConfig struct {
@@ -3325,7 +4117,9 @@ type SupportConfig struct {
 type LinkConfig struct {
 	Name   string `json:"name" yaml:"name"`
 	Target string `json:"target" yaml:"target"`
-	Icon   string `json:"icon" yaml:"icon" enums:"bug,chat,docs"`
+	Icon   string `json:"icon" yaml:"icon" enums:"bug,chat,docs,star"`
+
+	Location string `json:"location,omitempty" yaml:"location,omitempty" enums:"navbar,dropdown"`
 }
 
 // Validate checks cross-field constraints for deployment values.
@@ -3557,15 +4351,15 @@ type Experiment string
 
 const (
 	// Add new experiments here!
-	ExperimentExample            Experiment = "example"              // This isn't used for anything.
-	ExperimentAutoFillParameters Experiment = "auto-fill-parameters" // This should not be taken out of experiments until we have redesigned the feature.
-	ExperimentNotifications      Experiment = "notifications"        // Sends notifications via SMTP and webhooks following certain events.
-	ExperimentWorkspaceUsage     Experiment = "workspace-usage"      // Enables the new workspace usage tracking.
-	ExperimentWebPush            Experiment = "web-push"             // Enables web push notifications through the browser.
-	ExperimentOAuth2             Experiment = "oauth2"               // Enables OAuth2 provider functionality.
-	ExperimentMCPServerHTTP      Experiment = "mcp-server-http"      // Enables the MCP HTTP server functionality.
-	ExperimentWorkspaceSharing   Experiment = "workspace-sharing"    // Enables updating workspace ACLs for sharing with users and groups.
-	ExperimentAIBridge           Experiment = "aibridge"             // Enables AI Bridge functionality.
+	ExperimentExample               Experiment = "example"                 // This isn't used for anything.
+	ExperimentAutoFillParameters    Experiment = "auto-fill-parameters"    // This should not be taken out of experiments until we have redesigned the feature.
+	ExperimentNotifications         Experiment = "notifications"           // Sends notifications via SMTP and webhooks following certain events.
+	ExperimentWorkspaceUsage        Experiment = "workspace-usage"         // Enables the new workspace usage tracking.
+	ExperimentWebPush               Experiment = "web-push"                // Enables web push notifications through the browser.
+	ExperimentOAuth2                Experiment = "oauth2"                  // Enables OAuth2 provider functionality.
+	ExperimentAgents                Experiment = "agents"                  // Enables agent-powered chat functionality.
+	ExperimentMCPServerHTTP         Experiment = "mcp-server-http"         // Enables the MCP HTTP server functionality.
+	ExperimentWorkspaceBuildUpdates Experiment = "workspace-build-updates" // Enables publishing workspace build updates to the all builds pubsub channel.
 )
 
 func (e Experiment) DisplayName() string {
@@ -3582,12 +4376,12 @@ func (e Experiment) DisplayName() string {
 		return "Browser Push Notifications"
 	case ExperimentOAuth2:
 		return "OAuth2 Provider Functionality"
+	case ExperimentAgents:
+		return "Agents"
 	case ExperimentMCPServerHTTP:
 		return "MCP HTTP Server Functionality"
-	case ExperimentWorkspaceSharing:
-		return "Workspace Sharing"
-	case ExperimentAIBridge:
-		return "AI Bridge"
+	case ExperimentWorkspaceBuildUpdates:
+		return "Workspace Build Updates Channel"
 	default:
 		// Split on hyphen and convert to title case
 		// e.g. "web-push" -> "Web Push", "mcp-server-http" -> "Mcp Server Http"
@@ -3604,15 +4398,16 @@ var ExperimentsKnown = Experiments{
 	ExperimentWorkspaceUsage,
 	ExperimentWebPush,
 	ExperimentOAuth2,
+	ExperimentAgents,
 	ExperimentMCPServerHTTP,
-	ExperimentWorkspaceSharing,
-	ExperimentAIBridge,
+	ExperimentWorkspaceBuildUpdates,
 }
 
 // ExperimentsSafe should include all experiments that are safe for
 // users to opt-in to via --experimental='*'.
 // Experiments that are not ready for consumption by all users should
 // not be included here and will be essentially hidden.
+// TODO: Add ExperimentAgents to ExperimentsSafe once it is safe for general use.
 var ExperimentsSafe = Experiments{}
 
 // Experiments is a list of experiments.
@@ -3846,4 +4641,29 @@ func (c CryptoKey) CanVerify(now time.Time) bool {
 	hasSecret := c.Secret != ""
 	beforeDelete := c.DeletesAt.IsZero() || now.Before(c.DeletesAt)
 	return hasSecret && beforeDelete
+}
+
+// ComputeMaxIdleConns calculates the effective maxIdleConns value. If
+// configuredIdle is "auto", it returns maxOpen/3 with a minimum of 1. If
+// configuredIdle exceeds maxOpen, it returns an error.
+func ComputeMaxIdleConns(maxOpen int, configuredIdle string) (int, error) {
+	configuredIdle = strings.TrimSpace(configuredIdle)
+	if configuredIdle == PostgresConnMaxIdleAuto {
+		computed := maxOpen / 3
+		if computed < 1 {
+			return 1, nil
+		}
+		return computed, nil
+	}
+	idle, err := strconv.Atoi(configuredIdle)
+	if err != nil {
+		return 0, xerrors.Errorf("invalid max idle connections %q: must be %q or >= 0", configuredIdle, PostgresConnMaxIdleAuto)
+	}
+	if idle < 0 {
+		return 0, xerrors.Errorf("max idle connections must be %q or >= 0", PostgresConnMaxIdleAuto)
+	}
+	if idle > maxOpen {
+		return 0, xerrors.Errorf("max idle connections (%d) cannot exceed max open connections (%d)", idle, maxOpen)
+	}
+	return idle, nil
 }

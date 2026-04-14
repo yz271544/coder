@@ -36,6 +36,10 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/members
         "organization_id": "string"
       }
     ],
+    "has_ai_seat": true,
+    "is_service_account": true,
+    "last_seen_at": "2019-08-24T14:15:22Z",
+    "login_type": "",
     "name": "string",
     "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
     "roles": [
@@ -45,8 +49,11 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/members
         "organization_id": "string"
       }
     ],
+    "status": "active",
     "updated_at": "2019-08-24T14:15:22Z",
+    "user_created_at": "2019-08-24T14:15:22Z",
     "user_id": "a169451c-8525-4352-b8ca-070dd449a1a5",
+    "user_updated_at": "2019-08-24T14:15:22Z",
     "username": "string"
   }
 ]
@@ -62,22 +69,36 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/members
 
 Status Code **200**
 
-| Name                 | Type              | Required | Restrictions | Description |
-|----------------------|-------------------|----------|--------------|-------------|
-| `[array item]`       | array             | false    |              |             |
-| `» avatar_url`       | string            | false    |              |             |
-| `» created_at`       | string(date-time) | false    |              |             |
-| `» email`            | string            | false    |              |             |
-| `» global_roles`     | array             | false    |              |             |
-| `»» display_name`    | string            | false    |              |             |
-| `»» name`            | string            | false    |              |             |
-| `»» organization_id` | string            | false    |              |             |
-| `» name`             | string            | false    |              |             |
-| `» organization_id`  | string(uuid)      | false    |              |             |
-| `» roles`            | array             | false    |              |             |
-| `» updated_at`       | string(date-time) | false    |              |             |
-| `» user_id`          | string(uuid)      | false    |              |             |
-| `» username`         | string            | false    |              |             |
+| Name                   | Type                                                 | Required | Restrictions | Description                                                                                      |
+|------------------------|------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------|
+| `[array item]`         | array                                                | false    |              |                                                                                                  |
+| `» avatar_url`         | string                                               | false    |              |                                                                                                  |
+| `» created_at`         | string(date-time)                                    | false    |              |                                                                                                  |
+| `» email`              | string                                               | false    |              |                                                                                                  |
+| `» global_roles`       | array                                                | false    |              |                                                                                                  |
+| `»» display_name`      | string                                               | false    |              |                                                                                                  |
+| `»» name`              | string                                               | false    |              |                                                                                                  |
+| `»» organization_id`   | string                                               | false    |              |                                                                                                  |
+| `» has_ai_seat`        | boolean                                              | false    |              | Has ai seat intentionally omits omitempty so the API always includes the field, even when false. |
+| `» is_service_account` | boolean                                              | false    |              |                                                                                                  |
+| `» last_seen_at`       | string(date-time)                                    | false    |              |                                                                                                  |
+| `» login_type`         | [codersdk.LoginType](schemas.md#codersdklogintype)   | false    |              |                                                                                                  |
+| `» name`               | string                                               | false    |              |                                                                                                  |
+| `» organization_id`    | string(uuid)                                         | false    |              |                                                                                                  |
+| `» roles`              | array                                                | false    |              |                                                                                                  |
+| `» status`             | [codersdk.UserStatus](schemas.md#codersdkuserstatus) | false    |              |                                                                                                  |
+| `» updated_at`         | string(date-time)                                    | false    |              |                                                                                                  |
+| `» user_created_at`    | string(date-time)                                    | false    |              |                                                                                                  |
+| `» user_id`            | string(uuid)                                         | false    |              |                                                                                                  |
+| `» user_updated_at`    | string(date-time)                                    | false    |              |                                                                                                  |
+| `» username`           | string                                               | false    |              |                                                                                                  |
+
+#### Enumerated Values
+
+| Property     | Value(s)                                          |
+|--------------|---------------------------------------------------|
+| `login_type` | ``, `github`, `none`, `oidc`, `password`, `token` |
+| `status`     | `active`, `suspended`                             |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -112,6 +133,13 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/members
     "display_name": "string",
     "name": "string",
     "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
+    "organization_member_permissions": [
+      {
+        "action": "application_connect",
+        "negate": true,
+        "resource_type": "*"
+      }
+    ],
     "organization_permissions": [
       {
         "action": "application_connect",
@@ -147,86 +175,32 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/members
 
 Status Code **200**
 
-| Name                         | Type                                                     | Required | Restrictions | Description                                                                                     |
-|------------------------------|----------------------------------------------------------|----------|--------------|-------------------------------------------------------------------------------------------------|
-| `[array item]`               | array                                                    | false    |              |                                                                                                 |
-| `» assignable`               | boolean                                                  | false    |              |                                                                                                 |
-| `» built_in`                 | boolean                                                  | false    |              | Built in roles are immutable                                                                    |
-| `» display_name`             | string                                                   | false    |              |                                                                                                 |
-| `» name`                     | string                                                   | false    |              |                                                                                                 |
-| `» organization_id`          | string(uuid)                                             | false    |              |                                                                                                 |
-| `» organization_permissions` | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above. |
-| `»» action`                  | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                 |
-| `»» negate`                  | boolean                                                  | false    |              | Negate makes this a negative permission                                                         |
-| `»» resource_type`           | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                 |
-| `» site_permissions`         | array                                                    | false    |              |                                                                                                 |
-| `» user_permissions`         | array                                                    | false    |              |                                                                                                 |
+| Name                                | Type                                                     | Required | Restrictions | Description                                                                                            |
+|-------------------------------------|----------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------------|
+| `[array item]`                      | array                                                    | false    |              |                                                                                                        |
+| `» assignable`                      | boolean                                                  | false    |              |                                                                                                        |
+| `» built_in`                        | boolean                                                  | false    |              | Built in roles are immutable                                                                           |
+| `» display_name`                    | string                                                   | false    |              |                                                                                                        |
+| `» name`                            | string                                                   | false    |              |                                                                                                        |
+| `» organization_id`                 | string(uuid)                                             | false    |              |                                                                                                        |
+| `» organization_member_permissions` | array                                                    | false    |              | Organization member permissions are specific for the organization in the field 'OrganizationID' above. |
+| `»» action`                         | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                        |
+| `»» negate`                         | boolean                                                  | false    |              | Negate makes this a negative permission                                                                |
+| `»» resource_type`                  | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                        |
+| `» organization_permissions`        | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above.        |
+| `» site_permissions`                | array                                                    | false    |              |                                                                                                        |
+| `» user_permissions`                | array                                                    | false    |              |                                                                                                        |
 
 #### Enumerated Values
 
-| Property        | Value                              |
-|-----------------|------------------------------------|
-| `action`        | `application_connect`              |
-| `action`        | `assign`                           |
-| `action`        | `create`                           |
-| `action`        | `create_agent`                     |
-| `action`        | `delete`                           |
-| `action`        | `delete_agent`                     |
-| `action`        | `read`                             |
-| `action`        | `read_personal`                    |
-| `action`        | `ssh`                              |
-| `action`        | `unassign`                         |
-| `action`        | `update`                           |
-| `action`        | `update_personal`                  |
-| `action`        | `use`                              |
-| `action`        | `view_insights`                    |
-| `action`        | `start`                            |
-| `action`        | `stop`                             |
-| `resource_type` | `*`                                |
-| `resource_type` | `aibridge_interception`            |
-| `resource_type` | `api_key`                          |
-| `resource_type` | `assign_org_role`                  |
-| `resource_type` | `assign_role`                      |
-| `resource_type` | `audit_log`                        |
-| `resource_type` | `connection_log`                   |
-| `resource_type` | `crypto_key`                       |
-| `resource_type` | `debug_info`                       |
-| `resource_type` | `deployment_config`                |
-| `resource_type` | `deployment_stats`                 |
-| `resource_type` | `file`                             |
-| `resource_type` | `group`                            |
-| `resource_type` | `group_member`                     |
-| `resource_type` | `idpsync_settings`                 |
-| `resource_type` | `inbox_notification`               |
-| `resource_type` | `license`                          |
-| `resource_type` | `notification_message`             |
-| `resource_type` | `notification_preference`          |
-| `resource_type` | `notification_template`            |
-| `resource_type` | `oauth2_app`                       |
-| `resource_type` | `oauth2_app_code_token`            |
-| `resource_type` | `oauth2_app_secret`                |
-| `resource_type` | `organization`                     |
-| `resource_type` | `organization_member`              |
-| `resource_type` | `prebuilt_workspace`               |
-| `resource_type` | `provisioner_daemon`               |
-| `resource_type` | `provisioner_jobs`                 |
-| `resource_type` | `replicas`                         |
-| `resource_type` | `system`                           |
-| `resource_type` | `tailnet_coordinator`              |
-| `resource_type` | `template`                         |
-| `resource_type` | `usage_event`                      |
-| `resource_type` | `user`                             |
-| `resource_type` | `user_secret`                      |
-| `resource_type` | `webpush_subscription`             |
-| `resource_type` | `workspace`                        |
-| `resource_type` | `workspace_agent_devcontainers`    |
-| `resource_type` | `workspace_agent_resource_monitor` |
-| `resource_type` | `workspace_dormant`                |
-| `resource_type` | `workspace_proxy`                  |
+| Property        | Value(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `action`        | `application_connect`, `assign`, `create`, `create_agent`, `delete`, `delete_agent`, `read`, `read_personal`, `share`, `ssh`, `start`, `stop`, `unassign`, `update`, `update_agent`, `update_personal`, `use`, `view_insights`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `resource_type` | `*`, `aibridge_interception`, `api_key`, `assign_org_role`, `assign_role`, `audit_log`, `boundary_usage`, `chat`, `connection_log`, `crypto_key`, `debug_info`, `deployment_config`, `deployment_stats`, `file`, `group`, `group_member`, `idpsync_settings`, `inbox_notification`, `license`, `notification_message`, `notification_preference`, `notification_template`, `oauth2_app`, `oauth2_app_code_token`, `oauth2_app_secret`, `organization`, `organization_member`, `prebuilt_workspace`, `provisioner_daemon`, `provisioner_jobs`, `replicas`, `system`, `tailnet_coordinator`, `task`, `template`, `usage_event`, `user`, `user_secret`, `webpush_subscription`, `workspace`, `workspace_agent_devcontainers`, `workspace_agent_resource_monitor`, `workspace_dormant`, `workspace_proxy` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
-## Upsert a custom organization role
+## Update a custom organization role
 
 ### Code samples
 
@@ -246,6 +220,13 @@ curl -X PUT http://coder-server:8080/api/v2/organizations/{organization}/members
 {
   "display_name": "string",
   "name": "string",
+  "organization_member_permissions": [
+    {
+      "action": "application_connect",
+      "negate": true,
+      "resource_type": "*"
+    }
+  ],
   "organization_permissions": [
     {
       "action": "application_connect",
@@ -275,7 +256,7 @@ curl -X PUT http://coder-server:8080/api/v2/organizations/{organization}/members
 | Name           | In   | Type                                                               | Required | Description         |
 |----------------|------|--------------------------------------------------------------------|----------|---------------------|
 | `organization` | path | string(uuid)                                                       | true     | Organization ID     |
-| `body`         | body | [codersdk.CustomRoleRequest](schemas.md#codersdkcustomrolerequest) | true     | Upsert role request |
+| `body`         | body | [codersdk.CustomRoleRequest](schemas.md#codersdkcustomrolerequest) | true     | Update role request |
 
 ### Example responses
 
@@ -287,6 +268,13 @@ curl -X PUT http://coder-server:8080/api/v2/organizations/{organization}/members
     "display_name": "string",
     "name": "string",
     "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
+    "organization_member_permissions": [
+      {
+        "action": "application_connect",
+        "negate": true,
+        "resource_type": "*"
+      }
+    ],
     "organization_permissions": [
       {
         "action": "application_connect",
@@ -318,84 +306,30 @@ curl -X PUT http://coder-server:8080/api/v2/organizations/{organization}/members
 |--------|---------------------------------------------------------|-------------|---------------------------------------------------|
 | 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | array of [codersdk.Role](schemas.md#codersdkrole) |
 
-<h3 id="upsert-a-custom-organization-role-responseschema">Response Schema</h3>
+<h3 id="update-a-custom-organization-role-responseschema">Response Schema</h3>
 
 Status Code **200**
 
-| Name                         | Type                                                     | Required | Restrictions | Description                                                                                     |
-|------------------------------|----------------------------------------------------------|----------|--------------|-------------------------------------------------------------------------------------------------|
-| `[array item]`               | array                                                    | false    |              |                                                                                                 |
-| `» display_name`             | string                                                   | false    |              |                                                                                                 |
-| `» name`                     | string                                                   | false    |              |                                                                                                 |
-| `» organization_id`          | string(uuid)                                             | false    |              |                                                                                                 |
-| `» organization_permissions` | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above. |
-| `»» action`                  | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                 |
-| `»» negate`                  | boolean                                                  | false    |              | Negate makes this a negative permission                                                         |
-| `»» resource_type`           | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                 |
-| `» site_permissions`         | array                                                    | false    |              |                                                                                                 |
-| `» user_permissions`         | array                                                    | false    |              |                                                                                                 |
+| Name                                | Type                                                     | Required | Restrictions | Description                                                                                            |
+|-------------------------------------|----------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------------|
+| `[array item]`                      | array                                                    | false    |              |                                                                                                        |
+| `» display_name`                    | string                                                   | false    |              |                                                                                                        |
+| `» name`                            | string                                                   | false    |              |                                                                                                        |
+| `» organization_id`                 | string(uuid)                                             | false    |              |                                                                                                        |
+| `» organization_member_permissions` | array                                                    | false    |              | Organization member permissions are specific for the organization in the field 'OrganizationID' above. |
+| `»» action`                         | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                        |
+| `»» negate`                         | boolean                                                  | false    |              | Negate makes this a negative permission                                                                |
+| `»» resource_type`                  | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                        |
+| `» organization_permissions`        | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above.        |
+| `» site_permissions`                | array                                                    | false    |              |                                                                                                        |
+| `» user_permissions`                | array                                                    | false    |              |                                                                                                        |
 
 #### Enumerated Values
 
-| Property        | Value                              |
-|-----------------|------------------------------------|
-| `action`        | `application_connect`              |
-| `action`        | `assign`                           |
-| `action`        | `create`                           |
-| `action`        | `create_agent`                     |
-| `action`        | `delete`                           |
-| `action`        | `delete_agent`                     |
-| `action`        | `read`                             |
-| `action`        | `read_personal`                    |
-| `action`        | `ssh`                              |
-| `action`        | `unassign`                         |
-| `action`        | `update`                           |
-| `action`        | `update_personal`                  |
-| `action`        | `use`                              |
-| `action`        | `view_insights`                    |
-| `action`        | `start`                            |
-| `action`        | `stop`                             |
-| `resource_type` | `*`                                |
-| `resource_type` | `aibridge_interception`            |
-| `resource_type` | `api_key`                          |
-| `resource_type` | `assign_org_role`                  |
-| `resource_type` | `assign_role`                      |
-| `resource_type` | `audit_log`                        |
-| `resource_type` | `connection_log`                   |
-| `resource_type` | `crypto_key`                       |
-| `resource_type` | `debug_info`                       |
-| `resource_type` | `deployment_config`                |
-| `resource_type` | `deployment_stats`                 |
-| `resource_type` | `file`                             |
-| `resource_type` | `group`                            |
-| `resource_type` | `group_member`                     |
-| `resource_type` | `idpsync_settings`                 |
-| `resource_type` | `inbox_notification`               |
-| `resource_type` | `license`                          |
-| `resource_type` | `notification_message`             |
-| `resource_type` | `notification_preference`          |
-| `resource_type` | `notification_template`            |
-| `resource_type` | `oauth2_app`                       |
-| `resource_type` | `oauth2_app_code_token`            |
-| `resource_type` | `oauth2_app_secret`                |
-| `resource_type` | `organization`                     |
-| `resource_type` | `organization_member`              |
-| `resource_type` | `prebuilt_workspace`               |
-| `resource_type` | `provisioner_daemon`               |
-| `resource_type` | `provisioner_jobs`                 |
-| `resource_type` | `replicas`                         |
-| `resource_type` | `system`                           |
-| `resource_type` | `tailnet_coordinator`              |
-| `resource_type` | `template`                         |
-| `resource_type` | `usage_event`                      |
-| `resource_type` | `user`                             |
-| `resource_type` | `user_secret`                      |
-| `resource_type` | `webpush_subscription`             |
-| `resource_type` | `workspace`                        |
-| `resource_type` | `workspace_agent_devcontainers`    |
-| `resource_type` | `workspace_agent_resource_monitor` |
-| `resource_type` | `workspace_dormant`                |
-| `resource_type` | `workspace_proxy`                  |
+| Property        | Value(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `action`        | `application_connect`, `assign`, `create`, `create_agent`, `delete`, `delete_agent`, `read`, `read_personal`, `share`, `ssh`, `start`, `stop`, `unassign`, `update`, `update_agent`, `update_personal`, `use`, `view_insights`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `resource_type` | `*`, `aibridge_interception`, `api_key`, `assign_org_role`, `assign_role`, `audit_log`, `boundary_usage`, `chat`, `connection_log`, `crypto_key`, `debug_info`, `deployment_config`, `deployment_stats`, `file`, `group`, `group_member`, `idpsync_settings`, `inbox_notification`, `license`, `notification_message`, `notification_preference`, `notification_template`, `oauth2_app`, `oauth2_app_code_token`, `oauth2_app_secret`, `organization`, `organization_member`, `prebuilt_workspace`, `provisioner_daemon`, `provisioner_jobs`, `replicas`, `system`, `tailnet_coordinator`, `task`, `template`, `usage_event`, `user`, `user_secret`, `webpush_subscription`, `workspace`, `workspace_agent_devcontainers`, `workspace_agent_resource_monitor`, `workspace_dormant`, `workspace_proxy` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -419,6 +353,13 @@ curl -X POST http://coder-server:8080/api/v2/organizations/{organization}/member
 {
   "display_name": "string",
   "name": "string",
+  "organization_member_permissions": [
+    {
+      "action": "application_connect",
+      "negate": true,
+      "resource_type": "*"
+    }
+  ],
   "organization_permissions": [
     {
       "action": "application_connect",
@@ -460,6 +401,13 @@ curl -X POST http://coder-server:8080/api/v2/organizations/{organization}/member
     "display_name": "string",
     "name": "string",
     "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
+    "organization_member_permissions": [
+      {
+        "action": "application_connect",
+        "negate": true,
+        "resource_type": "*"
+      }
+    ],
     "organization_permissions": [
       {
         "action": "application_connect",
@@ -495,80 +443,26 @@ curl -X POST http://coder-server:8080/api/v2/organizations/{organization}/member
 
 Status Code **200**
 
-| Name                         | Type                                                     | Required | Restrictions | Description                                                                                     |
-|------------------------------|----------------------------------------------------------|----------|--------------|-------------------------------------------------------------------------------------------------|
-| `[array item]`               | array                                                    | false    |              |                                                                                                 |
-| `» display_name`             | string                                                   | false    |              |                                                                                                 |
-| `» name`                     | string                                                   | false    |              |                                                                                                 |
-| `» organization_id`          | string(uuid)                                             | false    |              |                                                                                                 |
-| `» organization_permissions` | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above. |
-| `»» action`                  | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                 |
-| `»» negate`                  | boolean                                                  | false    |              | Negate makes this a negative permission                                                         |
-| `»» resource_type`           | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                 |
-| `» site_permissions`         | array                                                    | false    |              |                                                                                                 |
-| `» user_permissions`         | array                                                    | false    |              |                                                                                                 |
+| Name                                | Type                                                     | Required | Restrictions | Description                                                                                            |
+|-------------------------------------|----------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------------|
+| `[array item]`                      | array                                                    | false    |              |                                                                                                        |
+| `» display_name`                    | string                                                   | false    |              |                                                                                                        |
+| `» name`                            | string                                                   | false    |              |                                                                                                        |
+| `» organization_id`                 | string(uuid)                                             | false    |              |                                                                                                        |
+| `» organization_member_permissions` | array                                                    | false    |              | Organization member permissions are specific for the organization in the field 'OrganizationID' above. |
+| `»» action`                         | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                        |
+| `»» negate`                         | boolean                                                  | false    |              | Negate makes this a negative permission                                                                |
+| `»» resource_type`                  | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                        |
+| `» organization_permissions`        | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above.        |
+| `» site_permissions`                | array                                                    | false    |              |                                                                                                        |
+| `» user_permissions`                | array                                                    | false    |              |                                                                                                        |
 
 #### Enumerated Values
 
-| Property        | Value                              |
-|-----------------|------------------------------------|
-| `action`        | `application_connect`              |
-| `action`        | `assign`                           |
-| `action`        | `create`                           |
-| `action`        | `create_agent`                     |
-| `action`        | `delete`                           |
-| `action`        | `delete_agent`                     |
-| `action`        | `read`                             |
-| `action`        | `read_personal`                    |
-| `action`        | `ssh`                              |
-| `action`        | `unassign`                         |
-| `action`        | `update`                           |
-| `action`        | `update_personal`                  |
-| `action`        | `use`                              |
-| `action`        | `view_insights`                    |
-| `action`        | `start`                            |
-| `action`        | `stop`                             |
-| `resource_type` | `*`                                |
-| `resource_type` | `aibridge_interception`            |
-| `resource_type` | `api_key`                          |
-| `resource_type` | `assign_org_role`                  |
-| `resource_type` | `assign_role`                      |
-| `resource_type` | `audit_log`                        |
-| `resource_type` | `connection_log`                   |
-| `resource_type` | `crypto_key`                       |
-| `resource_type` | `debug_info`                       |
-| `resource_type` | `deployment_config`                |
-| `resource_type` | `deployment_stats`                 |
-| `resource_type` | `file`                             |
-| `resource_type` | `group`                            |
-| `resource_type` | `group_member`                     |
-| `resource_type` | `idpsync_settings`                 |
-| `resource_type` | `inbox_notification`               |
-| `resource_type` | `license`                          |
-| `resource_type` | `notification_message`             |
-| `resource_type` | `notification_preference`          |
-| `resource_type` | `notification_template`            |
-| `resource_type` | `oauth2_app`                       |
-| `resource_type` | `oauth2_app_code_token`            |
-| `resource_type` | `oauth2_app_secret`                |
-| `resource_type` | `organization`                     |
-| `resource_type` | `organization_member`              |
-| `resource_type` | `prebuilt_workspace`               |
-| `resource_type` | `provisioner_daemon`               |
-| `resource_type` | `provisioner_jobs`                 |
-| `resource_type` | `replicas`                         |
-| `resource_type` | `system`                           |
-| `resource_type` | `tailnet_coordinator`              |
-| `resource_type` | `template`                         |
-| `resource_type` | `usage_event`                      |
-| `resource_type` | `user`                             |
-| `resource_type` | `user_secret`                      |
-| `resource_type` | `webpush_subscription`             |
-| `resource_type` | `workspace`                        |
-| `resource_type` | `workspace_agent_devcontainers`    |
-| `resource_type` | `workspace_agent_resource_monitor` |
-| `resource_type` | `workspace_dormant`                |
-| `resource_type` | `workspace_proxy`                  |
+| Property        | Value(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `action`        | `application_connect`, `assign`, `create`, `create_agent`, `delete`, `delete_agent`, `read`, `read_personal`, `share`, `ssh`, `start`, `stop`, `unassign`, `update`, `update_agent`, `update_personal`, `use`, `view_insights`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `resource_type` | `*`, `aibridge_interception`, `api_key`, `assign_org_role`, `assign_role`, `audit_log`, `boundary_usage`, `chat`, `connection_log`, `crypto_key`, `debug_info`, `deployment_config`, `deployment_stats`, `file`, `group`, `group_member`, `idpsync_settings`, `inbox_notification`, `license`, `notification_message`, `notification_preference`, `notification_template`, `oauth2_app`, `oauth2_app_code_token`, `oauth2_app_secret`, `organization`, `organization_member`, `prebuilt_workspace`, `provisioner_daemon`, `provisioner_jobs`, `replicas`, `system`, `tailnet_coordinator`, `task`, `template`, `usage_event`, `user`, `user_secret`, `webpush_subscription`, `workspace`, `workspace_agent_devcontainers`, `workspace_agent_resource_monitor`, `workspace_dormant`, `workspace_proxy` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -602,6 +496,13 @@ curl -X DELETE http://coder-server:8080/api/v2/organizations/{organization}/memb
     "display_name": "string",
     "name": "string",
     "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
+    "organization_member_permissions": [
+      {
+        "action": "application_connect",
+        "negate": true,
+        "resource_type": "*"
+      }
+    ],
     "organization_permissions": [
       {
         "action": "application_connect",
@@ -637,80 +538,92 @@ curl -X DELETE http://coder-server:8080/api/v2/organizations/{organization}/memb
 
 Status Code **200**
 
-| Name                         | Type                                                     | Required | Restrictions | Description                                                                                     |
-|------------------------------|----------------------------------------------------------|----------|--------------|-------------------------------------------------------------------------------------------------|
-| `[array item]`               | array                                                    | false    |              |                                                                                                 |
-| `» display_name`             | string                                                   | false    |              |                                                                                                 |
-| `» name`                     | string                                                   | false    |              |                                                                                                 |
-| `» organization_id`          | string(uuid)                                             | false    |              |                                                                                                 |
-| `» organization_permissions` | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above. |
-| `»» action`                  | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                 |
-| `»» negate`                  | boolean                                                  | false    |              | Negate makes this a negative permission                                                         |
-| `»» resource_type`           | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                 |
-| `» site_permissions`         | array                                                    | false    |              |                                                                                                 |
-| `» user_permissions`         | array                                                    | false    |              |                                                                                                 |
+| Name                                | Type                                                     | Required | Restrictions | Description                                                                                            |
+|-------------------------------------|----------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------------|
+| `[array item]`                      | array                                                    | false    |              |                                                                                                        |
+| `» display_name`                    | string                                                   | false    |              |                                                                                                        |
+| `» name`                            | string                                                   | false    |              |                                                                                                        |
+| `» organization_id`                 | string(uuid)                                             | false    |              |                                                                                                        |
+| `» organization_member_permissions` | array                                                    | false    |              | Organization member permissions are specific for the organization in the field 'OrganizationID' above. |
+| `»» action`                         | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                        |
+| `»» negate`                         | boolean                                                  | false    |              | Negate makes this a negative permission                                                                |
+| `»» resource_type`                  | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                        |
+| `» organization_permissions`        | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above.        |
+| `» site_permissions`                | array                                                    | false    |              |                                                                                                        |
+| `» user_permissions`                | array                                                    | false    |              |                                                                                                        |
 
 #### Enumerated Values
 
-| Property        | Value                              |
-|-----------------|------------------------------------|
-| `action`        | `application_connect`              |
-| `action`        | `assign`                           |
-| `action`        | `create`                           |
-| `action`        | `create_agent`                     |
-| `action`        | `delete`                           |
-| `action`        | `delete_agent`                     |
-| `action`        | `read`                             |
-| `action`        | `read_personal`                    |
-| `action`        | `ssh`                              |
-| `action`        | `unassign`                         |
-| `action`        | `update`                           |
-| `action`        | `update_personal`                  |
-| `action`        | `use`                              |
-| `action`        | `view_insights`                    |
-| `action`        | `start`                            |
-| `action`        | `stop`                             |
-| `resource_type` | `*`                                |
-| `resource_type` | `aibridge_interception`            |
-| `resource_type` | `api_key`                          |
-| `resource_type` | `assign_org_role`                  |
-| `resource_type` | `assign_role`                      |
-| `resource_type` | `audit_log`                        |
-| `resource_type` | `connection_log`                   |
-| `resource_type` | `crypto_key`                       |
-| `resource_type` | `debug_info`                       |
-| `resource_type` | `deployment_config`                |
-| `resource_type` | `deployment_stats`                 |
-| `resource_type` | `file`                             |
-| `resource_type` | `group`                            |
-| `resource_type` | `group_member`                     |
-| `resource_type` | `idpsync_settings`                 |
-| `resource_type` | `inbox_notification`               |
-| `resource_type` | `license`                          |
-| `resource_type` | `notification_message`             |
-| `resource_type` | `notification_preference`          |
-| `resource_type` | `notification_template`            |
-| `resource_type` | `oauth2_app`                       |
-| `resource_type` | `oauth2_app_code_token`            |
-| `resource_type` | `oauth2_app_secret`                |
-| `resource_type` | `organization`                     |
-| `resource_type` | `organization_member`              |
-| `resource_type` | `prebuilt_workspace`               |
-| `resource_type` | `provisioner_daemon`               |
-| `resource_type` | `provisioner_jobs`                 |
-| `resource_type` | `replicas`                         |
-| `resource_type` | `system`                           |
-| `resource_type` | `tailnet_coordinator`              |
-| `resource_type` | `template`                         |
-| `resource_type` | `usage_event`                      |
-| `resource_type` | `user`                             |
-| `resource_type` | `user_secret`                      |
-| `resource_type` | `webpush_subscription`             |
-| `resource_type` | `workspace`                        |
-| `resource_type` | `workspace_agent_devcontainers`    |
-| `resource_type` | `workspace_agent_resource_monitor` |
-| `resource_type` | `workspace_dormant`                |
-| `resource_type` | `workspace_proxy`                  |
+| Property        | Value(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `action`        | `application_connect`, `assign`, `create`, `create_agent`, `delete`, `delete_agent`, `read`, `read_personal`, `share`, `ssh`, `start`, `stop`, `unassign`, `update`, `update_agent`, `update_personal`, `use`, `view_insights`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `resource_type` | `*`, `aibridge_interception`, `api_key`, `assign_org_role`, `assign_role`, `audit_log`, `boundary_usage`, `chat`, `connection_log`, `crypto_key`, `debug_info`, `deployment_config`, `deployment_stats`, `file`, `group`, `group_member`, `idpsync_settings`, `inbox_notification`, `license`, `notification_message`, `notification_preference`, `notification_template`, `oauth2_app`, `oauth2_app_code_token`, `oauth2_app_secret`, `organization`, `organization_member`, `prebuilt_workspace`, `provisioner_daemon`, `provisioner_jobs`, `replicas`, `system`, `tailnet_coordinator`, `task`, `template`, `usage_event`, `user`, `user_secret`, `webpush_subscription`, `workspace`, `workspace_agent_devcontainers`, `workspace_agent_resource_monitor`, `workspace_dormant`, `workspace_proxy` |
+
+To perform this operation, you must be authenticated. [Learn more](authentication.md).
+
+## Get organization member
+
+### Code samples
+
+```shell
+# Example request using curl
+curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/members/{user} \
+  -H 'Accept: application/json' \
+  -H 'Coder-Session-Token: API_KEY'
+```
+
+`GET /organizations/{organization}/members/{user}`
+
+### Parameters
+
+| Name           | In   | Type   | Required | Description          |
+|----------------|------|--------|----------|----------------------|
+| `organization` | path | string | true     | Organization ID      |
+| `user`         | path | string | true     | User ID, name, or me |
+
+### Example responses
+
+> 200 Response
+
+```json
+{
+  "avatar_url": "string",
+  "created_at": "2019-08-24T14:15:22Z",
+  "email": "string",
+  "global_roles": [
+    {
+      "display_name": "string",
+      "name": "string",
+      "organization_id": "string"
+    }
+  ],
+  "has_ai_seat": true,
+  "is_service_account": true,
+  "last_seen_at": "2019-08-24T14:15:22Z",
+  "login_type": "",
+  "name": "string",
+  "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
+  "roles": [
+    {
+      "display_name": "string",
+      "name": "string",
+      "organization_id": "string"
+    }
+  ],
+  "status": "active",
+  "updated_at": "2019-08-24T14:15:22Z",
+  "user_created_at": "2019-08-24T14:15:22Z",
+  "user_id": "a169451c-8525-4352-b8ca-070dd449a1a5",
+  "user_updated_at": "2019-08-24T14:15:22Z",
+  "username": "string"
+}
+```
+
+### Responses
+
+| Status | Meaning                                                 | Description | Schema                                                                                       |
+|--------|---------------------------------------------------------|-------------|----------------------------------------------------------------------------------------------|
+| 200    | [OK](https://tools.ietf.org/html/rfc7231#section-6.3.1) | OK          | [codersdk.OrganizationMemberWithUserData](schemas.md#codersdkorganizationmemberwithuserdata) |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -864,11 +777,13 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/paginat
 
 ### Parameters
 
-| Name           | In    | Type    | Required | Description                          |
-|----------------|-------|---------|----------|--------------------------------------|
-| `organization` | path  | string  | true     | Organization ID                      |
-| `limit`        | query | integer | false    | Page limit, if 0 returns all members |
-| `offset`       | query | integer | false    | Page offset                          |
+| Name           | In    | Type         | Required | Description                          |
+|----------------|-------|--------------|----------|--------------------------------------|
+| `organization` | path  | string       | true     | Organization ID                      |
+| `q`            | query | string       | false    | Member search query                  |
+| `after_id`     | query | string(uuid) | false    | After ID                             |
+| `limit`        | query | integer      | false    | Page limit, if 0 returns all members |
+| `offset`       | query | integer      | false    | Page offset                          |
 
 ### Example responses
 
@@ -890,6 +805,10 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/paginat
             "organization_id": "string"
           }
         ],
+        "has_ai_seat": true,
+        "is_service_account": true,
+        "last_seen_at": "2019-08-24T14:15:22Z",
+        "login_type": "",
         "name": "string",
         "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
         "roles": [
@@ -899,8 +818,11 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/paginat
             "organization_id": "string"
           }
         ],
+        "status": "active",
         "updated_at": "2019-08-24T14:15:22Z",
+        "user_created_at": "2019-08-24T14:15:22Z",
         "user_id": "a169451c-8525-4352-b8ca-070dd449a1a5",
+        "user_updated_at": "2019-08-24T14:15:22Z",
         "username": "string"
       }
     ]
@@ -918,24 +840,38 @@ curl -X GET http://coder-server:8080/api/v2/organizations/{organization}/paginat
 
 Status Code **200**
 
-| Name                  | Type              | Required | Restrictions | Description |
-|-----------------------|-------------------|----------|--------------|-------------|
-| `[array item]`        | array             | false    |              |             |
-| `» count`             | integer           | false    |              |             |
-| `» members`           | array             | false    |              |             |
-| `»» avatar_url`       | string            | false    |              |             |
-| `»» created_at`       | string(date-time) | false    |              |             |
-| `»» email`            | string            | false    |              |             |
-| `»» global_roles`     | array             | false    |              |             |
-| `»»» display_name`    | string            | false    |              |             |
-| `»»» name`            | string            | false    |              |             |
-| `»»» organization_id` | string            | false    |              |             |
-| `»» name`             | string            | false    |              |             |
-| `»» organization_id`  | string(uuid)      | false    |              |             |
-| `»» roles`            | array             | false    |              |             |
-| `»» updated_at`       | string(date-time) | false    |              |             |
-| `»» user_id`          | string(uuid)      | false    |              |             |
-| `»» username`         | string            | false    |              |             |
+| Name                    | Type                                                 | Required | Restrictions | Description                                                                                      |
+|-------------------------|------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------|
+| `[array item]`          | array                                                | false    |              |                                                                                                  |
+| `» count`               | integer                                              | false    |              |                                                                                                  |
+| `» members`             | array                                                | false    |              |                                                                                                  |
+| `»» avatar_url`         | string                                               | false    |              |                                                                                                  |
+| `»» created_at`         | string(date-time)                                    | false    |              |                                                                                                  |
+| `»» email`              | string                                               | false    |              |                                                                                                  |
+| `»» global_roles`       | array                                                | false    |              |                                                                                                  |
+| `»»» display_name`      | string                                               | false    |              |                                                                                                  |
+| `»»» name`              | string                                               | false    |              |                                                                                                  |
+| `»»» organization_id`   | string                                               | false    |              |                                                                                                  |
+| `»» has_ai_seat`        | boolean                                              | false    |              | Has ai seat intentionally omits omitempty so the API always includes the field, even when false. |
+| `»» is_service_account` | boolean                                              | false    |              |                                                                                                  |
+| `»» last_seen_at`       | string(date-time)                                    | false    |              |                                                                                                  |
+| `»» login_type`         | [codersdk.LoginType](schemas.md#codersdklogintype)   | false    |              |                                                                                                  |
+| `»» name`               | string                                               | false    |              |                                                                                                  |
+| `»» organization_id`    | string(uuid)                                         | false    |              |                                                                                                  |
+| `»» roles`              | array                                                | false    |              |                                                                                                  |
+| `»» status`             | [codersdk.UserStatus](schemas.md#codersdkuserstatus) | false    |              |                                                                                                  |
+| `»» updated_at`         | string(date-time)                                    | false    |              |                                                                                                  |
+| `»» user_created_at`    | string(date-time)                                    | false    |              |                                                                                                  |
+| `»» user_id`            | string(uuid)                                         | false    |              |                                                                                                  |
+| `»» user_updated_at`    | string(date-time)                                    | false    |              |                                                                                                  |
+| `»» username`           | string                                               | false    |              |                                                                                                  |
+
+#### Enumerated Values
+
+| Property     | Value(s)                                          |
+|--------------|---------------------------------------------------|
+| `login_type` | ``, `github`, `none`, `oidc`, `password`, `token` |
+| `status`     | `active`, `suspended`                             |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).
 
@@ -964,6 +900,13 @@ curl -X GET http://coder-server:8080/api/v2/users/roles \
     "display_name": "string",
     "name": "string",
     "organization_id": "7c60d51f-b44e-4682-87d6-449835ea4de6",
+    "organization_member_permissions": [
+      {
+        "action": "application_connect",
+        "negate": true,
+        "resource_type": "*"
+      }
+    ],
     "organization_permissions": [
       {
         "action": "application_connect",
@@ -999,81 +942,27 @@ curl -X GET http://coder-server:8080/api/v2/users/roles \
 
 Status Code **200**
 
-| Name                         | Type                                                     | Required | Restrictions | Description                                                                                     |
-|------------------------------|----------------------------------------------------------|----------|--------------|-------------------------------------------------------------------------------------------------|
-| `[array item]`               | array                                                    | false    |              |                                                                                                 |
-| `» assignable`               | boolean                                                  | false    |              |                                                                                                 |
-| `» built_in`                 | boolean                                                  | false    |              | Built in roles are immutable                                                                    |
-| `» display_name`             | string                                                   | false    |              |                                                                                                 |
-| `» name`                     | string                                                   | false    |              |                                                                                                 |
-| `» organization_id`          | string(uuid)                                             | false    |              |                                                                                                 |
-| `» organization_permissions` | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above. |
-| `»» action`                  | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                 |
-| `»» negate`                  | boolean                                                  | false    |              | Negate makes this a negative permission                                                         |
-| `»» resource_type`           | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                 |
-| `» site_permissions`         | array                                                    | false    |              |                                                                                                 |
-| `» user_permissions`         | array                                                    | false    |              |                                                                                                 |
+| Name                                | Type                                                     | Required | Restrictions | Description                                                                                            |
+|-------------------------------------|----------------------------------------------------------|----------|--------------|--------------------------------------------------------------------------------------------------------|
+| `[array item]`                      | array                                                    | false    |              |                                                                                                        |
+| `» assignable`                      | boolean                                                  | false    |              |                                                                                                        |
+| `» built_in`                        | boolean                                                  | false    |              | Built in roles are immutable                                                                           |
+| `» display_name`                    | string                                                   | false    |              |                                                                                                        |
+| `» name`                            | string                                                   | false    |              |                                                                                                        |
+| `» organization_id`                 | string(uuid)                                             | false    |              |                                                                                                        |
+| `» organization_member_permissions` | array                                                    | false    |              | Organization member permissions are specific for the organization in the field 'OrganizationID' above. |
+| `»» action`                         | [codersdk.RBACAction](schemas.md#codersdkrbacaction)     | false    |              |                                                                                                        |
+| `»» negate`                         | boolean                                                  | false    |              | Negate makes this a negative permission                                                                |
+| `»» resource_type`                  | [codersdk.RBACResource](schemas.md#codersdkrbacresource) | false    |              |                                                                                                        |
+| `» organization_permissions`        | array                                                    | false    |              | Organization permissions are specific for the organization in the field 'OrganizationID' above.        |
+| `» site_permissions`                | array                                                    | false    |              |                                                                                                        |
+| `» user_permissions`                | array                                                    | false    |              |                                                                                                        |
 
 #### Enumerated Values
 
-| Property        | Value                              |
-|-----------------|------------------------------------|
-| `action`        | `application_connect`              |
-| `action`        | `assign`                           |
-| `action`        | `create`                           |
-| `action`        | `create_agent`                     |
-| `action`        | `delete`                           |
-| `action`        | `delete_agent`                     |
-| `action`        | `read`                             |
-| `action`        | `read_personal`                    |
-| `action`        | `ssh`                              |
-| `action`        | `unassign`                         |
-| `action`        | `update`                           |
-| `action`        | `update_personal`                  |
-| `action`        | `use`                              |
-| `action`        | `view_insights`                    |
-| `action`        | `start`                            |
-| `action`        | `stop`                             |
-| `resource_type` | `*`                                |
-| `resource_type` | `aibridge_interception`            |
-| `resource_type` | `api_key`                          |
-| `resource_type` | `assign_org_role`                  |
-| `resource_type` | `assign_role`                      |
-| `resource_type` | `audit_log`                        |
-| `resource_type` | `connection_log`                   |
-| `resource_type` | `crypto_key`                       |
-| `resource_type` | `debug_info`                       |
-| `resource_type` | `deployment_config`                |
-| `resource_type` | `deployment_stats`                 |
-| `resource_type` | `file`                             |
-| `resource_type` | `group`                            |
-| `resource_type` | `group_member`                     |
-| `resource_type` | `idpsync_settings`                 |
-| `resource_type` | `inbox_notification`               |
-| `resource_type` | `license`                          |
-| `resource_type` | `notification_message`             |
-| `resource_type` | `notification_preference`          |
-| `resource_type` | `notification_template`            |
-| `resource_type` | `oauth2_app`                       |
-| `resource_type` | `oauth2_app_code_token`            |
-| `resource_type` | `oauth2_app_secret`                |
-| `resource_type` | `organization`                     |
-| `resource_type` | `organization_member`              |
-| `resource_type` | `prebuilt_workspace`               |
-| `resource_type` | `provisioner_daemon`               |
-| `resource_type` | `provisioner_jobs`                 |
-| `resource_type` | `replicas`                         |
-| `resource_type` | `system`                           |
-| `resource_type` | `tailnet_coordinator`              |
-| `resource_type` | `template`                         |
-| `resource_type` | `usage_event`                      |
-| `resource_type` | `user`                             |
-| `resource_type` | `user_secret`                      |
-| `resource_type` | `webpush_subscription`             |
-| `resource_type` | `workspace`                        |
-| `resource_type` | `workspace_agent_devcontainers`    |
-| `resource_type` | `workspace_agent_resource_monitor` |
-| `resource_type` | `workspace_dormant`                |
-| `resource_type` | `workspace_proxy`                  |
+| Property        | Value(s)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+|-----------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `action`        | `application_connect`, `assign`, `create`, `create_agent`, `delete`, `delete_agent`, `read`, `read_personal`, `share`, `ssh`, `start`, `stop`, `unassign`, `update`, `update_agent`, `update_personal`, `use`, `view_insights`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `resource_type` | `*`, `aibridge_interception`, `api_key`, `assign_org_role`, `assign_role`, `audit_log`, `boundary_usage`, `chat`, `connection_log`, `crypto_key`, `debug_info`, `deployment_config`, `deployment_stats`, `file`, `group`, `group_member`, `idpsync_settings`, `inbox_notification`, `license`, `notification_message`, `notification_preference`, `notification_template`, `oauth2_app`, `oauth2_app_code_token`, `oauth2_app_secret`, `organization`, `organization_member`, `prebuilt_workspace`, `provisioner_daemon`, `provisioner_jobs`, `replicas`, `system`, `tailnet_coordinator`, `task`, `template`, `usage_event`, `user`, `user_secret`, `webpush_subscription`, `workspace`, `workspace_agent_devcontainers`, `workspace_agent_resource_monitor`, `workspace_dormant`, `workspace_proxy` |
 
 To perform this operation, you must be authenticated. [Learn more](authentication.md).

@@ -1,17 +1,17 @@
-import MuiLink from "@mui/material/Link";
-import type { Feature } from "api/typesGenerated";
-import { ErrorAlert } from "components/Alert/ErrorAlert";
-import { Button } from "components/Button/Button";
+import dayjs from "dayjs";
+import { ChevronRightIcon } from "lucide-react";
+import type { FC } from "react";
+import type { Feature } from "#/api/typesGenerated";
+import { ErrorAlert } from "#/components/Alert/ErrorAlert";
+import { Button } from "#/components/Button/Button";
 import {
 	Collapsible,
 	CollapsibleContent,
 	CollapsibleTrigger,
-} from "components/Collapsible/Collapsible";
-import { Stack } from "components/Stack/Stack";
-import dayjs from "dayjs";
-import { ChevronRightIcon } from "lucide-react";
-import type { FC } from "react";
-import { docs } from "utils/docs";
+} from "#/components/Collapsible/Collapsible";
+import { Link } from "#/components/Link/Link";
+import { cn } from "#/utils/cn";
+import { docs } from "#/utils/docs";
 
 interface ManagedAgentsConsumptionProps {
 	managedAgentFeature?: Feature;
@@ -24,23 +24,22 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 	if (!managedAgentFeature?.enabled) {
 		return (
 			<div className="min-h-60 flex items-center justify-center rounded-lg border border-solid p-12">
-				<Stack alignItems="center" spacing={1}>
-					<Stack alignItems="center" spacing={0.5}>
-						<span className="text-base">Managed AI Agents Disabled</span>
+				<div className="flex flex-col gap-4 items-center justify-center">
+					<div className="flex flex-col gap-2 items-center justify-center">
+						<span className="text-base">Agent Workspace Builds Disabled</span>
 						<span className="text-content-secondary text-center max-w-[464px] mt-2">
-							Managed AI agents are not included in your current license.
-							Contact <MuiLink href="mailto:sales@coder.com">sales</MuiLink> to
+							Agent Workspace Builds are not included in your current license.
+							Contact <Link href="mailto:sales@coder.com">sales</Link> to
 							upgrade your license and unlock this feature.
 						</span>
-					</Stack>
-				</Stack>
+					</div>
+				</div>
 			</div>
 		);
 	}
 
 	const usage = managedAgentFeature.actual;
-	const included = managedAgentFeature.soft_limit;
-	const limit = managedAgentFeature.limit;
+	const included = managedAgentFeature.limit;
 	const startDate = managedAgentFeature.usage_period?.start;
 	const endDate = managedAgentFeature.usage_period?.end;
 
@@ -48,12 +47,7 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 		return <ErrorAlert error="Invalid usage data" />;
 	}
 
-	if (
-		included === undefined ||
-		included < 0 ||
-		limit === undefined ||
-		limit < 0
-	) {
+	if (included === undefined || included < 0) {
 		return <ErrorAlert error="Invalid license usage limits" />;
 	}
 
@@ -67,16 +61,14 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 		return <ErrorAlert error="Invalid license usage period" />;
 	}
 
-	const usagePercentage = Math.min((usage / limit) * 100, 100);
-	const includedPercentage = Math.min((included / limit) * 100, 100);
-	const remainingPercentage = Math.max(100 - includedPercentage, 0);
+	const usagePercentage = Math.min((usage / included) * 100, 100);
 
 	return (
 		<section className="border border-solid rounded">
 			<div className="p-4">
 				<Collapsible>
 					<header className="flex flex-col gap-2 items-start">
-						<h3 className="text-md m-0 font-medium">Managed AI Agents Usage</h3>
+						<h3 className="text-md m-0 font-medium">Agent Workspace Builds</h3>
 
 						<CollapsibleTrigger asChild>
 							<Button
@@ -100,15 +92,30 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
             `}
 					>
 						<p>
-							<MuiLink
+							Agent Workspace Builds are measured when you start an ephemeral
+							workspace, purely for running an agentic workload. These are not
+							to be confused with workspaces used for day-to-day development,
+							even if AI tooling is involved.
+						</p>
+						<p>
+							Today,{" "}
+							<Link
 								href={docs("/ai-coder/tasks")}
 								target="_blank"
 								rel="noreferrer"
 							>
-								Coder Tasks
-							</MuiLink>{" "}
-							and upcoming managed AI features are included in Coder Premium
-							licenses during beta. Usage limits and pricing subject to change.
+								Coder Tasks (via UI, CLI, or API)
+							</Link>{" "}
+							is the only way to create agentic workspaces, but additional
+							protocols and APIs may be supported as standards emerge. Learn
+							more in{" "}
+							<Link
+								href={docs("/ai-coder/ai-governance")}
+								target="_blank"
+								rel="noreferrer"
+							>
+								the Coder documentation
+							</Link>
 						</p>
 						<ul>
 							<li className="flex items-center gap-2">
@@ -118,20 +125,13 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 								Amount of started workspaces with an AI agent.
 							</li>
 							<li className="flex items-center gap-2">
-								<div className="rounded-[2px] bg-content-disabled size-3 inline-block">
-									<span className="sr-only">Legend for included allowance</span>
-								</div>
-								Included allowance from your current license plan.
-							</li>
-							<li className="flex items-center gap-2">
-								<div className="size-3 inline-flex items-center justify-center">
+								<div className="rounded-[2px] bg-highlight-orange size-3 inline-block">
 									<span className="sr-only">
-										Legend for total limit in the chart
+										Legend for usage exceeding included allowance
 									</span>
-									<div className="w-full border-b-1 border-t-1 border-dashed border-content-disabled" />
 								</div>
-								Total limit after which further AI workspace builds will be
-								blocked.
+								Usage has exceeded included allowance from your current license
+								plan.
 							</li>
 						</ul>
 					</CollapsibleContent>
@@ -148,16 +148,13 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 
 				<div className="relative h-6 bg-surface-secondary rounded overflow-hidden">
 					<div
-						className="absolute top-0 left-0 h-full bg-highlight-green transition-all duration-300"
+						className={cn(
+							"absolute top-0 left-0 h-full transition-all duration-300",
+							usagePercentage < 100
+								? "bg-highlight-green"
+								: "bg-highlight-orange",
+						)}
 						style={{ width: `${usagePercentage}%` }}
-					/>
-
-					<div
-						className="absolute top-0 h-full bg-content-disabled opacity-30"
-						style={{
-							left: `${includedPercentage}%`,
-							width: `${remainingPercentage}%`,
-						}}
 					/>
 				</div>
 
@@ -167,19 +164,9 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 						<span className="font-medium">{usage.toLocaleString()}</span>
 					</div>
 
-					<div
-						className="absolute flex flex-col items-center transform -translate-x-1/2"
-						style={{
-							left: `${Math.max(Math.min(includedPercentage, 90), 10)}%`,
-						}}
-					>
+					<div className="flex flex-col items-end">
 						<span className="text-content-secondary">Included:</span>
 						<span className="font-medium">{included.toLocaleString()}</span>
-					</div>
-
-					<div className="flex flex-col items-end">
-						<span className="text-content-secondary">Limit:</span>
-						<span className="font-medium">{limit.toLocaleString()}</span>
 					</div>
 				</div>
 
@@ -189,13 +176,9 @@ export const ManagedAgentsConsumption: FC<ManagedAgentsConsumptionProps> = ({
 							<span className="text-content-secondary">Actual:</span>
 							<span className="font-medium">{usage.toLocaleString()}</span>
 						</div>
-						<div className="flex flex-col items-center">
+						<div className="flex flex-col items-end">
 							<span className="text-content-secondary">Included:</span>
 							<span className="font-medium">{included.toLocaleString()}</span>
-						</div>
-						<div className="flex flex-col items-end">
-							<span className="text-content-secondary">Limit:</span>
-							<span className="font-medium">{limit.toLocaleString()}</span>
 						</div>
 					</div>
 				</div>

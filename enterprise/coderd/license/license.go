@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -14,58 +15,7 @@ import (
 
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
-	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
-)
-
-const (
-	// These features are only included in the license and are not actually
-	// entitlements after the licenses are processed. These values will be
-	// merged into the codersdk.FeatureManagedAgentLimit feature.
-	//
-	// The reason we need two separate features is because the License v3 format
-	// uses map[string]int64 for features, so we're unable to use a single value
-	// with a struct like `{"soft": 100, "hard": 200}`. This is unfortunate and
-	// we should fix this with a new license format v4 in the future.
-	//
-	// These are intentionally not exported as they should not be used outside
-	// of this package (except tests).
-	featureManagedAgentLimitHard codersdk.FeatureName = "managed_agent_limit_hard"
-	featureManagedAgentLimitSoft codersdk.FeatureName = "managed_agent_limit_soft"
-)
-
-var (
-	// Mapping of license feature names to the SDK feature name.
-	// This is used to map from multiple usage period features into a single SDK
-	// feature.
-	featureGrouping = map[codersdk.FeatureName]struct {
-		// The parent feature.
-		sdkFeature codersdk.FeatureName
-		// Whether the value of the license feature is the soft limit or the hard
-		// limit.
-		isSoft bool
-	}{
-		// Map featureManagedAgentLimitHard and featureManagedAgentLimitSoft to
-		// codersdk.FeatureManagedAgentLimit.
-		featureManagedAgentLimitHard: {
-			sdkFeature: codersdk.FeatureManagedAgentLimit,
-			isSoft:     false,
-		},
-		featureManagedAgentLimitSoft: {
-			sdkFeature: codersdk.FeatureManagedAgentLimit,
-			isSoft:     true,
-		},
-	}
-
-	// Features that are forbidden to be set in a license. These are the SDK
-	// features in the usagedBasedFeatureGrouping map.
-	licenseForbiddenFeatures = func() map[codersdk.FeatureName]struct{} {
-		features := make(map[codersdk.FeatureName]struct{})
-		for _, feature := range featureGrouping {
-			features[feature.sdkFeature] = struct{}{}
-		}
-		return features
-	}()
 )
 
 // Entitlements processes licenses to return whether features are enabled or not.
@@ -96,6 +46,12 @@ func Entitlements(
 		return codersdk.Entitlements{}, xerrors.Errorf("query active user count: %w", err)
 	}
 
+	// nolint:gocritic // Getting active AI seat count is a system function.
+	activeAISeatCount, err := db.GetActiveAISeatCount(dbauthz.AsSystemRestricted(ctx))
+	if err != nil {
+		return codersdk.Entitlements{}, xerrors.Errorf("query active AI seat count: %w", err)
+	}
+
 	// nolint:gocritic // Getting external templates is a system function.
 	externalTemplates, err := db.GetTemplatesWithFilter(dbauthz.AsSystemRestricted(ctx), database.GetTemplatesWithFilterParams{
 		HasExternalAgent: sql.NullBool{
@@ -109,6 +65,7 @@ func Entitlements(
 
 	entitlements, err := LicensesEntitlements(ctx, now, licenses, enablements, keys, FeatureArguments{
 		ActiveUserCount:       activeUserCount,
+		ActiveAISeatCount:     activeAISeatCount,
 		ReplicaCount:          replicaCount,
 		ExternalAuthCount:     externalAuthCount,
 		ExternalTemplateCount: int64(len(externalTemplates)),
@@ -138,6 +95,7 @@ func Entitlements(
 
 type FeatureArguments struct {
 	ActiveUserCount       int64
+	ActiveAISeatCount     int64
 	ReplicaCount          int
 	ExternalAuthCount     int
 	ExternalTemplateCount int64
@@ -167,6 +125,12 @@ func LicensesEntitlements(
 	keys map[string]ed25519.PublicKey,
 	featureArguments FeatureArguments,
 ) (codersdk.Entitlements, error) {
+	// TODO: Remove this tracking once AI Bridge is enforced as an add-on license.
+	// Track if AI Bridge was explicitly granted via license Features (add-on)
+	// vs inherited from FeatureSet (Premium). Only explicit grants should
+	// suppress the soft warning for AI Bridge GA.
+	hasExplicitAIBridgeEntitlement := false
+
 	// Default all entitlements to be disabled.
 	entitlements := codersdk.Entitlements{
 		Features: map[codersdk.FeatureName]codersdk.Feature{
@@ -262,20 +226,47 @@ func LicensesEntitlements(
 			claims.FeatureSet = codersdk.FeatureSetEnterprise
 		}
 
-		// Add all features from the feature set defined.
+		// Temporary: If the license doesn't have a managed agent limit, we add
+		//            a default of 1000 managed agents per deployment for a 100
+		//            year license term.
+		//            This only applies to "Premium" licenses.
+		if claims.FeatureSet == codersdk.FeatureSetPremium {
+			var (
+				// We intentionally use a fixed issue time here, before the
+				// entitlement was added to any new licenses, so any
+				// licenses with the corresponding features actually set
+				// trump this default entitlement, even if they are set to a
+				// smaller value.
+				defaultManagedAgentsIsuedAt       = time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+				defaultManagedAgentsStart         = defaultManagedAgentsIsuedAt
+				defaultManagedAgentsEnd           = defaultManagedAgentsStart.AddDate(100, 0, 0)
+				defaultManagedAgentsLimit   int64 = 1000
+			)
+			entitlements.AddFeature(codersdk.FeatureManagedAgentLimit, codersdk.Feature{
+				Enabled:     true,
+				Entitlement: entitlement,
+				Limit:       &defaultManagedAgentsLimit,
+				UsagePeriod: &codersdk.UsagePeriod{
+					IssuedAt: defaultManagedAgentsIsuedAt,
+					Start:    defaultManagedAgentsStart,
+					End:      defaultManagedAgentsEnd,
+				},
+			})
+		}
+
+		// TODO: Remove this tracking once AI Bridge is enforced as an add-on license.
+		// Track explicit AI Bridge entitlement (add-on license). This is checked
+		// at the license level since AI Bridge may come from the FeatureSet
+		// (Premium) rather than being explicitly listed in claims.Features.
+		// Only having the AI Governance addon should suppress the soft warning.
+		if slices.Contains(claims.Addons, codersdk.AddonAIGovernance) {
+			hasExplicitAIBridgeEntitlement = true
+		}
+
+		// Add all features from the feature set.
 		for _, featureName := range claims.FeatureSet.Features() {
-			if _, ok := licenseForbiddenFeatures[featureName]; ok {
-				// Ignore any FeatureSet features that are forbidden to be set
-				// in a license.
-				continue
-			}
-			if _, ok := featureGrouping[featureName]; ok {
-				// These features need very special handling due to merging
-				// multiple feature values into a single SDK feature.
-				continue
-			}
-			if featureName == codersdk.FeatureUserLimit || featureName.UsesUsagePeriod() {
-				// FeatureUserLimit and usage period features are handled below.
+			if featureName.UsesLimit() || featureName.UsesUsagePeriod() {
+				// Limit and usage period features are handled below.
 				// They don't provide default values as they are always enabled
 				// and require a limit to be specified in the license to have
 				// any effect.
@@ -290,30 +281,24 @@ func LicensesEntitlements(
 			})
 		}
 
-		// A map of SDK feature name to the uncommitted usage feature.
-		uncommittedUsageFeatures := map[codersdk.FeatureName]usageLimit{}
-
 		// Features al-la-carte
 		for featureName, featureValue := range claims.Features {
-			if _, ok := licenseForbiddenFeatures[featureName]; ok {
-				entitlements.Errors = append(entitlements.Errors,
-					fmt.Sprintf("Feature %s is forbidden to be set in a license.", featureName))
-				continue
+			// Old-style licenses encode the managed agent limit as
+			// separate soft/hard features.
+			//
+			// This could be removed in a future release, but can only be
+			// done once all old licenses containing this are no longer in use.
+			if featureName == "managed_agent_limit_soft" {
+				// Maps the soft limit to the canonical feature name
+				featureName = codersdk.FeatureManagedAgentLimit
 			}
-			if featureValue < 0 {
-				// We currently don't use negative values for features.
+			if featureName == "managed_agent_limit_hard" {
+				// We can safely ignore the hard limit as it is no longer used.
 				continue
 			}
 
-			// Special handling for grouped (e.g. usage period) features.
-			if grouping, ok := featureGrouping[featureName]; ok {
-				ul := uncommittedUsageFeatures[grouping.sdkFeature]
-				if grouping.isSoft {
-					ul.Soft = &featureValue
-				} else {
-					ul.Hard = &featureValue
-				}
-				uncommittedUsageFeatures[grouping.sdkFeature] = ul
+			if featureValue < 0 {
+				// We currently don't use negative values for features.
 				continue
 			}
 
@@ -325,46 +310,40 @@ func LicensesEntitlements(
 				continue
 			}
 
-			// Handling for non-grouped features.
-			switch featureName {
-			case codersdk.FeatureUserLimit:
+			// Handling for limit features.
+			switch {
+			case featureName.UsesUsagePeriod():
+				entitlements.AddFeature(featureName, codersdk.Feature{
+					Enabled:     featureValue > 0,
+					Entitlement: entitlement,
+					Limit:       &featureValue,
+					UsagePeriod: &codersdk.UsagePeriod{
+						IssuedAt: claims.IssuedAt.Time,
+						Start:    usagePeriodStart,
+						End:      usagePeriodEnd,
+					},
+				})
+			case featureName.UsesLimit():
 				if featureValue <= 0 {
-					// 0 user count doesn't make sense, so we skip it.
+					// 0 limit value or less doesn't make sense, so we skip it.
 					continue
 				}
-				entitlements.AddFeature(codersdk.FeatureUserLimit, codersdk.Feature{
+
+				// When we have a limit feature, we need to set the actual value (if available).
+				var actual *int64
+				if featureName == codersdk.FeatureUserLimit {
+					actual = &featureArguments.ActiveUserCount
+				}
+				if featureName == codersdk.FeatureAIGovernanceUserLimit {
+					actual = &featureArguments.ActiveAISeatCount
+				}
+
+				entitlements.AddFeature(featureName, codersdk.Feature{
 					Enabled:     true,
 					Entitlement: entitlement,
 					Limit:       &featureValue,
-					Actual:      &featureArguments.ActiveUserCount,
+					Actual:      actual,
 				})
-
-				// Temporary: If the license doesn't have a managed agent limit,
-				//            we add a default of 800 managed agents per user.
-				//            This only applies to "Premium" licenses.
-				if claims.FeatureSet == codersdk.FeatureSetPremium {
-					var (
-						// We intentionally use a fixed issue time here, before the
-						// entitlement was added to any new licenses, so any
-						// licenses with the corresponding features actually set
-						// trump this default entitlement, even if they are set to a
-						// smaller value.
-						issueTime             = time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
-						defaultSoftAgentLimit = 800 * featureValue
-						defaultHardAgentLimit = 1000 * featureValue
-					)
-					entitlements.AddFeature(codersdk.FeatureManagedAgentLimit, codersdk.Feature{
-						Enabled:     true,
-						Entitlement: entitlement,
-						SoftLimit:   &defaultSoftAgentLimit,
-						Limit:       &defaultHardAgentLimit,
-						UsagePeriod: &codersdk.UsagePeriod{
-							IssuedAt: issueTime,
-							Start:    usagePeriodStart,
-							End:      usagePeriodEnd,
-						},
-					})
-				}
 			default:
 				if featureValue <= 0 {
 					// The feature is disabled.
@@ -377,43 +356,32 @@ func LicensesEntitlements(
 			}
 		}
 
-		// Apply uncommitted usage features to the entitlements.
-		for featureName, ul := range uncommittedUsageFeatures {
-			if ul.Soft == nil || ul.Hard == nil {
-				// Invalid license.
-				entitlements.Errors = append(entitlements.Errors,
-					fmt.Sprintf("Invalid license (%s): feature %s has missing soft or hard limit values", license.UUID.String(), featureName))
-				continue
-			}
-			if *ul.Hard < *ul.Soft {
-				entitlements.Errors = append(entitlements.Errors,
-					fmt.Sprintf("Invalid license (%s): feature %s has a hard limit less than the soft limit", license.UUID.String(), featureName))
-				continue
-			}
-			if *ul.Hard < 0 || *ul.Soft < 0 {
-				entitlements.Errors = append(entitlements.Errors,
-					fmt.Sprintf("Invalid license (%s): feature %s has a soft or hard limit less than 0", license.UUID.String(), featureName))
-				continue
-			}
+		addonFeatures := make(map[codersdk.FeatureName]codersdk.Feature)
 
-			feature := codersdk.Feature{
-				Enabled:     true,
-				Entitlement: entitlement,
-				SoftLimit:   ul.Soft,
-				Limit:       ul.Hard,
-				// `Actual` will be populated below when warnings are generated.
-				UsagePeriod: &codersdk.UsagePeriod{
-					IssuedAt: claims.IssuedAt.Time,
-					Start:    usagePeriodStart,
-					End:      usagePeriodEnd,
-				},
+		// Finally, add all features from the addons. We do this last so that
+		// any dependencies of an addon are validated against the calculated
+		// found entitlements. This is to stop a race condition with how we
+		// calculate entitlements in tests.
+		for _, addon := range claims.Addons {
+			validationErrors := addon.ValidateDependencies(entitlements.Features)
+			if len(validationErrors) > 0 {
+				entitlements.Errors = append(
+					entitlements.Errors,
+					validationErrors...,
+				)
+				// Ignore the addon and don't add any features.
+				continue
 			}
-			// If the hard limit is 0, the feature is disabled.
-			if *ul.Hard <= 0 {
-				feature.Enabled = false
-				feature.SoftLimit = ptr.Ref(int64(0))
-				feature.Limit = ptr.Ref(int64(0))
+			for _, featureName := range addon.Features() {
+				if _, exists := addonFeatures[featureName]; !exists {
+					addonFeatures[featureName] = codersdk.Feature{
+						Entitlement: entitlement,
+						Enabled:     enablements[featureName] || featureName.AlwaysEnable(),
+					}
+				}
 			}
+		}
+		for featureName, feature := range addonFeatures {
 			entitlements.AddFeature(featureName, feature)
 		}
 	}
@@ -490,45 +458,22 @@ func LicensesEntitlements(
 		if featureArguments.ManagedAgentCountFn != nil {
 			managedAgentCount, err = featureArguments.ManagedAgentCountFn(ctx, agentLimit.UsagePeriod.Start, agentLimit.UsagePeriod.End)
 		}
-		switch {
-		case xerrors.Is(err, context.Canceled) || xerrors.Is(err, context.DeadlineExceeded):
+		if xerrors.Is(err, context.Canceled) || xerrors.Is(err, context.DeadlineExceeded) {
 			// If the context is canceled, we want to bail the entire
 			// LicensesEntitlements call.
 			return entitlements, xerrors.Errorf("get managed agent count: %w", err)
-		case err != nil:
-			entitlements.Errors = append(entitlements.Errors,
-				fmt.Sprintf("Error getting managed agent count: %s", err.Error()))
-		default:
+		}
+		if err != nil {
+			entitlements.Errors = append(entitlements.Errors, fmt.Sprintf("Error getting managed agent count: %s", err.Error()))
+			// no return
+		} else {
 			agentLimit.Actual = &managedAgentCount
 			entitlements.AddFeature(codersdk.FeatureManagedAgentLimit, agentLimit)
 
 			// Only issue warnings if the feature is enabled.
-			if agentLimit.Enabled {
-				var softLimit int64
-				if agentLimit.SoftLimit != nil {
-					softLimit = *agentLimit.SoftLimit
-				}
-				var hardLimit int64
-				if agentLimit.Limit != nil {
-					hardLimit = *agentLimit.Limit
-				}
-
-				// Issue a warning early:
-				// 1. If the soft limit and hard limit are equal, at 75% of the hard
-				//    limit.
-				// 2. If the limit is greater than the soft limit, at 75% of the
-				//    difference between the hard limit and the soft limit.
-				softWarningThreshold := int64(float64(hardLimit) * 0.75)
-				if hardLimit > softLimit && softLimit > 0 {
-					softWarningThreshold = softLimit + int64(float64(hardLimit-softLimit)*0.75)
-				}
-				if managedAgentCount >= *agentLimit.Limit {
-					entitlements.Warnings = append(entitlements.Warnings,
-						"You have built more workspaces with managed agents than your license allows. Further managed agent builds will be blocked.")
-				} else if managedAgentCount >= softWarningThreshold {
-					entitlements.Warnings = append(entitlements.Warnings,
-						"You are approaching the managed agent limit in your license. Please refer to the Deployment Licenses page for more information.")
-				}
+			if agentLimit.Enabled && agentLimit.Limit != nil && managedAgentCount >= *agentLimit.Limit {
+				entitlements.Warnings = append(entitlements.Warnings,
+					codersdk.LicenseManagedAgentLimitExceededWarningText)
 			}
 		}
 	}
@@ -544,12 +489,43 @@ func LicensesEntitlements(
 				"Your deployment has %d active users but the license with the limit %d is expired.",
 				featureArguments.ActiveUserCount, *userLimit.Limit))
 		}
+		if featureArguments.ActiveAISeatCount > 0 {
+			actual := featureArguments.ActiveAISeatCount
+			feature := entitlements.Features[codersdk.FeatureAIGovernanceUserLimit]
+			switch {
+			case feature.Entitlement == codersdk.EntitlementNotEntitled:
+				// If the limit is not set
+				entitlements.Errors = append(entitlements.Errors,
+					fmt.Sprintf("Your deployment has %d active AI Governance seats but the license is not entitled to this feature.", actual))
+			case feature.Entitlement == codersdk.EntitlementGracePeriod && feature.Limit != nil:
+				entitlements.Warnings = append(entitlements.Warnings,
+					fmt.Sprintf(
+						"Your deployment has %d active AI Governance seats but the license with the limit %d is expired.",
+						actual, *feature.Limit))
+				// Also emit seat-capacity warnings during grace period so admins
+				// see both expiry and usage details.
+				entitlements.Warnings = appendAIGovernanceSeatLimitWarning(
+					entitlements.Warnings,
+					actual,
+					*feature.Limit,
+				)
+			case feature.Limit != nil:
+				entitlements.Warnings = appendAIGovernanceSeatLimitWarning(
+					entitlements.Warnings,
+					actual,
+					*feature.Limit,
+				)
+			}
+		}
 
 		// Add a warning for every feature that is enabled but not entitled or
 		// is in a grace period.
 		for _, featureName := range codersdk.FeatureNames {
 			// The user limit has it's own warnings!
 			if featureName == codersdk.FeatureUserLimit {
+				continue
+			}
+			if featureName == codersdk.FeatureAIGovernanceUserLimit {
 				continue
 			}
 			// High availability has it's own warnings based on replica count!
@@ -580,6 +556,17 @@ func LicensesEntitlements(
 			default:
 			}
 		}
+
+		// TODO: Remove this soft warning block once AI Bridge is enforced as an add-on license.
+		// AI Bridge soft warning: Show warning when AI Bridge is enabled and
+		// entitled via Premium FeatureSet but not via explicit add-on license.
+		// This is a transitional warning as AI Bridge moves to GA and will
+		// require a separate add-on license in future versions.
+		aiBridgeFeature := entitlements.Features[codersdk.FeatureAIBridge]
+		if aiBridgeFeature.Enabled && aiBridgeFeature.Entitlement.Entitled() && !hasExplicitAIBridgeEntitlement {
+			entitlements.Warnings = append(entitlements.Warnings,
+				"The AI Governance add-on is required to use AI Bridge. Please reach out to your account team or sales@coder.com to learn more.")
+		}
 	}
 
 	// Wrap up by disabling all features that are not entitled.
@@ -593,6 +580,27 @@ func LicensesEntitlements(
 	entitlements.RefreshedAt = now
 
 	return entitlements, nil
+}
+
+func appendAIGovernanceSeatLimitWarning(warnings []string, actual int64, limit int64) []string {
+	if limit <= 0 {
+		return warnings
+	}
+
+	if actual > limit {
+		overLimitSeats := actual - limit
+		return append(warnings, fmt.Sprintf(
+			codersdk.LicenseAIGovernanceOverLimitWarningText,
+			actual,
+			limit,
+			overLimitSeats,
+		))
+	} else if actual*10 >= limit*9 {
+		usedPercent := (actual * 100) / limit
+		return append(warnings, fmt.Sprintf(codersdk.LicenseAIGovernance90PercentWarningText, usedPercent))
+	}
+
+	return warnings
 }
 
 const (
@@ -612,14 +620,11 @@ var (
 	ErrMissingLicenseExpires = xerrors.New("license has invalid or missing license_expires claim")
 	ErrMissingExp            = xerrors.New("license has invalid or missing exp (expires at) claim")
 	ErrMultipleIssues        = xerrors.New("license has multiple issues; contact support")
+	ErrMissingAccountType    = xerrors.New("license must contain valid account type")
+	ErrMissingAccountID      = xerrors.New("license must contain valid account ID")
 )
 
 type Features map[codersdk.FeatureName]int64
-
-type usageLimit struct {
-	Soft *int64
-	Hard *int64 // 0 means "disabled"
-}
 
 // Claims is the full set of claims in a license.
 type Claims struct {
@@ -638,11 +643,12 @@ type Claims struct {
 	FeatureSet    codersdk.FeatureSet `json:"feature_set"`
 	// AllFeatures represents 'FeatureSet = FeatureSetEnterprise'
 	// Deprecated: AllFeatures is deprecated in favor of FeatureSet.
-	AllFeatures      bool     `json:"all_features,omitempty"`
-	Version          uint64   `json:"version"`
-	Features         Features `json:"features"`
-	RequireTelemetry bool     `json:"require_telemetry,omitempty"`
-	PublishUsageData bool     `json:"publish_usage_data,omitempty"`
+	AllFeatures      bool             `json:"all_features,omitempty"`
+	Version          uint64           `json:"version"`
+	Features         Features         `json:"features"`
+	Addons           []codersdk.Addon `json:"addons,omitempty"`
+	RequireTelemetry bool             `json:"require_telemetry,omitempty"`
+	PublishUsageData bool             `json:"publish_usage_data,omitempty"`
 }
 
 var _ jwt.Claims = &Claims{}
@@ -696,11 +702,19 @@ func validateClaims(tok *jwt.Token) (*Claims, error) {
 		if claims.NotBefore == nil {
 			return nil, ErrMissingNotBefore
 		}
-		if claims.LicenseExpires == nil {
+
+		yearsHardLimit := time.Now().Add(5 /* years */ * 365 * 24 * time.Hour)
+		if claims.LicenseExpires == nil || claims.LicenseExpires.Time.After(yearsHardLimit) {
 			return nil, ErrMissingLicenseExpires
 		}
 		if claims.ExpiresAt == nil {
 			return nil, ErrMissingExp
+		}
+		if claims.AccountType == "" {
+			return nil, ErrMissingAccountType
+		}
+		if claims.AccountID == "" {
+			return nil, ErrMissingAccountID
 		}
 		return claims, nil
 	}

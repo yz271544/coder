@@ -14,7 +14,7 @@ coder organizations roles create [flags] <role_name>
 ```console
   - Run with an input.json file:
 
-     $ coder organization -O <organization_name> roles create --stidin < role.json
+     $ coder organization -O <organization_name> roles create --stdin < role.json
 ```
 
 ## Options
@@ -25,7 +25,7 @@ coder organizations roles create [flags] <role_name>
 |------|-------------------|
 | Type | <code>bool</code> |
 
-Bypass prompts.
+Bypass confirmation prompts.
 
 ### --dry-run
 

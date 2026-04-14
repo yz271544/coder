@@ -1,5 +1,6 @@
-import { useDashboard } from "modules/dashboard/useDashboard";
 import type { FC } from "react";
+import type { BannerConfig } from "#/api/typesGenerated";
+import { useDashboard } from "#/modules/dashboard/useDashboard";
 import { AnnouncementBannerView } from "./AnnouncementBannerView";
 
 export const AnnouncementBanners: FC = () => {
@@ -15,7 +16,12 @@ export const AnnouncementBanners: FC = () => {
 	return (
 		<>
 			{announcementBanners
-				.filter((banner) => banner.enabled)
+				.filter(
+					(banner): banner is Required<BannerConfig> =>
+						banner.enabled &&
+						Boolean(banner.message) &&
+						Boolean(banner.background_color),
+				)
 				.map((banner) => (
 					<AnnouncementBannerView
 						key={banner.message}

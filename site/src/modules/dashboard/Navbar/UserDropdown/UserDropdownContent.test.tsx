@@ -1,19 +1,34 @@
-import { MockUserOwner } from "testHelpers/entities";
-import { render, waitForLoaderToBeRemoved } from "testHelpers/renderHelpers";
 import { screen } from "@testing-library/react";
-import { Popover } from "components/Popover/Popover";
-import { Language, UserDropdownContent } from "./UserDropdownContent";
+import {
+	DropdownMenu,
+	DropdownMenuContent,
+	DropdownMenuTrigger,
+} from "#/components/DropdownMenu/DropdownMenu";
+import { MockUserOwner } from "#/testHelpers/entities";
+import { render, waitForLoaderToBeRemoved } from "#/testHelpers/renderHelpers";
+import { UserDropdownContent } from "./UserDropdownContent";
+
+const renderUserDropdownContent = (props: { onSignOut: () => void }) => {
+	return render(
+		<DropdownMenu defaultOpen>
+			<DropdownMenuTrigger>Open</DropdownMenuTrigger>
+			<DropdownMenuContent>
+				<UserDropdownContent
+					user={MockUserOwner}
+					onSignOut={props.onSignOut}
+					supportLinks={[]}
+				/>
+			</DropdownMenuContent>
+		</DropdownMenu>,
+	);
+};
 
 describe("UserDropdownContent", () => {
 	it("has the correct link for the account item", async () => {
-		render(
-			<Popover>
-				<UserDropdownContent user={MockUserOwner} onSignOut={jest.fn()} />
-			</Popover>,
-		);
+		renderUserDropdownContent({ onSignOut: vi.fn() });
 		await waitForLoaderToBeRemoved();
 
-		const link = screen.getByText(Language.accountLabel).closest("a");
+		const link = screen.getByText("Account").closest("a");
 		if (!link) {
 			throw new Error("Anchor tag not found for the account menu item");
 		}
@@ -22,14 +37,10 @@ describe("UserDropdownContent", () => {
 	});
 
 	it("calls the onSignOut function", async () => {
-		const onSignOut = jest.fn();
-		render(
-			<Popover>
-				<UserDropdownContent user={MockUserOwner} onSignOut={onSignOut} />
-			</Popover>,
-		);
+		const onSignOut = vi.fn();
+		renderUserDropdownContent({ onSignOut });
 		await waitForLoaderToBeRemoved();
-		screen.getByText(Language.signOutLabel).click();
+		screen.getByText("Sign Out").click();
 		expect(onSignOut).toBeCalledTimes(1);
 	});
 });

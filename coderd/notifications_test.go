@@ -7,8 +7,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/coder/serpent"
-
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
@@ -16,6 +14,7 @@ import (
 	"github.com/coder/coder/v2/coderd/notifications/notificationstest"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/serpent"
 )
 
 func createOpts(t *testing.T) *coderdtest.Options {
@@ -151,7 +150,7 @@ func TestNotificationPreferences(t *testing.T) {
 		require.ErrorAsf(t, err, &sdkError, "error should be of type *codersdk.Error")
 		// NOTE: ExtractUserParam gets in the way here, and returns a 400 Bad Request instead of a 403 Forbidden.
 		// This is not ideal, and we should probably change this behavior.
-		require.Equal(t, http.StatusBadRequest, sdkError.StatusCode())
+		require.Equal(t, http.StatusNotFound, sdkError.StatusCode())
 	})
 
 	t.Run("Admin may read any users' preferences", func(t *testing.T) {

@@ -1,32 +1,33 @@
+import type { Meta, StoryObj } from "@storybook/react-vite";
+import dayjs from "dayjs";
+import uniqueId from "lodash/uniqueId";
+import { expect, within } from "storybook/test";
+import {
+	type Workspace,
+	type WorkspaceStatus,
+	WorkspaceStatuses,
+} from "#/api/typesGenerated";
+import {
+	getDefaultFilterProps,
+	MockMenu,
+} from "#/components/Filter/storyHelpers";
+import { DEFAULT_RECORDS_PER_PAGE } from "#/components/PaginationWidget/utils";
 import {
 	MockBuildInfo,
 	MockOrganization,
 	MockPendingProvisionerJob,
+	MockTaskWorkspace,
 	MockTemplate,
 	MockUserOwner,
 	MockWorkspace,
 	MockWorkspaceAgent,
 	mockApiError,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	withAuthProvider,
 	withDashboardProvider,
 	withProxyProvider,
-} from "testHelpers/storybook";
-import type { Meta, StoryObj } from "@storybook/react-vite";
-import {
-	type Workspace,
-	type WorkspaceStatus,
-	WorkspaceStatuses,
-} from "api/typesGenerated";
-import {
-	getDefaultFilterProps,
-	MockMenu,
-} from "components/Filter/storyHelpers";
-import { DEFAULT_RECORDS_PER_PAGE } from "components/PaginationWidget/utils";
-import dayjs from "dayjs";
-import uniqueId from "lodash/uniqueId";
-import { expect, within } from "storybook/test";
+} from "#/testHelpers/storybook";
 import type { WorkspaceFilterState } from "./filter/WorkspacesFilter";
 import { WorkspacesPageView } from "./WorkspacesPageView";
 
@@ -167,7 +168,6 @@ const meta: Meta<typeof WorkspacesPageView> = {
 		limit: DEFAULT_RECORDS_PER_PAGE,
 		filterState: defaultFilterProps,
 		checkedWorkspaces: [],
-		canCheckWorkspaces: true,
 		templates: mockTemplates,
 		templatesFetchStatus: "success",
 		count: 13,
@@ -192,6 +192,13 @@ export const AllStates: Story = {
 	args: {
 		workspaces: allWorkspaces,
 		count: allWorkspaces.length,
+	},
+};
+
+export const Loading: Story = {
+	args: {
+		workspaces: undefined,
+		count: undefined,
 	},
 };
 
@@ -379,5 +386,45 @@ export const ShowOrganizations: Story = {
 		});
 
 		expect(accessibleTableCell).toBeDefined();
+	},
+};
+
+export const ShowWorkspaceTasks: Story = {
+	args: {
+		workspaces: [
+			{
+				...MockWorkspace,
+				name: "regular-user-workspace",
+			},
+			{
+				...MockTaskWorkspace,
+				name: "task-workspace",
+			},
+		],
+	},
+};
+
+export const ShowWorkspaceChats: Story = {
+	args: {
+		workspaces: [
+			{
+				...MockWorkspace,
+				name: "regular-workspace",
+			},
+			{
+				...MockWorkspace,
+				id: "ws-with-agent",
+				name: "agent-workspace",
+			},
+		],
+		chatsByWorkspace: { "ws-with-agent": "some-chat-id" },
+	},
+};
+
+export const WithCheckedWorkspaces: Story = {
+	args: {
+		workspaces: allWorkspaces.slice(0, 5),
+		checkedWorkspaces: allWorkspaces.slice(0, 2),
+		count: 5,
 	},
 };

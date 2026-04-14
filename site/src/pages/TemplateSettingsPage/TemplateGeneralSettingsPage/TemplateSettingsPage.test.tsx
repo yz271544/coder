@@ -1,18 +1,18 @@
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
+import { API, withDefaultFeatures } from "#/api/api";
+import type { UpdateTemplateMeta } from "#/api/typesGenerated";
 import {
 	MockEntitlements,
 	MockTemplate,
 	mockApiError,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	renderWithTemplateSettingsLayout,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { server } from "testHelpers/server";
-import { screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { API, withDefaultFeatures } from "api/api";
-import type { UpdateTemplateMeta } from "api/typesGenerated";
-import { HttpResponse, http } from "msw";
+} from "#/testHelpers/renderHelpers";
+import { server } from "#/testHelpers/server";
 import { validationSchema } from "./TemplateSettingsForm";
 import TemplateSettingsPage from "./TemplateSettingsPage";
 
@@ -56,6 +56,7 @@ const validFormValues: FormValues = {
 	max_port_share_level: "owner",
 	use_classic_parameter_flow: true,
 	cors_behavior: "simple",
+	disable_module_cache: false,
 };
 
 const renderTemplateSettingsPage = async () => {
@@ -104,10 +105,14 @@ const fillAndSubmitForm = async ({
 	await userEvent.click(submitButton);
 };
 
-describe("TemplateSettingsPage", () => {
+describe("TemplateSettingsPage", { timeout: 20_000 }, () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("succeeds", async () => {
 		await renderTemplateSettingsPage();
-		jest.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
+		vi.spyOn(API, "updateTemplateMeta").mockResolvedValueOnce({
 			...MockTemplate,
 			...validFormValues,
 		});
@@ -117,7 +122,7 @@ describe("TemplateSettingsPage", () => {
 
 	it("displays an error if the name is taken", async () => {
 		await renderTemplateSettingsPage();
-		jest.spyOn(API, "updateTemplateMeta").mockRejectedValueOnce(
+		vi.spyOn(API, "updateTemplateMeta").mockRejectedValueOnce(
 			mockApiError({
 				message: `Template with name "test-template" already exists`,
 				validations: [
@@ -130,8 +135,11 @@ describe("TemplateSettingsPage", () => {
 		);
 		await fillAndSubmitForm(validFormValues);
 		await waitFor(() => expect(API.updateTemplateMeta).toBeCalledTimes(1));
+		const form = await screen.findByRole("form", {
+			name: /template settings/i,
+		});
 		expect(
-			await screen.findByText(
+			await within(form).findByText(
 				"This value is already in use and should be unique.",
 			),
 		).toBeInTheDocument();
@@ -169,14 +177,16 @@ describe("TemplateSettingsPage", () => {
 					});
 				}),
 			);
-			const updateTemplateMetaSpy = jest.spyOn(API, "updateTemplateMeta");
+			const updateTemplateMetaSpy = vi.spyOn(API, "updateTemplateMeta");
 			const deprecationMessage = "This template is deprecated";
 
 			await renderTemplateSettingsPage();
 			await deprecateTemplate(deprecationMessage);
+			await waitFor(() =>
+				expect(updateTemplateMetaSpy).toHaveBeenCalledTimes(1),
+			);
 
 			const [templateId, data] = updateTemplateMetaSpy.mock.calls[0];
-
 			expect(templateId).toEqual(MockTemplate.id);
 			expect(data).toEqual(
 				expect.objectContaining({ deprecation_message: deprecationMessage }),
@@ -194,13 +204,15 @@ describe("TemplateSettingsPage", () => {
 					});
 				}),
 			);
-			const updateTemplateMetaSpy = jest.spyOn(API, "updateTemplateMeta");
+			const updateTemplateMetaSpy = vi.spyOn(API, "updateTemplateMeta");
 
 			await renderTemplateSettingsPage();
 			await deprecateTemplate("This template should not be able to deprecate");
+			await waitFor(() =>
+				expect(updateTemplateMetaSpy).toHaveBeenCalledTimes(1),
+			);
 
 			const [templateId, data] = updateTemplateMetaSpy.mock.calls[0];
-
 			expect(templateId).toEqual(MockTemplate.id);
 			expect(data).toEqual(
 				expect.objectContaining({ deprecation_message: "" }),

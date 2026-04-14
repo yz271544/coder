@@ -1,8 +1,7 @@
-import { mockApiError } from "testHelpers/entities";
-import { renderWithAuth } from "testHelpers/renderHelpers";
 import { fireEvent, screen, waitFor } from "@testing-library/react";
-import { API } from "api/api";
-import * as AccountForm from "./AccountForm";
+import { API } from "#/api/api";
+import { mockApiError } from "#/testHelpers/entities";
+import { renderWithAuth } from "#/testHelpers/renderHelpers";
 import AccountPage from "./AccountPage";
 
 const newData = {
@@ -19,13 +18,13 @@ const fillAndSubmitForm = async () => {
 	fireEvent.change(screen.getByLabelText("Name"), {
 		target: { value: newData.name },
 	});
-	fireEvent.click(screen.getByText(AccountForm.Language.updateSettings));
+	fireEvent.click(screen.getByText("Update account"));
 };
 
 describe("AccountPage", () => {
 	describe("when it is a success", () => {
 		it("shows the success message", async () => {
-			jest.spyOn(API, "updateProfile").mockImplementationOnce((userId, data) =>
+			vi.spyOn(API, "updateProfile").mockImplementationOnce((userId, data) =>
 				Promise.resolve({
 					id: userId,
 					email: "user@coder.com",
@@ -37,6 +36,7 @@ describe("AccountPage", () => {
 					avatar_url: "",
 					last_seen_at: new Date().toISOString(),
 					login_type: "password",
+					has_ai_seat: false,
 					theme_preference: "",
 					...data,
 				}),
@@ -44,7 +44,9 @@ describe("AccountPage", () => {
 			renderWithAuth(<AccountPage />);
 			await fillAndSubmitForm();
 
-			const successMessage = await screen.findByText("Updated settings.");
+			const successMessage = await screen.findByText(
+				"Profile updated successfully.",
+			);
 			expect(successMessage).toBeDefined();
 			expect(API.updateProfile).toBeCalledTimes(1);
 			expect(API.updateProfile).toBeCalledWith("me", newData);
@@ -53,7 +55,7 @@ describe("AccountPage", () => {
 
 	describe("when the username is already taken", () => {
 		it("shows an error", async () => {
-			jest.spyOn(API, "updateProfile").mockRejectedValueOnce(
+			vi.spyOn(API, "updateProfile").mockRejectedValueOnce(
 				mockApiError({
 					message: "Invalid profile",
 					validations: [
@@ -65,10 +67,10 @@ describe("AccountPage", () => {
 			renderWithAuth(<AccountPage />);
 			await fillAndSubmitForm();
 
-			const errorMessage = await screen.findByText(
+			const errorMessages = await screen.findAllByText(
 				"Username is already in use",
 			);
-			expect(errorMessage).toBeDefined();
+			expect(errorMessages.length).toBeGreaterThanOrEqual(2);
 			expect(API.updateProfile).toBeCalledTimes(1);
 			expect(API.updateProfile).toBeCalledWith("me", newData);
 		});
@@ -76,7 +78,7 @@ describe("AccountPage", () => {
 
 	describe("when it is an unknown error", () => {
 		it("shows a generic error message", async () => {
-			jest.spyOn(API, "updateProfile").mockRejectedValueOnce({
+			vi.spyOn(API, "updateProfile").mockRejectedValueOnce({
 				data: "unknown error",
 			});
 

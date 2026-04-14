@@ -16,8 +16,8 @@ import (
 	"golang.org/x/xerrors"
 	gProto "google.golang.org/protobuf/proto"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbmock"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
@@ -36,9 +36,7 @@ func TestMain(m *testing.M) {
 
 func TestPGCoordinatorSingle_ClientWithoutAgent(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -52,7 +50,7 @@ func TestPGCoordinatorSingle_ClientWithoutAgent(t *testing.T) {
 	defer client.Close(ctx)
 	client.UpdateDERP(10)
 	require.Eventually(t, func() bool {
-		clients, err := store.GetTailnetTunnelPeerBindings(ctx, agentID)
+		clients, err := store.GetTailnetTunnelPeerBindingsBatch(ctx, []uuid.UUID{agentID})
 		if err != nil && !xerrors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("database error: %v", err)
 		}
@@ -71,9 +69,7 @@ func TestPGCoordinatorSingle_ClientWithoutAgent(t *testing.T) {
 
 func TestPGCoordinatorSingle_AgentWithoutClients(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -105,9 +101,7 @@ func TestPGCoordinatorSingle_AgentWithoutClients(t *testing.T) {
 
 func TestPGCoordinatorSingle_AgentInvalidIP(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -132,9 +126,7 @@ func TestPGCoordinatorSingle_AgentInvalidIP(t *testing.T) {
 
 func TestPGCoordinatorSingle_AgentInvalidIPBits(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -160,9 +152,7 @@ func TestPGCoordinatorSingle_AgentInvalidIPBits(t *testing.T) {
 
 func TestPGCoordinatorSingle_AgentValidIP(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -199,9 +189,7 @@ func TestPGCoordinatorSingle_AgentValidIP(t *testing.T) {
 
 func TestPGCoordinatorSingle_AgentWithClient(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -248,9 +236,7 @@ func TestPGCoordinatorSingle_AgentWithClient(t *testing.T) {
 
 func TestPGCoordinatorSingle_MissedHeartbeats(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitShort)
 	defer cancel()
@@ -333,9 +319,7 @@ func TestPGCoordinatorSingle_MissedHeartbeats(t *testing.T) {
 
 func TestPGCoordinatorSingle_MissedHeartbeats_NoDrop(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -379,9 +363,7 @@ func TestPGCoordinatorSingle_MissedHeartbeats_NoDrop(t *testing.T) {
 
 func TestPGCoordinatorSingle_SendsHeartbeats(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -429,9 +411,7 @@ func TestPGCoordinatorSingle_SendsHeartbeats(t *testing.T) {
 //	            +---------+
 func TestPGCoordinatorDual_Mainline(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -527,9 +507,7 @@ func TestPGCoordinatorDual_Mainline(t *testing.T) {
 //	            +---------+
 func TestPGCoordinator_MultiCoordinatorAgent(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -612,9 +590,8 @@ func TestPGCoordinator_Unhealthy(t *testing.T) {
 	mStore.EXPECT().CleanTailnetCoordinators(gomock.Any()).AnyTimes().Return(nil)
 	mStore.EXPECT().CleanTailnetLostPeers(gomock.Any()).AnyTimes().Return(nil)
 	mStore.EXPECT().CleanTailnetTunnels(gomock.Any()).AnyTimes().Return(nil)
-	mStore.EXPECT().GetTailnetTunnelPeerIDs(gomock.Any(), gomock.Any()).AnyTimes().Return(nil, nil)
-	mStore.EXPECT().GetTailnetTunnelPeerBindings(gomock.Any(), gomock.Any()).
-		AnyTimes().Return(nil, nil)
+	mStore.EXPECT().GetTailnetTunnelPeerIDsBatch(gomock.Any(), gomock.Any()).AnyTimes().Return(nil, nil)
+	mStore.EXPECT().GetTailnetTunnelPeerBindingsBatch(gomock.Any(), gomock.Any()).AnyTimes().Return(nil, nil)
 	mStore.EXPECT().DeleteTailnetPeer(gomock.Any(), gomock.Any()).
 		AnyTimes().Return(database.DeleteTailnetPeerRow{}, nil)
 	mStore.EXPECT().DeleteAllTailnetTunnels(gomock.Any(), gomock.Any()).AnyTimes().Return(nil)
@@ -695,9 +672,7 @@ func TestPGCoordinator_Node_Empty(t *testing.T) {
 // do this now, but it's schematically possible, so we should make sure it doesn't break anything.
 func TestPGCoordinator_BidirectionalTunnels(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -710,9 +685,7 @@ func TestPGCoordinator_BidirectionalTunnels(t *testing.T) {
 
 func TestPGCoordinator_GracefulDisconnect(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -725,9 +698,7 @@ func TestPGCoordinator_GracefulDisconnect(t *testing.T) {
 
 func TestPGCoordinator_Lost(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -740,9 +711,7 @@ func TestPGCoordinator_Lost(t *testing.T) {
 
 func TestPGCoordinator_NoDeleteOnClose(t *testing.T) {
 	t.Parallel()
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
+
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -794,10 +763,6 @@ func TestPGCoordinator_NoDeleteOnClose(t *testing.T) {
 // a new coordinator and reestablish their tunnels.
 func TestPGCoordinatorDual_FailedHeartbeat(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
 
 	dburl, err := dbtestutil.Open(t)
 	require.NoError(t, err)
@@ -861,10 +826,6 @@ func TestPGCoordinatorDual_FailedHeartbeat(t *testing.T) {
 func TestPGCoordinatorDual_PeerReconnect(t *testing.T) {
 	t.Parallel()
 
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
-
 	store, ps := dbtestutil.NewDB(t)
 	ctx, cancel := context.WithTimeout(context.Background(), testutil.WaitSuperLong)
 	defer cancel()
@@ -917,10 +878,6 @@ func TestPGCoordinatorDual_PeerReconnect(t *testing.T) {
 // is propogated through to the `Authorize` method of the coordinatee auth
 func TestPGCoordinatorPropogatedPeerContext(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
 
 	ctx := testutil.Context(t, testutil.WaitMedium)
 	store, ps := dbtestutil.NewDB(t)
@@ -976,7 +933,7 @@ func assertEventuallyLost(ctx context.Context, t *testing.T, store database.Stor
 func assertEventuallyNoClientsForAgent(ctx context.Context, t *testing.T, store database.Store, agentID uuid.UUID) {
 	t.Helper()
 	assert.Eventually(t, func() bool {
-		clients, err := store.GetTailnetTunnelPeerIDs(ctx, agentID)
+		clients, err := store.GetTailnetTunnelPeerIDsBatch(ctx, []uuid.UUID{agentID})
 		if xerrors.Is(err, sql.ErrNoRows) {
 			return true
 		}

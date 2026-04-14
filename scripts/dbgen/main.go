@@ -17,6 +17,8 @@ import (
 	"github.com/dave/dst/decorator/resolver/guess"
 	"golang.org/x/tools/imports"
 	"golang.org/x/xerrors"
+
+	"github.com/coder/coder/v2/scripts/atomicwrite"
 )
 
 var (
@@ -55,8 +57,9 @@ func run() error {
 start := time.Now()
 %s := m.s.%s(%s)
 m.queryLatencies.WithLabelValues("%s").Observe(time.Since(start).Seconds())
+m.queryCounts.WithLabelValues(httpmw.ExtractHTTPRoute(ctx), httpmw.ExtractHTTPMethod(ctx), "%s").Inc()
 return %s
-`, params.Returns, params.FuncName, params.Parameters, params.FuncName, params.Returns)
+`, params.Returns, params.FuncName, params.Parameters, params.FuncName, params.FuncName, params.Returns)
 	})
 	if err != nil {
 		return xerrors.Errorf("stub dbmetrics: %w", err)
@@ -244,7 +247,7 @@ func orderAndStubDatabaseFunctions(filePath, receiver, structName string, stub f
 	if err != nil {
 		return xerrors.Errorf("process imports: %w", err)
 	}
-	return os.WriteFile(filePath, data, 0o600)
+	return atomicwrite.File(filePath, data)
 }
 
 // compileFuncDecl extracts the function declaration from the given code.

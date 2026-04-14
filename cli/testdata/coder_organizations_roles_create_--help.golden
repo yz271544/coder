@@ -7,7 +7,7 @@ USAGE:
 
     - Run with an input.json file:
   
-       $ coder organization -O <organization_name> roles create --stidin <
+       $ coder organization -O <organization_name> roles create --stdin <
   role.json
 
 OPTIONS:
@@ -18,7 +18,7 @@ OPTIONS:
           Reads stdin for the json role definition to upload.
 
   -y, --yes bool
-          Bypass prompts.
+          Bypass confirmation prompts.
 
 ———
 Run `coder --help` for a list of global options.

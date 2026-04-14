@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { CreateWorkspaceBuildRequest } from "api/typesGenerated";
-import { permissionChecks } from "modules/permissions";
 import { HttpResponse, http } from "msw";
+import type { CreateWorkspaceBuildRequest } from "#/api/typesGenerated";
+import { permissionChecks } from "#/modules/permissions";
 import * as M from "./entities";
 import { MockGroup, MockWorkspaceQuota } from "./entities";
 
@@ -78,6 +78,9 @@ export const handlers = [
 	),
 
 	// templates
+	http.get("/api/v2/templates", () => {
+		return HttpResponse.json([M.MockTemplate]);
+	}),
 	http.get("/api/v2/templates/examples", () => {
 		return HttpResponse.json([M.MockTemplateExample, M.MockTemplateExample2]);
 	}),
@@ -165,7 +168,7 @@ export const handlers = [
 	http.get("/api/v2/users/me/appearance", () => {
 		return HttpResponse.json(M.MockUserAppearanceSettings);
 	}),
-	http.get("/api/v2/users/me/keys", () => {
+	http.post("/api/v2/users/me/keys", () => {
 		return HttpResponse.json(M.MockAPIKey);
 	}),
 	http.get("/api/v2/users/authmethods", () => {
@@ -340,7 +343,7 @@ export const handlers = [
 			path.resolve(__dirname, "./templateFiles.tar"),
 		);
 
-		return HttpResponse.arrayBuffer(fileBuffer);
+		return new HttpResponse(fileBuffer);
 	}),
 
 	http.get("/api/v2/templateversions/:templateVersionId/parameters", () => {

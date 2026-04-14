@@ -1,7 +1,10 @@
-import { users } from "api/queries/users";
-import type { User } from "api/typesGenerated";
-import { Avatar } from "components/Avatar/Avatar";
-import { Button } from "components/Button/Button";
+import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
+import { type FC, useState } from "react";
+import { keepPreviousData, useQuery } from "react-query";
+import { users } from "#/api/queries/users";
+import type { User } from "#/api/typesGenerated";
+import { Avatar } from "#/components/Avatar/Avatar";
+import { Button } from "#/components/Button/Button";
 import {
 	Command,
 	CommandEmpty,
@@ -9,18 +12,15 @@ import {
 	CommandInput,
 	CommandItem,
 	CommandList,
-} from "components/Command/Command";
+} from "#/components/Command/Command";
 import {
 	Popover,
 	PopoverContent,
 	PopoverTrigger,
-} from "components/Popover/Popover";
-import { useAuthenticated } from "hooks";
-import { useDebouncedValue } from "hooks/debounce";
-import { CheckIcon, ChevronsUpDownIcon } from "lucide-react";
-import { type FC, useState } from "react";
-import { keepPreviousData, useQuery } from "react-query";
-import { cn } from "utils/cn";
+} from "#/components/Popover/Popover";
+import { useDebouncedValue } from "#/hooks/debounce";
+import { useAuthenticated } from "#/hooks/useAuthenticated";
+import { cn } from "#/utils/cn";
 
 type UserOption = {
 	label: string;
@@ -74,18 +74,22 @@ export const UserCombobox: FC<UserComboboxProps> = ({
 						"Loading users..."
 					)}
 
-					<ChevronsUpDownIcon className="h-4 w-4 shrink-0 opacity-50" />
+					<ChevronsUpDownIcon className="shrink-0 opacity-50" />
 				</Button>
 			</PopoverTrigger>
-			<PopoverContent className="w-[280px] p-0 " side="bottom" align="start">
-				<Command>
+			<PopoverContent
+				className="flex flex-col w-[280px] p-0"
+				side="bottom"
+				align="start"
+			>
+				<Command className="flex-1 min-h-0">
 					<CommandInput
 						placeholder="Search user..."
 						value={search}
 						onValueChange={setSearch}
 						aria-label="Search user"
 					/>
-					<CommandList>
+					<CommandList className="flex-1 min-h-0 max-h-none">
 						<CommandEmpty>No users found.</CommandEmpty>
 						<CommandGroup>
 							{options?.map((option) => (

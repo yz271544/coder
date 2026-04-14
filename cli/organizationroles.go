@@ -92,6 +92,11 @@ func (r *RootCmd) showOrganizationRoles(orgContext *OrganizationContext) *serpen
 				return err
 			}
 
+			if out == "" {
+				cliui.Infof(inv.Stderr, "No organization roles found.")
+				return nil
+			}
+
 			_, err = fmt.Fprintln(inv.Stdout, out)
 			return err
 		},
@@ -124,7 +129,7 @@ func (r *RootCmd) createOrganizationRole(orgContext *OrganizationContext) *serpe
 		Long: FormatExamples(
 			Example{
 				Description: "Run with an input.json file",
-				Command:     "coder organization -O <organization_name> roles create --stidin < role.json",
+				Command:     "coder organization -O <organization_name> roles create --stdin < role.json",
 			},
 		),
 		Options: []serpent.Option{
@@ -209,7 +214,7 @@ func (r *RootCmd) createOrganizationRole(orgContext *OrganizationContext) *serpe
 			} else {
 				updated, err = client.CreateOrganizationRole(ctx, customRole)
 				if err != nil {
-					return xerrors.Errorf("patch role: %w", err)
+					return xerrors.Errorf("create role: %w", err)
 				}
 			}
 
@@ -519,7 +524,7 @@ type roleTableRow struct {
 	Name            string `table:"name,default_sort"`
 	DisplayName     string `table:"display name"`
 	OrganizationID  string `table:"organization id"`
-	SitePermissions string ` table:"site permissions"`
+	SitePermissions string `table:"site permissions"`
 	// map[<org_id>] -> Permissions
 	OrganizationPermissions string `table:"organization permissions"`
 	UserPermissions         string `table:"user permissions"`

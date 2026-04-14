@@ -8,10 +8,9 @@ import (
 	"github.com/fatih/color"
 	"golang.org/x/xerrors"
 
-	"github.com/coder/pretty"
-
 	"github.com/coder/coder/v2/cli/cliui"
 	"github.com/coder/coder/v2/codersdk"
+	"github.com/coder/pretty"
 	"github.com/coder/serpent"
 )
 
@@ -390,6 +389,11 @@ func (r *RootCmd) listProxies() *serpent.Command {
 			output, err := formatter.Format(ctx, proxies.Regions)
 			if err != nil {
 				return err
+			}
+
+			if output == "" {
+				cliui.Infof(inv.Stderr, "No workspace proxies found.")
+				return nil
 			}
 
 			_, err = fmt.Fprintln(inv.Stdout, output)

@@ -98,6 +98,21 @@ message Manifest {
 	repeated WorkspaceApp apps = 11;
 	repeated WorkspaceAgentMetadata.Description metadata = 12;
 	repeated WorkspaceAgentDevcontainer devcontainers = 17;
+	repeated WorkspaceSecret secrets = 19;
+}
+
+// WorkspaceSecret is a secret included in the agent manifest
+// for injection into a workspace.
+message WorkspaceSecret {
+	// Environment variable name to inject (e.g. "GITHUB_TOKEN").
+	// Empty string means this secret is not injected as an env var.
+	string env_name = 1;
+	// File path to write the secret value to (e.g.
+	// "~/.aws/credentials"). Empty string means this secret is not
+	// written to a file.
+	string file_path = 2;
+	// The decrypted secret value.
+	bytes value = 3;
 }
 
 message WorkspaceAgentDevcontainer {
@@ -105,6 +120,7 @@ message WorkspaceAgentDevcontainer {
 	string workspace_folder = 2;
 	string config_path = 3;
 	string name = 4;
+	optional bytes subagent_id = 5;
 }
 
 message GetManifestRequest {}
@@ -435,6 +451,8 @@ message CreateSubAgentRequest {
 	}
 
 	repeated DisplayApp display_apps = 6;
+
+	optional bytes id = 7;
 }
 
 message CreateSubAgentResponse {
@@ -460,6 +478,55 @@ message ListSubAgentsResponse {
 	repeated SubAgent agents = 1;
 }
 
+// BoundaryLog represents a log for a single resource access processed
+// by boundary.
+message BoundaryLog {
+	message HttpRequest {
+		string method = 1;
+		string url = 2;
+		// The rule that resulted in this HTTP request being allowed. Only populated
+		// when allowed = true because boundary denies requests by default and
+		// requires rule(s) that allow requests.
+		string matched_rule = 3;
+	}
+
+	// Whether boundary allowed this resource access.
+	bool allowed = 1;
+
+	// The timestamp when boundary processed this resource access.
+	google.protobuf.Timestamp time = 2;
+
+	// The resource being accessed by boundary.
+	oneof resource {
+		HttpRequest http_request = 3;
+	}
+}
+
+// ReportBoundaryLogsRequest is a request to re-emit the given BoundaryLogs.
+message ReportBoundaryLogsRequest {
+	repeated BoundaryLog logs = 1;
+}
+
+message ReportBoundaryLogsResponse {}
+
+// UpdateAppStatusRequest updates the given Workspace App's status. c.f. agentsdk.PatchAppStatus
+message UpdateAppStatusRequest {
+  string slug = 1;
+
+  enum AppStatusState {
+    WORKING = 0;
+    IDLE = 1;
+    COMPLETE = 2;
+    FAILURE = 3;
+  }
+  AppStatusState state = 2;
+
+  string message = 3;
+  string uri = 4;
+}
+
+message UpdateAppStatusResponse {}
+
 service Agent {
 	rpc GetManifest(GetManifestRequest) returns (Manifest);
 	rpc GetServiceBanner(GetServiceBannerRequest) returns (ServiceBanner);
@@ -477,4 +544,6 @@ service Agent {
 	rpc CreateSubAgent(CreateSubAgentRequest) returns (CreateSubAgentResponse);
 	rpc DeleteSubAgent(DeleteSubAgentRequest) returns (DeleteSubAgentResponse);
 	rpc ListSubAgents(ListSubAgentsRequest) returns (ListSubAgentsResponse);
+	rpc ReportBoundaryLogs(ReportBoundaryLogsRequest) returns (ReportBoundaryLogsResponse);
+	rpc UpdateAppStatus(UpdateAppStatusRequest) returns (UpdateAppStatusResponse);
 }

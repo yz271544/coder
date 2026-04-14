@@ -1,30 +1,29 @@
-import { AppProviders } from "App";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
+import WS from "jest-websocket-mock";
+import { HttpResponse, http } from "msw";
+import { QueryClient } from "react-query";
+import { createMemoryRouter, RouterProvider } from "react-router";
+import { AppProviders } from "#/App";
+import * as apiModule from "#/api/api";
+import { templateVersionVariablesKey } from "#/api/queries/templates";
+import type { TemplateVersion } from "#/api/typesGenerated";
+import { RequireAuth } from "#/contexts/auth/RequireAuth";
 import {
 	MockTemplate,
 	MockTemplateVersion,
 	MockTemplateVersionVariable1,
 	MockTemplateVersionVariable2,
 	MockWorkspaceBuildLogs,
-} from "testHelpers/entities";
+} from "#/testHelpers/entities";
 import {
 	createTestQueryClient,
 	renderWithAuth,
 	waitForLoaderToBeRemoved,
-} from "testHelpers/renderHelpers";
-import { server } from "testHelpers/server";
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent, { type UserEvent } from "@testing-library/user-event";
-import * as apiModule from "api/api";
-import { templateVersionVariablesKey } from "api/queries/templates";
-import type { TemplateVersion } from "api/typesGenerated";
-import { RequireAuth } from "contexts/auth/RequireAuth";
-import WS from "jest-websocket-mock";
-import { HttpResponse, http } from "msw";
-import { QueryClient } from "react-query";
-import { createMemoryRouter, RouterProvider } from "react-router";
-import type { FileTree } from "utils/filetree";
+} from "#/testHelpers/renderHelpers";
+import { server } from "#/testHelpers/server";
+import type { FileTree } from "#/utils/filetree";
 import type { MonacoEditorProps } from "./MonacoEditor";
-import { Language } from "./PublishTemplateVersionDialog";
 import TemplateVersionEditorPage, {
 	findEntrypointFile,
 	getActivePath,
@@ -34,16 +33,16 @@ const { API } = apiModule;
 
 // For some reason this component in Jest is throwing a MUI style warning so,
 // since we don't need it for this test, we can mock it out
-jest.mock(
+vi.mock(
 	"modules/templates/TemplateResourcesTable/TemplateResourcesTable",
 	() => ({
 		TemplateResourcesTable: () => <div></div>,
 	}),
 );
 
-// Occasionally, Jest encounters HTML5 canvas errors. As the MonacoEditor is not
-// required for these tests, we can safely mock it.
-jest.mock("pages/TemplateVersionEditorPage/MonacoEditor", () => ({
+// Monaco is a large and complicated codebase that slows tests down and we don't
+// need to test.
+vi.mock("#/pages/TemplateVersionEditorPage/MonacoEditor", () => ({
 	MonacoEditor: (props: MonacoEditorProps) => (
 		<textarea
 			data-testid="monaco-editor"
@@ -78,27 +77,25 @@ const buildTemplateVersion = async (
 	user: UserEvent,
 	topbar: HTMLElement,
 ) => {
-	jest.spyOn(API, "uploadFile").mockResolvedValueOnce({ hash: "hash" });
-	jest.spyOn(API, "createTemplateVersion").mockResolvedValue({
+	vi.spyOn(API, "uploadFile").mockResolvedValueOnce({ hash: "hash" });
+	vi.spyOn(API, "createTemplateVersion").mockResolvedValue({
 		...templateVersion,
 		job: {
 			...templateVersion.job,
 			status: "running",
 		},
 	});
-	jest
-		.spyOn(API, "getTemplateVersionByName")
-		.mockResolvedValue(templateVersion);
-	jest
-		.spyOn(apiModule, "watchBuildLogsByTemplateVersionId")
-		.mockImplementation((_, options) => {
+	vi.spyOn(API, "getTemplateVersionByName").mockResolvedValue(templateVersion);
+	vi.spyOn(apiModule, "watchBuildLogsByTemplateVersionId").mockImplementation(
+		(_, options) => {
 			options.onMessage(MockWorkspaceBuildLogs[0]);
 			options.onDone?.();
 			const wsMock = {
-				close: jest.fn(),
+				close: vi.fn(),
 			} as unknown;
 			return wsMock as WebSocket;
-		});
+		},
+	);
 	const buildButton = within(topbar).getByRole("button", {
 		name: "Build",
 	});
@@ -124,10 +121,10 @@ test("Use custom name, message and set it as active when publishing", async () =
 	await buildTemplateVersion(newTemplateVersion, user, topbar);
 
 	// Publish
-	const patchTemplateVersion = jest
+	const patchTemplateVersion = vi
 		.spyOn(API, "patchTemplateVersion")
 		.mockResolvedValue(newTemplateVersion);
-	const updateActiveTemplateVersion = jest
+	const updateActiveTemplateVersion = vi
 		.spyOn(API, "updateActiveTemplateVersion")
 		.mockResolvedValue({ message: "" });
 	const publishButton = within(topbar).getByRole("button", {
@@ -149,11 +146,16 @@ test("Use custom name, message and set it as active when publishing", async () =
 			name: "v1.0",
 			message: "Informative message",
 		});
+		expect(updateActiveTemplateVersion).toBeCalledWith("test-template", {
+			id: "new-version-id",
+		});
 	});
-	expect(updateActiveTemplateVersion).toBeCalledWith("test-template", {
-		id: "new-version-id",
+	// Wait for the dialog to close so all async state updates (setIsPublishingDialogOpen,
+	// setLastSuccessfulPublishedVersion, navigation) settle before the test ends.
+	await waitFor(() => {
+		expect(screen.queryByTestId("dialog")).not.toBeInTheDocument();
 	});
-});
+}, 20_000);
 
 test("Do not mark as active if promote is not checked", async () => {
 	const user = userEvent.setup();
@@ -170,10 +172,10 @@ test("Do not mark as active if promote is not checked", async () => {
 	await buildTemplateVersion(newTemplateVersion, user, topbar);
 
 	// Publish
-	const patchTemplateVersion = jest
+	const patchTemplateVersion = vi
 		.spyOn(API, "patchTemplateVersion")
 		.mockResolvedValue(newTemplateVersion);
-	const updateActiveTemplateVersion = jest
+	const updateActiveTemplateVersion = vi
 		.spyOn(API, "updateActiveTemplateVersion")
 		.mockResolvedValue({ message: "" });
 	const publishButton = within(topbar).getByRole("button", {
@@ -185,7 +187,7 @@ test("Do not mark as active if promote is not checked", async () => {
 	await user.clear(nameField);
 	await user.type(nameField, "v1.0");
 	await user.click(
-		within(publishDialog).getByLabelText(Language.defaultCheckboxLabel),
+		within(publishDialog).getByLabelText("Promote to active version"),
 	);
 	await user.click(
 		within(publishDialog).getByRole("button", { name: "Publish" }),
@@ -197,6 +199,11 @@ test("Do not mark as active if promote is not checked", async () => {
 		});
 	});
 	expect(updateActiveTemplateVersion).toBeCalledTimes(0);
+	// Wait for the dialog to close so all async state updates settle before the
+	// test ends, preventing act() warnings from pending state mutations.
+	await waitFor(() => {
+		expect(screen.queryByTestId("dialog")).not.toBeInTheDocument();
+	});
 });
 
 test("Patch request is not send when there are no changes", async () => {
@@ -215,7 +222,7 @@ test("Patch request is not send when there are no changes", async () => {
 	await buildTemplateVersion(newTemplateVersion, user, topbar);
 
 	// Publish
-	const patchTemplateVersion = jest
+	const patchTemplateVersion = vi
 		.spyOn(API, "patchTemplateVersion")
 		.mockResolvedValue(newTemplateVersion);
 	const publishButton = within(topbar).getByRole("button", {
@@ -255,6 +262,39 @@ test("The file is uploaded with the correct content type", async () => {
 	);
 });
 
+test("Preserves the currently open file path when building a template version", async () => {
+	const user = userEvent.setup();
+	const { router } = renderWithAuth(<TemplateVersionEditorPage />, {
+		route: `/templates/${MockTemplate.name}/versions/${MockTemplateVersion.name}/edit?path=myfile.tf`,
+		path: "/templates/:template/versions/:version/edit",
+		extraRoutes: [
+			{
+				path: "/templates/:templateId",
+				element: <div></div>,
+			},
+		],
+	});
+
+	const topbar = await screen.findByTestId("topbar");
+
+	const newTemplateVersion: TemplateVersion = {
+		...MockTemplateVersion,
+		id: "new-version-id",
+		name: "new-version",
+	};
+
+	await typeOnEditor("new content", user);
+	await buildTemplateVersion(newTemplateVersion, user, topbar);
+
+	// Verify that the path query parameter is preserved in the URL
+	await waitFor(() => {
+		expect(router.state.location.pathname).toBe(
+			`/templates/${MockTemplate.name}/versions/new-version/edit`,
+		);
+	});
+	expect(router.state.location.search).toBe("?path=myfile.tf");
+});
+
 describe.each([
 	{
 		testName: "Do not ask when template version has no errors",
@@ -290,52 +330,49 @@ describe.each([
 		],
 		askForVariables: true,
 	},
-])(
-	"Missing template variables",
-	({
-		testName,
-		initialVariables,
-		loadedVariables,
-		templateVersion,
-		askForVariables,
-	}) => {
-		it(testName, async () => {
-			jest.resetAllMocks();
-			const queryClient = new QueryClient();
-			queryClient.setQueryData(
-				templateVersionVariablesKey(MockTemplateVersion.id),
-				initialVariables,
-			);
+])("Missing template variables", ({
+	testName,
+	initialVariables,
+	loadedVariables,
+	templateVersion,
+	askForVariables,
+}) => {
+	it(testName, async () => {
+		vi.resetAllMocks();
+		const queryClient = new QueryClient();
+		queryClient.setQueryData(
+			templateVersionVariablesKey(MockTemplateVersion.id),
+			initialVariables,
+		);
 
+		server.use(
+			http.get(
+				"/api/v2/organizations/:org/templates/:template/versions/:version",
+				() => {
+					return HttpResponse.json(templateVersion);
+				},
+			),
+		);
+
+		if (loadedVariables) {
 			server.use(
-				http.get(
-					"/api/v2/organizations/:org/templates/:template/versions/:version",
-					() => {
-						return HttpResponse.json(templateVersion);
-					},
-				),
+				http.get("/api/v2/templateversions/:version/variables", () => {
+					return HttpResponse.json(loadedVariables);
+				}),
 			);
+		}
 
-			if (loadedVariables) {
-				server.use(
-					http.get("/api/v2/templateversions/:version/variables", () => {
-						return HttpResponse.json(loadedVariables);
-					}),
-				);
-			}
+		renderEditorPage(queryClient);
+		await waitForLoaderToBeRemoved();
 
-			renderEditorPage(queryClient);
-			await waitForLoaderToBeRemoved();
-
-			const dialogSelector = /template variables/i;
-			if (askForVariables) {
-				await screen.findByText(dialogSelector);
-			} else {
-				expect(screen.queryByText(dialogSelector)).not.toBeInTheDocument();
-			}
-		});
-	},
-);
+		const dialogSelector = /template variables/i;
+		if (askForVariables) {
+			await screen.findByText(dialogSelector);
+		} else {
+			expect(screen.queryByText(dialogSelector)).not.toBeInTheDocument();
+		}
+	});
+});
 
 test("display pending badge and update it to running when status changes", async () => {
 	const MockPendingTemplateVersion = {
@@ -373,7 +410,7 @@ test("display pending badge and update it to running when status changes", async
 
 	renderEditorPage(createTestQueryClient());
 
-	const status = await screen.findByRole("status");
+	const status = await screen.findByRole("status", { name: /pending/i });
 	expect(status).toHaveTextContent("Pending");
 
 	// Manually update the endpoint, as to not rely on the editor page

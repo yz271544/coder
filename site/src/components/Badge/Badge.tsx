@@ -1,39 +1,38 @@
 /**
- * Copied from shadc/ui on 11/13/2024
+ * Copied from shadcn/ui on 11/13/2024
  * @see {@link https://ui.shadcn.com/docs/components/badge}
  */
-import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
-import { forwardRef } from "react";
-import { cn } from "utils/cn";
+import { Slot } from "radix-ui";
+import { cn } from "#/utils/cn";
 
 const badgeVariants = cva(
 	`
-	inline-flex items-center rounded-md border px-2 py-1 text-nowrap
-	transition-colors
-	[&_svg]:pointer-events-none [&_svg]:pr-0.5 [&_svg]:py-0.5 [&_svg]:mr-0.5
+	inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-nowrap
+	transition-colors [&_svg]:py-0.5 border-solid
+	[&_svg]:pointer-events-none
 	`,
 	{
 		variants: {
 			variant: {
 				default:
-					"border-transparent bg-surface-secondary text-content-secondary shadow",
+					"border-surface-secondary bg-surface-secondary text-content-secondary shadow",
 				warning:
-					"border border-solid border-border-warning bg-surface-orange text-content-warning shadow",
+					"border-border-warning bg-surface-orange text-content-warning shadow",
 				destructive:
-					"border border-solid border-border-destructive bg-surface-red text-highlight-red shadow",
+					"border-border-destructive bg-surface-red text-highlight-red shadow",
 				green:
-					"border border-solid border-border-green bg-surface-green text-highlight-green shadow",
-				info: "border border-solid border-border-sky bg-surface-sky text-highlight-sky shadow",
+					"border-border-green bg-surface-green text-highlight-green shadow",
+				purple:
+					"border-border-purple bg-surface-purple text-highlight-purple shadow",
+				magenta:
+					"border-border-magenta bg-surface-magenta text-highlight-magenta shadow",
+				info: "border-border-pending bg-surface-sky text-highlight-sky shadow",
 			},
 			size: {
-				xs: "text-2xs font-regular h-5 [&_svg]:hidden rounded px-1.5",
-				sm: "text-2xs font-regular h-5.5 [&_svg]:size-icon-xs",
-				md: "text-xs font-medium [&_svg]:size-icon-sm",
-			},
-			border: {
-				none: "border-transparent",
-				solid: "border border-solid",
+				xs: "border-0 text-2xs font-normal h-[18px] [&_svg]:size-icon-xs rounded",
+				sm: "text-2xs font-normal h-5.5 py-1 [&_svg]:size-icon-xs",
+				md: "text-xs font-normal py-1 [&_svg]:size-icon-xs",
 			},
 			hover: {
 				false: null,
@@ -46,38 +45,39 @@ const badgeVariants = cva(
 				variant: "default",
 				class: "hover:bg-surface-tertiary",
 			},
+			{
+				hover: true,
+				variant: "info",
+				class: "hover:bg-surface-info/20",
+			},
 		],
 		defaultVariants: {
 			variant: "default",
 			size: "md",
-			border: "none",
 			hover: false,
 		},
 	},
 );
 
-interface BadgeProps
-	extends React.HTMLAttributes<HTMLDivElement>,
-		VariantProps<typeof badgeVariants> {
-	asChild?: boolean;
-}
+type BadgeProps = React.ComponentPropsWithRef<"div"> &
+	VariantProps<typeof badgeVariants> & {
+		asChild?: boolean;
+	};
 
-export const Badge = forwardRef<HTMLDivElement, BadgeProps>(
-	(
-		{ className, variant, size, border, hover, asChild = false, ...props },
-		ref,
-	) => {
-		const Comp = asChild ? Slot : "div";
+export const Badge: React.FC<BadgeProps> = ({
+	className,
+	variant,
+	size,
+	hover,
+	asChild = false,
+	...props
+}) => {
+	const Comp = asChild ? Slot.Root : "div";
 
-		return (
-			<Comp
-				{...props}
-				ref={ref}
-				className={cn(
-					badgeVariants({ variant, size, border, hover }),
-					className,
-				)}
-			/>
-		);
-	},
-);
+	return (
+		<Comp
+			{...props}
+			className={cn(badgeVariants({ variant, size, hover }), className)}
+		/>
+	);
+};

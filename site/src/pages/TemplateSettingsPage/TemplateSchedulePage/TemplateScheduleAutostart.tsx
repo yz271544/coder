@@ -1,11 +1,11 @@
 import FormHelperText from "@mui/material/FormHelperText";
-import { Button } from "components/Button/Button";
-import { Stack } from "components/Stack/Stack";
 import type { FC } from "react";
+import { Button } from "#/components/Button/Button";
+import { Stack } from "#/components/Stack/Stack";
 import {
 	sortedDays,
 	type TemplateAutostartRequirementDaysValue,
-} from "utils/schedule";
+} from "#/utils/schedule";
 
 interface TemplateScheduleAutostartProps {
 	enabled: boolean;
@@ -21,7 +21,7 @@ export const TemplateScheduleAutostart: FC<TemplateScheduleAutostartProps> = ({
 	onChange,
 }) => {
 	return (
-		<Stack width="100%" alignItems="start" spacing={1}>
+		<Stack alignItems="start" spacing={1}>
 			<Stack
 				direction="row"
 				spacing={0}

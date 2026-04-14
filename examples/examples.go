@@ -9,7 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"path"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -40,6 +40,7 @@ var (
 	//go:embed templates/kubernetes-devcontainer
 	//go:embed templates/nomad-docker
 	//go:embed templates/scratch
+	//go:embed templates/tasks-docker
 	files embed.FS
 
 	exampleBasePath = "https://github.com/coder/coder/tree/main/examples/templates/"
@@ -104,8 +105,8 @@ func parseAndVerifyExamples() (examples []codersdk.TemplateExample, err error) {
 		}
 	}
 
-	sort.Strings(wantEmbedFiles)
-	sort.Strings(gotEmbedFiles)
+	slices.Sort(wantEmbedFiles)
+	slices.Sort(gotEmbedFiles)
 	want := strings.Join(wantEmbedFiles, ", ")
 	got := strings.Join(gotEmbedFiles, ", ")
 	if want != got {

@@ -3,13 +3,11 @@ package agentapi_test
 import (
 	"context"
 	"database/sql"
-	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sqlc-dev/pqtype"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -75,6 +73,9 @@ func TestConnectionLog(t *testing.T) {
 			action: agentproto.Connection_CONNECT.Enum(),
 			typ:    agentproto.Connection_JETBRAINS.Enum(),
 			time:   dbtime.Now(),
+			// Sometimes, JetBrains clients report as localhost, see
+			// https://github.com/coder/coder/issues/20194
+			ip: "localhost",
 		},
 		{
 			name:   "Reconnecting PTY Connect",
@@ -100,7 +101,6 @@ func TestConnectionLog(t *testing.T) {
 			reason: "because error says so",
 		},
 	}
-	//nolint:paralleltest // No longer necessary to reinitialise the variable tt.
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -113,9 +113,9 @@ func TestConnectionLog(t *testing.T) {
 			api := &agentapi.ConnLogAPI{
 				ConnectionLogger: asAtomicPointer[connectionlog.ConnectionLogger](connLogger),
 				Database:         mDB,
-				AgentFn: func(context.Context) (database.WorkspaceAgent, error) {
-					return agent, nil
-				},
+				AgentID:          agent.ID,
+				AgentName:        agent.Name,
+				Workspace:        &agentapi.CachedWorkspaceFields{},
 			}
 			api.ReportConnection(context.Background(), &agentproto.ReportConnectionRequest{
 				Connection: &agentproto.Connection{
@@ -128,6 +128,12 @@ func TestConnectionLog(t *testing.T) {
 					Reason:     &tt.reason,
 				},
 			})
+
+			expectedIPRaw := tt.ip
+			if expectedIPRaw == "localhost" {
+				expectedIPRaw = "127.0.0.1"
+			}
+			expectedIP := database.ParseIP(expectedIPRaw)
 
 			require.True(t, connLogger.Contains(t, database.UpsertConnectionLogParams{
 				Time:             dbtime.Time(tt.time).In(time.UTC),
@@ -146,7 +152,7 @@ func TestConnectionLog(t *testing.T) {
 					Int32: tt.status,
 					Valid: *tt.action == agentproto.Connection_DISCONNECT,
 				},
-				Ip:   pqtype.Inet{Valid: true, IPNet: net.IPNet{IP: net.ParseIP(tt.ip), Mask: net.CIDRMask(32, 32)}},
+				IP:   expectedIP,
 				Type: agentProtoConnectionTypeToConnectionLog(t, *tt.typ),
 				DisconnectReason: sql.NullString{
 					String: tt.reason,

@@ -2,7 +2,6 @@ package coderd
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -14,8 +13,9 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
+	"cdr.dev/slog/v3"
 	agpl "github.com/coder/coder/v2/coderd"
+	"github.com/coder/coder/v2/coderd/apikey"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/db2sdk"
@@ -28,7 +28,6 @@ import (
 	"github.com/coder/coder/v2/coderd/workspaceapps"
 	"github.com/coder/coder/v2/coderd/workspaceapps/appurl"
 	"github.com/coder/coder/v2/codersdk"
-	"github.com/coder/coder/v2/cryptorand"
 	"github.com/coder/coder/v2/enterprise/coderd/proxyhealth"
 	"github.com/coder/coder/v2/enterprise/replicasync"
 	"github.com/coder/coder/v2/enterprise/wsproxy/wsproxysdk"
@@ -205,7 +204,7 @@ func (api *API) patchPrimaryWorkspaceProxy(req codersdk.PatchWorkspaceProxy, rw 
 
 	args := database.UpsertDefaultProxyParams{
 		DisplayName: req.DisplayName,
-		IconUrl:     req.Icon,
+		IconURL:     req.Icon,
 	}
 	if req.DisplayName == "" || req.Icon == "" {
 		// If the user has not specified an update value, use the existing value.
@@ -218,7 +217,7 @@ func (api *API) patchPrimaryWorkspaceProxy(req codersdk.PatchWorkspaceProxy, rw 
 			args.DisplayName = existing.DisplayName
 		}
 		if req.Icon == "" {
-			args.IconUrl = existing.IconUrl
+			args.IconURL = existing.IconURL
 		}
 	}
 
@@ -605,6 +604,25 @@ func (api *API) workspaceProxyRegister(rw http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Load the mesh key directly from the database. We don't retrieve the mesh
+	// key from the built-in DERP server because it may not be enabled.
+	//
+	// The mesh key is always generated at startup by an enterprise coderd
+	// server.
+	var meshKey string
+	if req.DerpEnabled {
+		var err error
+		meshKey, err = api.Database.GetDERPMeshKey(ctx)
+		if err != nil {
+			httpapi.InternalServerError(rw, xerrors.Errorf("get DERP mesh key: %w", err))
+			return
+		}
+		if meshKey == "" {
+			httpapi.InternalServerError(rw, xerrors.New("mesh key is empty"))
+			return
+		}
+	}
+
 	startingRegionID, _ := getProxyDERPStartingRegionID(api.Options.BaseDERPMap)
 	// #nosec G115 - Safe conversion as DERP region IDs are small integers expected to be within int32 range
 	regionID := int32(startingRegionID) + proxy.RegionID
@@ -711,7 +729,7 @@ func (api *API) workspaceProxyRegister(rw http.ResponseWriter, r *http.Request) 
 	}
 
 	httpapi.Write(ctx, rw, http.StatusCreated, wsproxysdk.RegisterWorkspaceProxyResponse{
-		DERPMeshKey:         api.DERPServer.MeshKey(),
+		DERPMeshKey:         meshKey,
 		DERPRegionID:        regionID,
 		DERPMap:             api.AGPL.DERPMap(),
 		DERPForceWebSockets: api.DeploymentValues.DERP.Config.ForceWebSockets.Value(),
@@ -934,13 +952,13 @@ func (api *API) reconnectingPTYSignedToken(rw http.ResponseWriter, r *http.Reque
 }
 
 func generateWorkspaceProxyToken(id uuid.UUID) (token string, hashed []byte, err error) {
-	secret, err := cryptorand.HexString(64)
+	secret, hashedSecret, err := apikey.GenerateSecret(64)
 	if err != nil {
 		return "", nil, xerrors.Errorf("generate token: %w", err)
 	}
-	hashedSecret := sha256.Sum256([]byte(secret))
+
 	fullToken := fmt.Sprintf("%s:%s", id, secret)
-	return fullToken, hashedSecret[:], nil
+	return fullToken, hashedSecret, nil
 }
 
 func convertProxies(p []database.WorkspaceProxy, statuses map[uuid.UUID]proxyhealth.ProxyStatus) []codersdk.WorkspaceProxy {

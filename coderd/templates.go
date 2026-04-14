@@ -14,11 +14,10 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-	"github.com/coder/coder/v2/coderd/database/db2sdk"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/database"
+	"github.com/coder/coder/v2/coderd/database/db2sdk"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
 	"github.com/coder/coder/v2/coderd/httpapi"
@@ -91,17 +90,27 @@ func (api *API) deleteTemplate(rw http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if len(workspaces) > 0 {
-		httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
-			Message: "All workspaces must be deleted before a template can be removed.",
-		})
-		return
+	// Allow deletion when only prebuild workspaces remain. Prebuilds
+	// are owned by the system user and will be cleaned up
+	// asynchronously by the prebuilds reconciler once the template's
+	// deleted flag is set.
+	for _, ws := range workspaces {
+		if ws.OwnerID != database.PrebuildsSystemUserID {
+			httpapi.Write(ctx, rw, http.StatusBadRequest, codersdk.Response{
+				Message: "All workspaces must be deleted before a template can be removed.",
+			})
+			return
+		}
 	}
 	err = api.Database.UpdateTemplateDeletedByID(ctx, database.UpdateTemplateDeletedByIDParams{
 		ID:        template.ID,
 		Deleted:   true,
 		UpdatedAt: dbtime.Now(),
 	})
+	if dbauthz.IsNotAuthorizedError(err) {
+		httpapi.Forbidden(rw)
+		return
+	}
 	if err != nil {
 		httpapi.Write(ctx, rw, http.StatusInternalServerError, codersdk.Response{
 			Message: "Internal error deleting template.",
@@ -772,6 +781,10 @@ func (api *API) patchTemplateMeta(rw http.ResponseWriter, r *http.Request) {
 	if req.UseClassicParameterFlow != nil {
 		classicTemplateFlow = *req.UseClassicParameterFlow
 	}
+	disableModuleCache := template.DisableModuleCache
+	if req.DisableModuleCache != nil {
+		disableModuleCache = *req.DisableModuleCache
+	}
 
 	displayName := ptr.NilToDefault(req.DisplayName, template.DisplayName)
 	description := ptr.NilToDefault(req.Description, template.Description)
@@ -797,6 +810,7 @@ func (api *API) patchTemplateMeta(rw http.ResponseWriter, r *http.Request) {
 			req.RequireActiveVersion == template.RequireActiveVersion &&
 			(deprecationMessage == template.Deprecated) &&
 			(classicTemplateFlow == template.UseClassicParameterFlow) &&
+			(disableModuleCache == template.DisableModuleCache) &&
 			maxPortShareLevel == template.MaxPortSharingLevel &&
 			corsBehavior == template.CorsBehavior {
 			return nil
@@ -841,6 +855,7 @@ func (api *API) patchTemplateMeta(rw http.ResponseWriter, r *http.Request) {
 			MaxPortSharingLevel:          maxPortShareLevel,
 			UseClassicParameterFlow:      classicTemplateFlow,
 			CorsBehavior:                 corsBehavior,
+			DisableModuleCache:           disableModuleCache,
 		})
 		if err != nil {
 			return xerrors.Errorf("update template metadata: %w", err)
@@ -1122,27 +1137,21 @@ func (api *API) convertTemplate(
 		RequireActiveVersion:    templateAccessControl.RequireActiveVersion,
 		Deprecated:              templateAccessControl.IsDeprecated(),
 		DeprecationMessage:      templateAccessControl.Deprecated,
+		Deleted:                 template.Deleted,
 		MaxPortShareLevel:       maxPortShareLevel,
 		UseClassicParameterFlow: template.UseClassicParameterFlow,
 		CORSBehavior:            codersdk.CORSBehavior(template.CorsBehavior),
+		DisableModuleCache:      template.DisableModuleCache,
 	}
 }
 
 // findTemplateAdmins fetches all users with template admin permission including owners.
 func findTemplateAdmins(ctx context.Context, store database.Store) ([]database.GetUsersRow, error) {
-	// Notice: we can't scrape the user information in parallel as pq
-	// fails with: unexpected describe rows response: 'D'
-	owners, err := store.GetUsers(ctx, database.GetUsersParams{
-		RbacRole: []string{codersdk.RoleOwner},
+	templateAdmins, err := store.GetUsers(ctx, database.GetUsersParams{
+		RbacRole: []string{codersdk.RoleTemplateAdmin, codersdk.RoleOwner},
 	})
 	if err != nil {
 		return nil, xerrors.Errorf("get owners: %w", err)
 	}
-	templateAdmins, err := store.GetUsers(ctx, database.GetUsersParams{
-		RbacRole: []string{codersdk.RoleTemplateAdmin},
-	})
-	if err != nil {
-		return nil, xerrors.Errorf("get template admins: %w", err)
-	}
-	return append(owners, templateAdmins...), nil
+	return templateAdmins, nil
 }

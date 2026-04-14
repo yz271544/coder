@@ -11,9 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 
-	"cdr.dev/slog/sloggers/slogtest"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/coderd/database"
-	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
 	"github.com/coder/coder/v2/coderd/database/dbmock"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
@@ -273,7 +272,7 @@ func TestRoleSyncTable(t *testing.T) {
 		}
 
 		// Also assert site wide roles
-		allRoles, err := db.GetAuthorizationUserRoles(dbauthz.AsSystemRestricted(ctx), user.ID)
+		allRoles, err := db.GetAuthorizationUserRoles(ctx, user.ID)
 		require.NoError(t, err)
 
 		allRoleIDs, err := allRoles.RoleNames()

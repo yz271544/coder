@@ -20,10 +20,9 @@ import (
 	"go.opentelemetry.io/otel/semconv/v1.14.0/httpconv"
 	"golang.org/x/xerrors"
 
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/tracing"
 	"github.com/coder/websocket"
-
-	"cdr.dev/slog"
 )
 
 // These cookies are Coder-specific. If a new one is added or changed, the name
@@ -38,6 +37,10 @@ const (
 	SessionTokenHeader = "Coder-Session-Token"
 	// OAuth2StateCookie is the name of the cookie that stores the oauth2 state.
 	OAuth2StateCookie = "oauth_state"
+	// OAuth2PKCEVerifier is the name of the cookie that stores the oauth2 PKCE
+	// verifier. This is the raw verifier that when hashed, will match the challenge
+	// sent in the initial oauth2 request.
+	OAuth2PKCEVerifier = "oauth_pkce_verifier"
 	// OAuth2RedirectCookie is the name of the cookie that stores the oauth2 redirect.
 	OAuth2RedirectCookie = "oauth_redirect"
 
@@ -251,16 +254,17 @@ func (c *Client) RequestWithoutSessionToken(ctx context.Context, method, path st
 	}
 
 	// Copy the request body so we can log it.
-	var reqBody []byte
+	var reqLogFields []slog.Field
 	c.mu.RLock()
 	logBodies := c.logBodies
 	c.mu.RUnlock()
 	if r != nil && logBodies {
-		reqBody, err = io.ReadAll(r)
+		reqBody, err := io.ReadAll(r)
 		if err != nil {
 			return nil, xerrors.Errorf("read request body: %w", err)
 		}
 		r = bytes.NewReader(reqBody)
+		reqLogFields = append(reqLogFields, slog.F("body", string(reqBody)))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, serverURL.String(), r)
@@ -291,7 +295,7 @@ func (c *Client) RequestWithoutSessionToken(ctx context.Context, method, path st
 		slog.F("url", req.URL.String()),
 	)
 	tracing.RunWithoutSpan(ctx, func(ctx context.Context) {
-		c.Logger().Debug(ctx, "sdk request", slog.F("body", string(reqBody)))
+		c.Logger().Debug(ctx, "sdk request", reqLogFields...)
 	})
 
 	resp, err := c.HTTPClient.Do(req)
@@ -324,11 +328,11 @@ func (c *Client) RequestWithoutSessionToken(ctx context.Context, method, path st
 	span.SetStatus(httpconv.ClientStatus(resp.StatusCode))
 
 	// Copy the response body so we can log it if it's a loggable mime type.
-	var respBody []byte
+	var respLogFields []slog.Field
 	if resp.Body != nil && logBodies {
 		mimeType := parseMimeType(resp.Header.Get("Content-Type"))
 		if _, ok := loggableMimeTypes[mimeType]; ok {
-			respBody, err = io.ReadAll(resp.Body)
+			respBody, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return nil, xerrors.Errorf("copy response body for logs: %w", err)
 			}
@@ -337,16 +341,18 @@ func (c *Client) RequestWithoutSessionToken(ctx context.Context, method, path st
 				return nil, xerrors.Errorf("close response body: %w", err)
 			}
 			resp.Body = io.NopCloser(bytes.NewReader(respBody))
+			respLogFields = append(respLogFields, slog.F("body", string(respBody)))
 		}
 	}
 
 	// See above for why this is not logged to the span.
 	tracing.RunWithoutSpan(ctx, func(ctx context.Context) {
 		c.Logger().Debug(ctx, "sdk response",
-			slog.F("status", resp.StatusCode),
-			slog.F("body", string(respBody)),
-			slog.F("trace_id", resp.Header.Get("X-Trace-Id")),
-			slog.F("span_id", resp.Header.Get("X-Span-Id")),
+			append(respLogFields,
+				slog.F("status", resp.StatusCode),
+				slog.F("trace_id", resp.Header.Get("X-Trace-Id")),
+				slog.F("span_id", resp.Header.Get("X-Span-Id")),
+			)...,
 		)
 	})
 
@@ -361,6 +367,13 @@ func (c *Client) Dial(ctx context.Context, path string, opts *websocket.DialOpti
 
 	if opts == nil {
 		opts = &websocket.DialOptions{}
+	}
+	// Propagate the client's HTTP client to the websocket dialer
+	// so that custom TLS configurations (e.g. mesh TLS between
+	// replicas) are used for the handshake request. Without this,
+	// the websocket library falls back to http.DefaultClient.
+	if opts.HTTPClient == nil {
+		opts.HTTPClient = c.HTTPClient
 	}
 	c.SessionTokenProvider.SetDialOption(opts)
 
@@ -526,6 +539,14 @@ func NewTestError(statusCode int, method string, u string) *Error {
 		statusCode: statusCode,
 		method:     method,
 		url:        u,
+	}
+}
+
+// NewError creates a new Error with the response and status code.
+func NewError(statusCode int, response Response) *Error {
+	return &Error{
+		statusCode: statusCode,
+		Response:   response,
 	}
 }
 

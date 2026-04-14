@@ -25,6 +25,13 @@ const (
 	ScopeAssignRoleUnassign                  ScopeName = "assign_role:unassign"
 	ScopeAuditLogCreate                      ScopeName = "audit_log:create"
 	ScopeAuditLogRead                        ScopeName = "audit_log:read"
+	ScopeBoundaryUsageDelete                 ScopeName = "boundary_usage:delete"
+	ScopeBoundaryUsageRead                   ScopeName = "boundary_usage:read"
+	ScopeBoundaryUsageUpdate                 ScopeName = "boundary_usage:update"
+	ScopeChatCreate                          ScopeName = "chat:create"
+	ScopeChatDelete                          ScopeName = "chat:delete"
+	ScopeChatRead                            ScopeName = "chat:read"
+	ScopeChatUpdate                          ScopeName = "chat:update"
 	ScopeConnectionLogRead                   ScopeName = "connection_log:read"
 	ScopeConnectionLogUpdate                 ScopeName = "connection_log:update"
 	ScopeCryptoKeyCreate                     ScopeName = "crypto_key:create"
@@ -95,6 +102,10 @@ const (
 	ScopeTailnetCoordinatorDelete            ScopeName = "tailnet_coordinator:delete"
 	ScopeTailnetCoordinatorRead              ScopeName = "tailnet_coordinator:read"
 	ScopeTailnetCoordinatorUpdate            ScopeName = "tailnet_coordinator:update"
+	ScopeTaskCreate                          ScopeName = "task:create"
+	ScopeTaskDelete                          ScopeName = "task:delete"
+	ScopeTaskRead                            ScopeName = "task:read"
+	ScopeTaskUpdate                          ScopeName = "task:update"
 	ScopeTemplateCreate                      ScopeName = "template:create"
 	ScopeTemplateDelete                      ScopeName = "template:delete"
 	ScopeTemplateRead                        ScopeName = "template:read"
@@ -123,10 +134,12 @@ const (
 	ScopeWorkspaceDelete                     ScopeName = "workspace:delete"
 	ScopeWorkspaceDeleteAgent                ScopeName = "workspace:delete_agent"
 	ScopeWorkspaceRead                       ScopeName = "workspace:read"
+	ScopeWorkspaceShare                      ScopeName = "workspace:share"
 	ScopeWorkspaceSsh                        ScopeName = "workspace:ssh"
 	ScopeWorkspaceStart                      ScopeName = "workspace:start"
 	ScopeWorkspaceStop                       ScopeName = "workspace:stop"
 	ScopeWorkspaceUpdate                     ScopeName = "workspace:update"
+	ScopeWorkspaceUpdateAgent                ScopeName = "workspace:update_agent"
 	ScopeWorkspaceAgentDevcontainersCreate   ScopeName = "workspace_agent_devcontainers:create"
 	ScopeWorkspaceAgentResourceMonitorCreate ScopeName = "workspace_agent_resource_monitor:create"
 	ScopeWorkspaceAgentResourceMonitorRead   ScopeName = "workspace_agent_resource_monitor:read"
@@ -137,10 +150,12 @@ const (
 	ScopeWorkspaceDormantDelete              ScopeName = "workspace_dormant:delete"
 	ScopeWorkspaceDormantDeleteAgent         ScopeName = "workspace_dormant:delete_agent"
 	ScopeWorkspaceDormantRead                ScopeName = "workspace_dormant:read"
+	ScopeWorkspaceDormantShare               ScopeName = "workspace_dormant:share"
 	ScopeWorkspaceDormantSsh                 ScopeName = "workspace_dormant:ssh"
 	ScopeWorkspaceDormantStart               ScopeName = "workspace_dormant:start"
 	ScopeWorkspaceDormantStop                ScopeName = "workspace_dormant:stop"
 	ScopeWorkspaceDormantUpdate              ScopeName = "workspace_dormant:update"
+	ScopeWorkspaceDormantUpdateAgent         ScopeName = "workspace_dormant:update_agent"
 	ScopeWorkspaceProxyCreate                ScopeName = "workspace_proxy:create"
 	ScopeWorkspaceProxyDelete                ScopeName = "workspace_proxy:delete"
 	ScopeWorkspaceProxyRead                  ScopeName = "workspace_proxy:read"
@@ -174,6 +189,13 @@ func (e ScopeName) Valid() bool {
 		ScopeAssignRoleUnassign,
 		ScopeAuditLogCreate,
 		ScopeAuditLogRead,
+		ScopeBoundaryUsageDelete,
+		ScopeBoundaryUsageRead,
+		ScopeBoundaryUsageUpdate,
+		ScopeChatCreate,
+		ScopeChatDelete,
+		ScopeChatRead,
+		ScopeChatUpdate,
 		ScopeConnectionLogRead,
 		ScopeConnectionLogUpdate,
 		ScopeCryptoKeyCreate,
@@ -244,6 +266,10 @@ func (e ScopeName) Valid() bool {
 		ScopeTailnetCoordinatorDelete,
 		ScopeTailnetCoordinatorRead,
 		ScopeTailnetCoordinatorUpdate,
+		ScopeTaskCreate,
+		ScopeTaskDelete,
+		ScopeTaskRead,
+		ScopeTaskUpdate,
 		ScopeTemplateCreate,
 		ScopeTemplateDelete,
 		ScopeTemplateRead,
@@ -272,10 +298,12 @@ func (e ScopeName) Valid() bool {
 		ScopeWorkspaceDelete,
 		ScopeWorkspaceDeleteAgent,
 		ScopeWorkspaceRead,
+		ScopeWorkspaceShare,
 		ScopeWorkspaceSsh,
 		ScopeWorkspaceStart,
 		ScopeWorkspaceStop,
 		ScopeWorkspaceUpdate,
+		ScopeWorkspaceUpdateAgent,
 		ScopeWorkspaceAgentDevcontainersCreate,
 		ScopeWorkspaceAgentResourceMonitorCreate,
 		ScopeWorkspaceAgentResourceMonitorRead,
@@ -286,10 +314,12 @@ func (e ScopeName) Valid() bool {
 		ScopeWorkspaceDormantDelete,
 		ScopeWorkspaceDormantDeleteAgent,
 		ScopeWorkspaceDormantRead,
+		ScopeWorkspaceDormantShare,
 		ScopeWorkspaceDormantSsh,
 		ScopeWorkspaceDormantStart,
 		ScopeWorkspaceDormantStop,
 		ScopeWorkspaceDormantUpdate,
+		ScopeWorkspaceDormantUpdateAgent,
 		ScopeWorkspaceProxyCreate,
 		ScopeWorkspaceProxyDelete,
 		ScopeWorkspaceProxyRead,
@@ -324,6 +354,13 @@ func AllScopeNameValues() []ScopeName {
 		ScopeAssignRoleUnassign,
 		ScopeAuditLogCreate,
 		ScopeAuditLogRead,
+		ScopeBoundaryUsageDelete,
+		ScopeBoundaryUsageRead,
+		ScopeBoundaryUsageUpdate,
+		ScopeChatCreate,
+		ScopeChatDelete,
+		ScopeChatRead,
+		ScopeChatUpdate,
 		ScopeConnectionLogRead,
 		ScopeConnectionLogUpdate,
 		ScopeCryptoKeyCreate,
@@ -394,6 +431,10 @@ func AllScopeNameValues() []ScopeName {
 		ScopeTailnetCoordinatorDelete,
 		ScopeTailnetCoordinatorRead,
 		ScopeTailnetCoordinatorUpdate,
+		ScopeTaskCreate,
+		ScopeTaskDelete,
+		ScopeTaskRead,
+		ScopeTaskUpdate,
 		ScopeTemplateCreate,
 		ScopeTemplateDelete,
 		ScopeTemplateRead,
@@ -422,10 +463,12 @@ func AllScopeNameValues() []ScopeName {
 		ScopeWorkspaceDelete,
 		ScopeWorkspaceDeleteAgent,
 		ScopeWorkspaceRead,
+		ScopeWorkspaceShare,
 		ScopeWorkspaceSsh,
 		ScopeWorkspaceStart,
 		ScopeWorkspaceStop,
 		ScopeWorkspaceUpdate,
+		ScopeWorkspaceUpdateAgent,
 		ScopeWorkspaceAgentDevcontainersCreate,
 		ScopeWorkspaceAgentResourceMonitorCreate,
 		ScopeWorkspaceAgentResourceMonitorRead,
@@ -436,10 +479,12 @@ func AllScopeNameValues() []ScopeName {
 		ScopeWorkspaceDormantDelete,
 		ScopeWorkspaceDormantDeleteAgent,
 		ScopeWorkspaceDormantRead,
+		ScopeWorkspaceDormantShare,
 		ScopeWorkspaceDormantSsh,
 		ScopeWorkspaceDormantStart,
 		ScopeWorkspaceDormantStop,
 		ScopeWorkspaceDormantUpdate,
+		ScopeWorkspaceDormantUpdateAgent,
 		ScopeWorkspaceProxyCreate,
 		ScopeWorkspaceProxyDelete,
 		ScopeWorkspaceProxyRead,

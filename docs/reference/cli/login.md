@@ -9,6 +9,18 @@ Authenticate with Coder deployment
 coder login [flags] [<url>]
 ```
 
+## Description
+
+```console
+By default, the session token is stored in the operating system keyring on macOS and Windows and a plain text file on Linux. Use the --use-keyring flag or CODER_USE_KEYRING environment variable to change the storage mechanism.
+```
+
+## Subcommands
+
+| Name                                   | Purpose                         |
+|----------------------------------------|---------------------------------|
+| [<code>token</code>](./login_token.md) | Print the current session token |
+
 ## Options
 
 ### --first-user-email

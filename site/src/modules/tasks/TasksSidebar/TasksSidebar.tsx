@@ -1,38 +1,51 @@
-import { API } from "api/api";
-import { getErrorMessage } from "api/errors";
-import { cva } from "class-variance-authority";
-import { Button } from "components/Button/Button";
+import {
+	EditIcon,
+	EllipsisIcon,
+	PanelLeftIcon,
+	PauseIcon,
+	PlayIcon,
+	TrashIcon,
+} from "lucide-react";
+import { type FC, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "react-query";
+import { Link as RouterLink, useNavigate, useParams } from "react-router";
+import { toast } from "sonner";
+import { API } from "#/api/api";
+import { getErrorDetail, getErrorMessage } from "#/api/errors";
+import { pauseTask, resumeTask } from "#/api/queries/tasks";
+import type { Task, TasksFilter } from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuGroup,
 	DropdownMenuItem,
+	DropdownMenuSeparator,
 	DropdownMenuTrigger,
-} from "components/DropdownMenu/DropdownMenu";
-import { CoderIcon } from "components/Icons/CoderIcon";
-import { ScrollArea } from "components/ScrollArea/ScrollArea";
-import { Skeleton } from "components/Skeleton/Skeleton";
+} from "#/components/DropdownMenu/DropdownMenu";
+import { CoderIcon } from "#/components/Icons/CoderIcon";
+import { ScrollArea } from "#/components/ScrollArea/ScrollArea";
+import { Skeleton } from "#/components/Skeleton/Skeleton";
+import { Spinner } from "#/components/Spinner/Spinner";
+import { StatusIndicatorDot } from "#/components/StatusIndicator/StatusIndicator";
 import {
 	Tooltip,
 	TooltipContent,
 	TooltipProvider,
 	TooltipTrigger,
-} from "components/Tooltip/Tooltip";
-import { useAuthenticated } from "hooks";
-import { useSearchParamsKey } from "hooks/useSearchParamsKey";
-import { EditIcon, EllipsisIcon, PanelLeftIcon, TrashIcon } from "lucide-react";
-import type { Task } from "modules/tasks/tasks";
-import { type FC, useState } from "react";
-import { useQuery } from "react-query";
-import { Link as RouterLink, useNavigate, useParams } from "react-router";
-import { cn } from "utils/cn";
+} from "#/components/Tooltip/Tooltip";
+import { useAuthenticated } from "#/hooks/useAuthenticated";
+import { useSearchParamsKey } from "#/hooks/useSearchParamsKey";
+import { cn } from "#/utils/cn";
 import { TaskDeleteDialog } from "../TaskDeleteDialog/TaskDeleteDialog";
+import { taskStatusToStatusIndicatorVariant } from "../TaskStatus/TaskStatus";
+import { canPauseTask, canResumeTask, isPauseDisabled } from "../taskActions";
 import { UserCombobox } from "./UserCombobox";
 
 export const TasksSidebar: FC = () => {
 	const { user, permissions } = useAuthenticated();
-	const usernameParam = useSearchParamsKey({
-		key: "username",
+	const ownerParam = useSearchParamsKey({
+		key: "owner",
 		defaultValue: user.username,
 	});
 
@@ -42,11 +55,11 @@ export const TasksSidebar: FC = () => {
 		<div
 			className={cn(
 				"h-full bg-surface-secondary w-full max-w-80",
-				"border-solid border-0 border-r transition-all",
+				"border-solid border-0 border-r transition-all flex flex-col",
 				{ "max-w-14": isCollapsed },
 			)}
 		>
-			<div className="p-3 flex flex-col flex-1 gap-6">
+			<div className="p-3 flex flex-col gap-6">
 				<div className="flex items-center place-content-between">
 					{!isCollapsed && (
 						<Button
@@ -90,10 +103,8 @@ export const TasksSidebar: FC = () => {
 							<Button
 								variant={isCollapsed ? "subtle" : "default"}
 								size={isCollapsed ? "icon" : "sm"}
-								asChild={true}
-								className={cn({
-									"[&_svg]:p-0": isCollapsed,
-								})}
+								asChild
+								className={cn({ "[&_svg]:p-0": isCollapsed })}
 							>
 								<RouterLink to="/tasks">
 									<span className={isCollapsed ? "hidden" : ""}>New Task</span>{" "}
@@ -109,44 +120,44 @@ export const TasksSidebar: FC = () => {
 
 				{!isCollapsed && permissions.viewAllUsers && (
 					<UserCombobox
-						value={usernameParam.value}
+						value={ownerParam.value}
 						onValueChange={(username) => {
-							if (username === usernameParam.value) {
-								usernameParam.setValue("");
+							if (username === ownerParam.value) {
+								ownerParam.setValue("");
 								return;
 							}
-							usernameParam.setValue(username);
+							ownerParam.setValue(username);
 						}}
 					/>
 				)}
 			</div>
 
-			{!isCollapsed && <TasksSidebarGroup username={usernameParam.value} />}
+			{!isCollapsed && <TasksSidebarGroup owner={ownerParam.value} />}
 		</div>
 	);
 };
 
 type TasksSidebarGroupProps = {
-	username: string;
+	owner: string;
 };
 
-const TasksSidebarGroup: FC<TasksSidebarGroupProps> = ({ username }) => {
-	const filter = { username };
+const TasksSidebarGroup: FC<TasksSidebarGroupProps> = ({ owner }) => {
+	const filter: TasksFilter = { owner };
 	const tasksQuery = useQuery({
 		queryKey: ["tasks", filter],
-		queryFn: () => API.experimental.getTasks(filter),
+		queryFn: () => API.getTasks(filter),
 		refetchInterval: 10_000,
 	});
 
 	return (
-		<ScrollArea>
+		<ScrollArea className="flex-1">
 			<div className="flex flex-col gap-2 p-3">
 				<div className="text-content-secondary text-xs">Tasks</div>
 				<div className="flex flex-col flex-1 gap-1">
 					{tasksQuery.data ? (
 						tasksQuery.data.length > 0 ? (
-							tasksQuery.data.map((t) => (
-								<TaskSidebarMenuItem key={t.workspace.id} task={t} />
+							tasksQuery.data.map((task) => (
+								<TaskSidebarMenuItem key={task.id} task={task} />
 							))
 						) : (
 							<div className="text-content-secondary text-xs p-4 border-border border-solid rounded text-center">
@@ -175,10 +186,37 @@ type TaskSidebarMenuItemProps = {
 };
 
 const TaskSidebarMenuItem: FC<TaskSidebarMenuItemProps> = ({ task }) => {
-	const { workspace } = useParams<{ workspace: string }>();
-	const isActive = task.workspace.name === workspace;
+	const { taskId } = useParams<{ taskId: string }>();
+	const isActive = task.id === taskId;
 	const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
 	const navigate = useNavigate();
+	const queryClient = useQueryClient();
+	const pauseMutation = useMutation({
+		...pauseTask(task, queryClient),
+		onError: (error: unknown) => {
+			toast.error(
+				getErrorMessage(error, `Failed to pause task "${task.name}".`),
+				{
+					description: getErrorDetail(error),
+				},
+			);
+		},
+	});
+	const resumeMutation = useMutation({
+		...resumeTask(task, queryClient),
+		onError: (error: unknown) => {
+			toast.error(
+				getErrorMessage(error, `Failed to resume task "${task.name}".`),
+				{
+					description: getErrorDetail(error),
+				},
+			);
+		},
+	});
+
+	const showPause = canPauseTask(task.status) && task.workspace_id;
+	const pauseDisabled = isPauseDisabled(task.status);
+	const showResume = canResumeTask(task.status) && task.workspace_id;
 
 	return (
 		<>
@@ -197,12 +235,14 @@ const TaskSidebarMenuItem: FC<TaskSidebarMenuItemProps> = ({ task }) => {
 			>
 				<RouterLink
 					to={{
-						pathname: `/tasks/${task.workspace.owner_name}/${task.workspace.name}`,
+						pathname: `/tasks/${task.owner_name}/${task.id}`,
 						search: window.location.search,
 					}}
 				>
 					<TaskSidebarMenuItemStatus task={task} />
-					<span className="truncate">{task.workspace.name}</span>
+					<span className="block max-w-[220px] truncate">
+						{task.display_name}
+					</span>
 					<DropdownMenu>
 						<DropdownMenuTrigger asChild>
 							<Button
@@ -224,6 +264,35 @@ const TaskSidebarMenuItem: FC<TaskSidebarMenuItemProps> = ({ task }) => {
 
 						<DropdownMenuContent align="end">
 							<DropdownMenuGroup>
+								{showPause && (
+									<DropdownMenuItem
+										disabled={pauseDisabled || pauseMutation.isPending}
+										onClick={(e) => {
+											e.stopPropagation();
+											pauseMutation.mutate();
+										}}
+									>
+										<Spinner loading={pauseMutation.isPending}>
+											<PauseIcon />
+										</Spinner>
+										Pause
+									</DropdownMenuItem>
+								)}
+								{showResume && (
+									<DropdownMenuItem
+										disabled={resumeMutation.isPending}
+										onClick={(e) => {
+											e.stopPropagation();
+											resumeMutation.mutate();
+										}}
+									>
+										<Spinner loading={resumeMutation.isPending}>
+											<PlayIcon />
+										</Spinner>
+										Resume
+									</DropdownMenuItem>
+								)}
+								{(showPause || showResume) && <DropdownMenuSeparator />}
 								<DropdownMenuItem
 									className="text-content-destructive focus:text-content-destructive"
 									onClick={(e) => {
@@ -232,7 +301,7 @@ const TaskSidebarMenuItem: FC<TaskSidebarMenuItemProps> = ({ task }) => {
 									}}
 								>
 									<TrashIcon />
-									Delete
+									Delete&hellip;
 								</DropdownMenuItem>
 							</DropdownMenuGroup>
 						</DropdownMenuContent>
@@ -256,40 +325,18 @@ const TaskSidebarMenuItem: FC<TaskSidebarMenuItemProps> = ({ task }) => {
 	);
 };
 
-const taskStatusVariants = cva("block size-2 rounded-full shrink-0", {
-	variants: {
-		state: {
-			default: "border border-content-secondary border-solid",
-			complete: "bg-content-success",
-			failure: "bg-content-destructive",
-			idle: "bg-content-secondary",
-			working: "bg-highlight-sky",
-		},
-	},
-	defaultVariants: {
-		state: "default",
-	},
-});
-
 const TaskSidebarMenuItemStatus: FC<{ task: Task }> = ({ task }) => {
-	const statusText = task.workspace.latest_app_status
-		? task.workspace.latest_app_status.state
-		: "No activity yet";
-
 	return (
 		<TooltipProvider>
 			<Tooltip>
 				<TooltipTrigger asChild>
-					<div
-						className={taskStatusVariants({
-							state: task.workspace.latest_app_status?.state ?? "default",
-						})}
-					>
-						<span className="sr-only">{statusText}</span>
-					</div>
+					<StatusIndicatorDot
+						variant={taskStatusToStatusIndicatorVariant[task.status]}
+						aria-label={task.status}
+					/>
 				</TooltipTrigger>
 				<TooltipContent className="first-letter:capitalize">
-					{statusText}
+					{task.status}
 				</TooltipContent>
 			</Tooltip>
 		</TooltipProvider>

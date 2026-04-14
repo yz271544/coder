@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"slices"
 	"strings"
 	"time"
@@ -144,13 +143,14 @@ type ProvisionerJobInput struct {
 
 // ProvisionerJobMetadata contains metadata for the job.
 type ProvisionerJobMetadata struct {
-	TemplateVersionName string     `json:"template_version_name" table:"template version name"`
-	TemplateID          uuid.UUID  `json:"template_id" format:"uuid" table:"template id"`
-	TemplateName        string     `json:"template_name" table:"template name"`
-	TemplateDisplayName string     `json:"template_display_name" table:"template display name"`
-	TemplateIcon        string     `json:"template_icon" table:"template icon"`
-	WorkspaceID         *uuid.UUID `json:"workspace_id,omitempty" format:"uuid" table:"workspace id"`
-	WorkspaceName       string     `json:"workspace_name,omitempty" table:"workspace name"`
+	TemplateVersionName      string              `json:"template_version_name" table:"template version name"`
+	TemplateID               uuid.UUID           `json:"template_id" format:"uuid" table:"template id"`
+	TemplateName             string              `json:"template_name" table:"template name"`
+	TemplateDisplayName      string              `json:"template_display_name" table:"template display name"`
+	TemplateIcon             string              `json:"template_icon" table:"template icon"`
+	WorkspaceID              *uuid.UUID          `json:"workspace_id,omitempty" format:"uuid" table:"workspace id"`
+	WorkspaceName            string              `json:"workspace_name,omitempty" table:"workspace name"`
+	WorkspaceBuildTransition WorkspaceTransition `json:"workspace_build_transition,omitempty" table:"workspace build transition"`
 }
 
 // ProvisionerJobType represents the type of job.
@@ -216,6 +216,19 @@ type ProvisionerJobLog struct {
 	Output    string    `json:"output"`
 }
 
+// Text formats the log entry as human-readable text.
+func (l ProvisionerJobLog) Text() string {
+	var sb strings.Builder
+	_, _ = sb.WriteString(l.CreatedAt.Format(time.RFC3339))
+	_, _ = sb.WriteString(" [")
+	_, _ = sb.WriteString(string(l.Level))
+	_, _ = sb.WriteString("] [provisioner|")
+	_, _ = sb.WriteString(l.Stage)
+	_, _ = sb.WriteString("] ")
+	_, _ = sb.WriteString(l.Output)
+	return sb.String()
+}
+
 // provisionerJobLogsAfter streams logs that occurred after a specific time.
 func (c *Client) provisionerJobLogsAfter(ctx context.Context, path string, after int64) (<-chan ProvisionerJobLog, io.Closer, error) {
 	afterQuery := ""
@@ -226,20 +239,14 @@ func (c *Client) provisionerJobLogsAfter(ctx context.Context, path string, after
 	if err != nil {
 		return nil, nil, err
 	}
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		return nil, nil, xerrors.Errorf("create cookie jar: %w", err)
-	}
-	jar.SetCookies(followURL, []*http.Cookie{{
-		Name:  SessionTokenCookie,
-		Value: c.SessionToken(),
-	}})
 	httpClient := &http.Client{
-		Jar:       jar,
 		Transport: c.HTTPClient.Transport,
 	}
 	conn, res, err := websocket.Dial(ctx, followURL.String(), &websocket.DialOptions{
-		HTTPClient:      httpClient,
+		HTTPClient: httpClient,
+		HTTPHeader: http.Header{
+			SessionTokenHeader: []string{c.SessionToken()},
+		},
 		CompressionMode: websocket.CompressionDisabled,
 	})
 	if err != nil {
@@ -312,16 +319,8 @@ func (c *Client) ServeProvisionerDaemon(ctx context.Context, req ServeProvisione
 		headers.Set(ProvisionerDaemonPSK, req.PreSharedKey)
 	}
 	if req.ProvisionerKey == "" && req.PreSharedKey == "" {
-		// use session token if we don't have a PSK or provisioner key.
-		jar, err := cookiejar.New(nil)
-		if err != nil {
-			return nil, xerrors.Errorf("create cookie jar: %w", err)
-		}
-		jar.SetCookies(serverURL, []*http.Cookie{{
-			Name:  SessionTokenCookie,
-			Value: c.SessionToken(),
-		}})
-		httpClient.Jar = jar
+		// Use session token if we don't have a PSK or provisioner key.
+		headers.Set(SessionTokenHeader, c.SessionToken())
 	}
 
 	conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{

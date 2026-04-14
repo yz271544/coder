@@ -3,6 +3,7 @@ package coderd_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,45 +18,46 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/moby/moby/pkg/namesgenerator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
+	"go.uber.org/mock/gomock"
 
-	"cdr.dev/slog"
-	"cdr.dev/slog/sloggers/slogtest"
-
+	"cdr.dev/slog/v3"
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/agent"
 	"github.com/coder/coder/v2/agent/agenttest"
-	"github.com/coder/coder/v2/coderd/httpapi"
-	agplprebuilds "github.com/coder/coder/v2/coderd/prebuilds"
-	"github.com/coder/coder/v2/coderd/rbac/policy"
-	"github.com/coder/coder/v2/coderd/util/ptr"
-	"github.com/coder/coder/v2/enterprise/coderd/prebuilds"
-	"github.com/coder/coder/v2/provisioner/echo"
-	"github.com/coder/coder/v2/provisionersdk/proto"
-	"github.com/coder/coder/v2/tailnet/tailnettest"
-
-	"github.com/coder/retry"
-	"github.com/coder/serpent"
-
+	agplcoderd "github.com/coder/coder/v2/coderd"
 	agplaudit "github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/coderdtest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbfake"
+	"github.com/coder/coder/v2/coderd/database/dbmock"
 	"github.com/coder/coder/v2/coderd/database/dbtestutil"
 	"github.com/coder/coder/v2/coderd/database/dbtime"
+	"github.com/coder/coder/v2/coderd/entitlements"
+	"github.com/coder/coder/v2/coderd/httpapi"
+	agplprebuilds "github.com/coder/coder/v2/coderd/prebuilds"
 	"github.com/coder/coder/v2/coderd/rbac"
+	"github.com/coder/coder/v2/coderd/rbac/policy"
+	"github.com/coder/coder/v2/coderd/util/namesgenerator"
+	"github.com/coder/coder/v2/coderd/util/ptr"
 	"github.com/coder/coder/v2/codersdk"
 	"github.com/coder/coder/v2/codersdk/workspacesdk"
 	"github.com/coder/coder/v2/enterprise/audit"
 	"github.com/coder/coder/v2/enterprise/coderd"
 	"github.com/coder/coder/v2/enterprise/coderd/coderdenttest"
 	"github.com/coder/coder/v2/enterprise/coderd/license"
+	"github.com/coder/coder/v2/enterprise/coderd/prebuilds"
 	"github.com/coder/coder/v2/enterprise/dbcrypt"
 	"github.com/coder/coder/v2/enterprise/replicasync"
+	"github.com/coder/coder/v2/provisioner/echo"
+	"github.com/coder/coder/v2/provisionersdk/proto"
+	"github.com/coder/coder/v2/tailnet/tailnettest"
 	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/retry"
+	"github.com/coder/serpent"
 )
 
 func TestMain(m *testing.M) {
@@ -79,10 +81,6 @@ func TestEntitlements(t *testing.T) {
 		require.Equal(t, fmt.Sprintf("%p", api.Entitlements), fmt.Sprintf("%p", api.AGPL.Entitlements))
 	})
 	t.Run("FullLicense", func(t *testing.T) {
-		// PGCoordinator requires a real postgres
-		if !dbtestutil.WillUsePostgres() {
-			t.Skip("test only with postgres")
-		}
 		t.Parallel()
 		adminClient, _ := coderdenttest.New(t, &coderdenttest.Options{
 			AuditLogging:   true,
@@ -116,6 +114,51 @@ func TestEntitlements(t *testing.T) {
 		assert.Nil(t, al.Limit)
 		assert.Nil(t, al.Actual)
 		assert.Empty(t, res.Warnings)
+	})
+
+	// TestEntitlements/MultiplePrebuildsLicenseUpdates verifies that uploading
+	// multiple licenses with prebuilds enabled doesn't cause a panic from
+	// duplicate Prometheus metric registration. This was a bug where the new
+	// reconciler's metrics were registered before the old reconciler was stopped.
+	t.Run("MultiplePrebuildsLicenseUpdates", func(t *testing.T) {
+		t.Parallel()
+		adminClient, _, api, _ := coderdenttest.NewWithAPI(t, &coderdenttest.Options{
+			DontAddLicense: true,
+		})
+
+		// Add first license with prebuilds to initialize the reconciler
+		features := license.Features{
+			codersdk.FeatureUserLimit:          100,
+			codersdk.FeatureWorkspacePrebuilds: 1,
+		}
+		license1 := coderdenttest.AddLicense(t, adminClient, coderdenttest.LicenseOptions{
+			Features: features,
+		})
+		res, err := adminClient.Entitlements(context.Background())
+		require.NoError(t, err)
+		require.True(t, res.HasLicense)
+		require.Equal(t, codersdk.EntitlementEntitled, res.Features[codersdk.FeatureWorkspacePrebuilds].Entitlement)
+
+		// Verify the reconciler was set up
+		reconciler1 := api.AGPL.PrebuildsReconciler.Load()
+		require.NotNil(t, reconciler1)
+
+		// Delete the license to disable prebuilds, then add a new one.
+		// This tests the enabled -> disabled -> enabled transition.
+		err = adminClient.DeleteLicense(context.Background(), license1.ID)
+		require.NoError(t, err)
+
+		coderdenttest.AddLicense(t, adminClient, coderdenttest.LicenseOptions{
+			Features: features,
+		})
+		res, err = adminClient.Entitlements(context.Background())
+		require.NoError(t, err)
+		require.True(t, res.HasLicense)
+		require.Equal(t, codersdk.EntitlementEntitled, res.Features[codersdk.FeatureWorkspacePrebuilds].Entitlement)
+
+		// Verify a new reconciler was created
+		reconciler2 := api.AGPL.PrebuildsReconciler.Load()
+		require.NotNil(t, reconciler2)
 	})
 	t.Run("FullLicenseToNone", func(t *testing.T) {
 		t.Parallel()
@@ -625,7 +668,7 @@ func TestManagedAgentLimit(t *testing.T) {
 
 	ctx := testutil.Context(t, testutil.WaitLong)
 
-	cli, _ := coderdenttest.New(t, &coderdenttest.Options{
+	cli, owner := coderdenttest.New(t, &coderdenttest.Options{
 		Options: &coderdtest.Options{
 			IncludeProvisionerDaemon: true,
 		},
@@ -635,22 +678,18 @@ func TestManagedAgentLimit(t *testing.T) {
 			// expiry warnings.
 			GraceAt:   time.Now().Add(time.Hour * 24 * 60),
 			ExpiresAt: time.Now().Add(time.Hour * 24 * 90),
-		}).ManagedAgentLimit(1, 1),
+		}).ManagedAgentLimit(1),
 	})
 
 	// Get entitlements to check that the license is a-ok.
-	entitlements, err := cli.Entitlements(ctx) //nolint:gocritic // we're not testing authz on the entitlements endpoint, so using owner is fine
+	sdkEntitlements, err := cli.Entitlements(ctx) //nolint:gocritic // we're not testing authz on the entitlements endpoint, so using owner is fine
 	require.NoError(t, err)
-	require.True(t, entitlements.HasLicense)
-	agentLimit := entitlements.Features[codersdk.FeatureManagedAgentLimit]
+	require.True(t, sdkEntitlements.HasLicense)
+	agentLimit := sdkEntitlements.Features[codersdk.FeatureManagedAgentLimit]
 	require.True(t, agentLimit.Enabled)
 	require.NotNil(t, agentLimit.Limit)
 	require.EqualValues(t, 1, *agentLimit.Limit)
-	require.NotNil(t, agentLimit.SoftLimit)
-	require.EqualValues(t, 1, *agentLimit.SoftLimit)
-	require.Empty(t, entitlements.Errors)
-	// There should be a warning since we're really close to our agent limit.
-	require.Equal(t, entitlements.Warnings[0], "You are approaching the managed agent limit in your license. Please refer to the Deployment Licenses page for more information.")
+	require.Empty(t, sdkEntitlements.Errors)
 
 	// Create a fake provision response that claims there are agents in the
 	// template and every built workspace.
@@ -659,21 +698,21 @@ func TestManagedAgentLimit(t *testing.T) {
 	// build.
 	appID := uuid.NewString()
 	echoRes := &echo.Responses{
-		Parse: echo.ParseComplete,
+		Parse:         echo.ParseComplete,
+		ProvisionInit: echo.InitComplete,
 		ProvisionPlan: []*proto.Response{
 			{
 				Type: &proto.Response_Plan{
 					Plan: &proto.PlanComplete{
-						Plan:        []byte("{}"),
-						ModuleFiles: []byte{},
-						HasAiTasks:  true,
+						Plan: []byte("{}"),
 					},
 				},
 			},
 		},
-		ProvisionApply: []*proto.Response{{
-			Type: &proto.Response_Apply{
-				Apply: &proto.ApplyComplete{
+		ProvisionApply: echo.ApplyComplete,
+		ProvisionGraph: []*proto.Response{{
+			Type: &proto.Response_Graph{
+				Graph: &proto.GraphComplete{
 					Resources: []*proto.Resource{{
 						Name: "example",
 						Type: "aws_instance",
@@ -710,21 +749,186 @@ func TestManagedAgentLimit(t *testing.T) {
 	noAiTemplate := coderdtest.CreateTemplate(t, cli, uuid.Nil, noAiVersion.ID)
 
 	// Create one AI workspace, which should succeed.
-	workspace := coderdtest.CreateWorkspace(t, cli, aiTemplate.ID)
+	task, err := cli.CreateTask(ctx, owner.UserID.String(), codersdk.CreateTaskRequest{
+		Name:                    namesgenerator.UniqueNameWith("-"),
+		TemplateVersionID:       aiTemplate.ActiveVersionID,
+		TemplateVersionPresetID: uuid.Nil,
+		Input:                   "hi",
+		DisplayName:             namesgenerator.UniqueName(),
+	})
+	require.NoError(t, err, "creating task for AI workspace must succeed")
+	workspace, err := cli.Workspace(ctx, task.WorkspaceID.UUID)
+	require.NoError(t, err, "fetching AI workspace must succeed")
 	coderdtest.AwaitWorkspaceBuildJobCompleted(t, cli, workspace.LatestBuild.ID)
 
-	// Create a second AI workspace, which should fail. This needs to be done
-	// manually because coderdtest.CreateWorkspace expects it to succeed.
-	_, err = cli.CreateUserWorkspace(ctx, codersdk.Me, codersdk.CreateWorkspaceRequest{ //nolint:gocritic // owners must still be subject to the limit
-		TemplateID:       aiTemplate.ID,
-		Name:             coderdtest.RandomUsername(t),
-		AutomaticUpdates: codersdk.AutomaticUpdatesNever,
+	// Create a second AI task, which should succeed even though the limit is
+	// breached. Managed agent limits are advisory only and should never block
+	// workspace creation.
+	task2, err := cli.CreateTask(ctx, owner.UserID.String(), codersdk.CreateTaskRequest{
+		Name:                    namesgenerator.UniqueNameWith("-"),
+		TemplateVersionID:       aiTemplate.ActiveVersionID,
+		TemplateVersionPresetID: uuid.Nil,
+		Input:                   "hi",
+		DisplayName:             namesgenerator.UniqueName(),
 	})
-	require.ErrorContains(t, err, "You have breached the managed agent limit in your license")
+	require.NoError(t, err, "creating task beyond managed agent limit must succeed")
+	workspace2, err := cli.Workspace(ctx, task2.WorkspaceID.UUID)
+	require.NoError(t, err, "fetching AI workspace must succeed")
+	coderdtest.AwaitWorkspaceBuildJobCompleted(t, cli, workspace2.LatestBuild.ID)
 
-	// Create a third non-AI workspace, which should succeed.
+	// Create a third workspace using the same template, which should succeed.
+	workspace = coderdtest.CreateWorkspace(t, cli, aiTemplate.ID)
+	coderdtest.AwaitWorkspaceBuildJobCompleted(t, cli, workspace.LatestBuild.ID)
+
+	// Create a fourth non-AI workspace, which should also succeed.
 	workspace = coderdtest.CreateWorkspace(t, cli, noAiTemplate.ID)
 	coderdtest.AwaitWorkspaceBuildJobCompleted(t, cli, workspace.LatestBuild.ID)
+}
+
+func TestCheckBuildUsage_NeverBlocksOnManagedAgentLimit(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	// Prepare entitlements with a managed agent limit.
+	entSet := entitlements.New()
+	entSet.Modify(func(e *codersdk.Entitlements) {
+		e.HasLicense = true
+		limit := int64(1)
+		issuedAt := time.Now().Add(-2 * time.Hour)
+		start := time.Now().Add(-time.Hour)
+		end := time.Now().Add(time.Hour)
+		e.Features[codersdk.FeatureManagedAgentLimit] = codersdk.Feature{
+			Enabled:     true,
+			Limit:       &limit,
+			UsagePeriod: &codersdk.UsagePeriod{IssuedAt: issuedAt, Start: start, End: end},
+		}
+	})
+
+	// Enterprise API instance with entitlements injected.
+	agpl := &agplcoderd.API{
+		Options: &agplcoderd.Options{
+			Entitlements: entSet,
+		},
+	}
+	eapi := &coderd.API{
+		AGPL:    agpl,
+		Options: &coderd.Options{Options: agpl.Options},
+	}
+
+	// Template version that has an AI task.
+	tv := &database.TemplateVersion{
+		HasAITask:        sql.NullBool{Valid: true, Bool: true},
+		HasExternalAgent: sql.NullBool{Valid: true, Bool: false},
+	}
+
+	task := &database.Task{
+		TemplateVersionID: tv.ID,
+	}
+
+	// Mock DB: no calls expected since managed agent limits are
+	// advisory only and no longer query the database at build time.
+	mDB := dbmock.NewMockStore(ctrl)
+
+	ctx := context.Background()
+
+	// Start transition: should be permitted even though the limit is
+	// breached. Managed agent limits are advisory only.
+	startResp, err := eapi.CheckBuildUsage(ctx, mDB, tv, task, database.WorkspaceTransitionStart)
+	require.NoError(t, err)
+	require.True(t, startResp.Permitted)
+
+	// Stop transition: should also be permitted.
+	stopResp, err := eapi.CheckBuildUsage(ctx, mDB, tv, task, database.WorkspaceTransitionStop)
+	require.NoError(t, err)
+	require.True(t, stopResp.Permitted)
+
+	// Delete transition: should also be permitted.
+	deleteResp, err := eapi.CheckBuildUsage(ctx, mDB, tv, task, database.WorkspaceTransitionDelete)
+	require.NoError(t, err)
+	require.True(t, deleteResp.Permitted)
+}
+
+func TestCheckBuildUsage_BlocksWithoutManagedAgentEntitlement(t *testing.T) {
+	t.Parallel()
+
+	tv := &database.TemplateVersion{
+		HasAITask:        sql.NullBool{Valid: true, Bool: true},
+		HasExternalAgent: sql.NullBool{Valid: true, Bool: false},
+	}
+	task := &database.Task{
+		TemplateVersionID: tv.ID,
+	}
+
+	// Both "feature absent" and "feature explicitly disabled" should
+	// block AI task builds on licensed deployments.
+	tests := []struct {
+		name      string
+		setupEnts func(e *codersdk.Entitlements)
+	}{
+		{
+			name: "FeatureAbsent",
+			setupEnts: func(e *codersdk.Entitlements) {
+				e.HasLicense = true
+			},
+		},
+		{
+			name: "FeatureDisabled",
+			setupEnts: func(e *codersdk.Entitlements) {
+				e.HasLicense = true
+				e.Features[codersdk.FeatureManagedAgentLimit] = codersdk.Feature{
+					Enabled: false,
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			entSet := entitlements.New()
+			entSet.Modify(tc.setupEnts)
+
+			agpl := &agplcoderd.API{
+				Options: &agplcoderd.Options{
+					Entitlements: entSet,
+				},
+			}
+			eapi := &coderd.API{
+				AGPL:    agpl,
+				Options: &coderd.Options{Options: agpl.Options},
+			}
+
+			mDB := dbmock.NewMockStore(ctrl)
+			ctx := context.Background()
+
+			// Start transition with a task: should be blocked because the
+			// license doesn't include the managed agent entitlement.
+			resp, err := eapi.CheckBuildUsage(ctx, mDB, tv, task, database.WorkspaceTransitionStart)
+			require.NoError(t, err)
+			require.False(t, resp.Permitted)
+			require.Contains(t, resp.Message, "not entitled to managed agents")
+
+			// Stop and delete transitions should still be permitted so
+			// that existing workspaces can be stopped/cleaned up.
+			stopResp, err := eapi.CheckBuildUsage(ctx, mDB, tv, task, database.WorkspaceTransitionStop)
+			require.NoError(t, err)
+			require.True(t, stopResp.Permitted)
+
+			deleteResp, err := eapi.CheckBuildUsage(ctx, mDB, tv, task, database.WorkspaceTransitionDelete)
+			require.NoError(t, err)
+			require.True(t, deleteResp.Permitted)
+
+			// Start transition without a task: should be permitted (not
+			// an AI task build, so the entitlement check doesn't apply).
+			noTaskResp, err := eapi.CheckBuildUsage(ctx, mDB, tv, nil, database.WorkspaceTransitionStart)
+			require.NoError(t, err)
+			require.True(t, noTaskResp.Permitted)
+		})
+	}
 }
 
 // testDBAuthzRole returns a context with a subject that has a role
@@ -739,8 +943,8 @@ func testDBAuthzRole(ctx context.Context) context.Context {
 				Site: rbac.Permissions(map[string][]policy.Action{
 					rbac.ResourceWildcard.Type: {policy.WildcardSymbol},
 				}),
-				Org:  map[string][]rbac.Permission{},
-				User: []rbac.Permission{},
+				User:    []rbac.Permission{},
+				ByOrgID: map[string]rbac.OrgPermissions{},
 			},
 		}),
 		Scope: rbac.ScopeAll,
@@ -881,10 +1085,6 @@ func (s *restartableTestServer) startWithFirstUser(t *testing.T) (client *coders
 // This test uses a real server and real clients.
 func TestConn_CoordinatorRollingRestart(t *testing.T) {
 	t.Parallel()
-
-	if !dbtestutil.WillUsePostgres() {
-		t.Skip("test only with postgres")
-	}
 
 	// Although DERP will have connection issues until the connection is
 	// reestablished, any open connections should be maintained.
@@ -1049,7 +1249,7 @@ func tcpEchoServer(t *testing.T) string {
 
 // nolint:revive // t takes precedence.
 func writeReadEcho(t *testing.T, ctx context.Context, conn net.Conn) {
-	msg := namesgenerator.GetRandomName(0)
+	msg := namesgenerator.UniqueName()
 
 	deadline, ok := ctx.Deadline()
 	if ok {

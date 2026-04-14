@@ -5,15 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/xerrors"
 
-	"cdr.dev/slog"
-
+	"cdr.dev/slog/v3"
 	"github.com/coder/coder/v2/coderd/tracing"
+	"github.com/coder/coder/v2/codersdk/wsjson"
+	"github.com/coder/websocket"
 )
 
 type AutomaticUpdates string
@@ -72,6 +74,9 @@ type Workspace struct {
 	// Once a prebuilt workspace is claimed by a user, it transitions to a regular workspace,
 	// and IsPrebuild returns false.
 	IsPrebuild bool `json:"is_prebuild"`
+	// TaskID, if set, indicates that the workspace is relevant to the given codersdk.Task.
+	TaskID     uuid.NullUUID          `json:"task_id,omitempty"`
+	SharedWith []SharedWorkspaceActor `json:"shared_with,omitempty"`
 }
 
 func (w Workspace) FullName() string {
@@ -107,6 +112,8 @@ const (
 	CreateWorkspaceBuildReasonSSHConnection       CreateWorkspaceBuildReason = "ssh_connection"
 	CreateWorkspaceBuildReasonVSCodeConnection    CreateWorkspaceBuildReason = "vscode_connection"
 	CreateWorkspaceBuildReasonJetbrainsConnection CreateWorkspaceBuildReason = "jetbrains_connection"
+	CreateWorkspaceBuildReasonTaskManualPause     CreateWorkspaceBuildReason = "task_manual_pause"
+	CreateWorkspaceBuildReasonTaskResume          CreateWorkspaceBuildReason = "task_resume"
 )
 
 // CreateWorkspaceBuildRequest provides options to update the latest workspace build.
@@ -127,7 +134,7 @@ type CreateWorkspaceBuildRequest struct {
 	// TemplateVersionPresetID is the ID of the template version preset to use for the build.
 	TemplateVersionPresetID uuid.UUID `json:"template_version_preset_id,omitempty" format:"uuid"`
 	// Reason sets the reason for the workspace build.
-	Reason CreateWorkspaceBuildReason `json:"reason,omitempty" validate:"omitempty,oneof=dashboard cli ssh_connection vscode_connection jetbrains_connection"`
+	Reason CreateWorkspaceBuildReason `json:"reason,omitempty" validate:"omitempty,oneof=dashboard cli ssh_connection vscode_connection jetbrains_connection task_manual_pause"`
 }
 
 type WorkspaceOptions struct {
@@ -693,12 +700,27 @@ type WorkspaceUser struct {
 	Role WorkspaceRole `json:"role" enums:"admin,use"`
 }
 
+type SharedWorkspaceActor struct {
+	ID        uuid.UUID                `json:"id" format:"uuid"`
+	ActorType SharedWorkspaceActorType `json:"actor_type" enums:"group,user"`
+	Name      string                   `json:"name"`
+	AvatarURL string                   `json:"avatar_url,omitempty" format:"uri"`
+	Roles     []WorkspaceRole          `json:"roles"`
+}
+
 type WorkspaceRole string
 
 const (
 	WorkspaceRoleAdmin   WorkspaceRole = "admin"
 	WorkspaceRoleUse     WorkspaceRole = "use"
 	WorkspaceRoleDeleted WorkspaceRole = ""
+)
+
+type SharedWorkspaceActorType string
+
+const (
+	SharedWorkspaceActorTypeGroup SharedWorkspaceActorType = "group"
+	SharedWorkspaceActorTypeUser  SharedWorkspaceActorType = "user"
 )
 
 func (c *Client) WorkspaceACL(ctx context.Context, workspaceID uuid.UUID) (WorkspaceACL, error) {
@@ -767,4 +789,76 @@ func (c *Client) WorkspaceExternalAgentCredentials(ctx context.Context, workspac
 	}
 	var credentials ExternalAgentCredentials
 	return credentials, json.NewDecoder(res.Body).Decode(&credentials)
+}
+
+// WorkspaceBuildUpdate contains information about a workspace build state change.
+// This is published via the /watch-all-workspacebuilds SSE endpoint when the
+// workspace-build-updates experiment is enabled.
+type WorkspaceBuildUpdate struct {
+	WorkspaceID   uuid.UUID `json:"workspace_id" format:"uuid"`
+	WorkspaceName string    `json:"workspace_name"`
+	BuildID       uuid.UUID `json:"build_id" format:"uuid"`
+	// Transition is the workspace transition type: "start", "stop", or "delete".
+	Transition string `json:"transition"`
+	// JobStatus is the provisioner job status: "pending", "running",
+	// "succeeded", "canceling", "canceled", or "failed".
+	JobStatus   string `json:"job_status"`
+	BuildNumber int32  `json:"build_number"`
+}
+
+// WatchAllWorkspaceBuilds watches for workspace build updates across all workspaces.
+// This requires the workspace-build-updates experiment to be enabled.
+// The returned decoder should be closed by calling Close() when done to properly
+// clean up the WebSocket connection.
+func (c *Client) WatchAllWorkspaceBuilds(ctx context.Context) (*wsjson.Decoder[WorkspaceBuildUpdate], error) {
+	ctx, span := tracing.StartSpan(ctx)
+	defer span.End()
+
+	serverURL, err := c.URL.Parse("/api/experimental/watch-all-workspacebuilds")
+	if err != nil {
+		return nil, xerrors.Errorf("parse url: %w", err)
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, xerrors.Errorf("create cookie jar: %w", err)
+	}
+	jar.SetCookies(serverURL, []*http.Cookie{{
+		Name:  SessionTokenCookie,
+		Value: c.SessionToken(),
+	}})
+	httpClient := &http.Client{
+		Jar:       jar,
+		Transport: c.HTTPClient.Transport,
+	}
+
+	conn, res, err := websocket.Dial(ctx, serverURL.String(), &websocket.DialOptions{
+		HTTPClient:      httpClient,
+		CompressionMode: websocket.CompressionDisabled,
+	})
+	if err != nil {
+		if res == nil {
+			return nil, err
+		}
+		return nil, ReadBodyAsError(res)
+	}
+
+	d := wsjson.NewDecoder[WorkspaceBuildUpdate](conn, websocket.MessageText, c.logger)
+	return d, nil
+}
+
+// WorkspaceAvailableUsers returns users available for workspace creation.
+// This is used to populate the owner dropdown when creating workspaces for
+// other users.
+func (c *Client) WorkspaceAvailableUsers(ctx context.Context, organizationID uuid.UUID, userID string) ([]MinimalUser, error) {
+	res, err := c.Request(ctx, http.MethodGet, fmt.Sprintf("/api/v2/organizations/%s/members/%s/workspaces/available-users", organizationID, userID), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, ReadBodyAsError(res)
+	}
+	var users []MinimalUser
+	return users, json.NewDecoder(res.Body).Decode(&users)
 }

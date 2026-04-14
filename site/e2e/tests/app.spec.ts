@@ -32,9 +32,9 @@ test("app", async ({ context, page }) => {
 	}
 	const appName = "test-app";
 	const template = await createTemplate(page, {
-		apply: [
+		graph: [
 			{
-				apply: {
+				graph: {
 					resources: [
 						{
 							agents: [
@@ -62,7 +62,7 @@ test("app", async ({ context, page }) => {
 	const agent = await startAgent(page, token);
 
 	// Wait for the web terminal to open in a new tab
-	const pagePromise = context.waitForEvent("page");
+	const pagePromise = context.waitForEvent("page", { timeout: 10_000 });
 	await page.getByText(appName).click({ timeout: 10_000 });
 	const app = await pagePromise;
 	await app.waitForLoadState("domcontentloaded");

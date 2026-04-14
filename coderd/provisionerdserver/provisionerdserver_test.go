@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
@@ -25,13 +26,12 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"storj.io/drpc"
 
-	"cdr.dev/slog/sloggers/slogtest"
-	"github.com/coder/quartz"
-	"github.com/coder/serpent"
-
+	"cdr.dev/slog/v3/sloggers/slogtest"
 	"github.com/coder/coder/v2/buildinfo"
+	"github.com/coder/coder/v2/coderd"
 	"github.com/coder/coder/v2/coderd/audit"
 	"github.com/coder/coder/v2/coderd/coderdtest"
+	"github.com/coder/coder/v2/coderd/coderdtest/oidctest"
 	"github.com/coder/coder/v2/coderd/database"
 	"github.com/coder/coder/v2/coderd/database/dbauthz"
 	"github.com/coder/coder/v2/coderd/database/dbgen"
@@ -51,32 +51,202 @@ import (
 	"github.com/coder/coder/v2/coderd/usage/usagetypes"
 	"github.com/coder/coder/v2/coderd/wspubsub"
 	"github.com/coder/coder/v2/codersdk"
-	"github.com/coder/coder/v2/codersdk/agentsdk"
 	"github.com/coder/coder/v2/provisionerd/proto"
 	"github.com/coder/coder/v2/provisionersdk"
 	sdkproto "github.com/coder/coder/v2/provisionersdk/proto"
 	"github.com/coder/coder/v2/testutil"
+	"github.com/coder/quartz"
+	"github.com/coder/serpent"
 )
 
+// TestTokenIsRefreshedEarly creates a fake OIDC IDP that sets expiration times
+// of the token to values that are "near expiration". Expiration being 10minutes
+// earlier than it needs to be. The `ObtainOIDCAccessToken` should refresh these
+// tokens early.
+func TestTokenIsRefreshedEarly(t *testing.T) {
+	t.Parallel()
+
+	t.Run("WithCoderd", func(t *testing.T) {
+		t.Parallel()
+		tokenRefreshCount := 0
+		fake := oidctest.NewFakeIDP(t,
+			oidctest.WithServing(),
+			oidctest.WithDefaultExpire(time.Minute*8),
+			oidctest.WithRefresh(func(email string) error {
+				tokenRefreshCount++
+				return nil
+			}),
+		)
+		cfg := fake.OIDCConfig(t, nil, func(cfg *coderd.OIDCConfig) {
+			cfg.AllowSignups = true
+		})
+		db, ps := dbtestutil.NewDB(t)
+		owner := coderdtest.New(t, &coderdtest.Options{
+			OIDCConfig:               cfg,
+			IncludeProvisionerDaemon: true,
+			Database:                 db,
+			Pubsub:                   ps,
+		})
+		first := coderdtest.CreateFirstUser(t, owner)
+		version := coderdtest.CreateTemplateVersion(t, owner, first.OrganizationID, nil)
+		coderdtest.AwaitTemplateVersionJobCompleted(t, owner, version.ID)
+		template := coderdtest.CreateTemplate(t, owner, first.OrganizationID, version.ID)
+
+		// Setup an OIDC user.
+		client, _ := fake.Login(t, owner, jwt.MapClaims{
+			"email":          "user@unauthorized.com",
+			"email_verified": true,
+			"sub":            uuid.NewString(),
+		})
+
+		// Creating a workspace should refresh the oidc early.
+		tokenRefreshCount = 0
+		wrk := coderdtest.CreateWorkspace(t, client, template.ID)
+		coderdtest.AwaitWorkspaceBuildJobCompleted(t, client, wrk.LatestBuild.ID)
+		require.Equal(t, 1, tokenRefreshCount)
+	})
+}
+
+//nolint:tparallel,paralleltest // Sub tests need to run sequentially.
+func TestTokenIsRefreshedEarlyWithoutCoderd(t *testing.T) {
+	t.Parallel()
+	tokenRefreshCount := 0
+	fake := oidctest.NewFakeIDP(t,
+		oidctest.WithServing(),
+		oidctest.WithDefaultExpire(time.Minute*8),
+		oidctest.WithRefresh(func(email string) error {
+			tokenRefreshCount++
+			return nil
+		}),
+	)
+	cfg := fake.OIDCConfig(t, nil)
+
+	// Fetch a valid token from the fake OIDC provider
+	token, err := fake.GenerateAuthenticatedToken(jwt.MapClaims{
+		"email":          "user@unauthorized.com",
+		"email_verified": true,
+		"sub":            uuid.NewString(),
+	})
+	require.NoError(t, err)
+
+	db, _ := dbtestutil.NewDB(t)
+	user := dbgen.User(t, db, database.User{})
+	dbgen.UserLink(t, db, database.UserLink{
+		UserID:            user.ID,
+		LoginType:         database.LoginTypeOIDC,
+		LinkedID:          "foo",
+		OAuthAccessToken:  token.AccessToken,
+		OAuthRefreshToken: token.RefreshToken,
+		// The oauth expiry does not really matter, since each test will manually control
+		// this value.
+		OAuthExpiry: dbtime.Now().Add(time.Hour),
+	})
+
+	setLinkExpiration := func(t *testing.T, exp time.Time) database.UserLink {
+		ctx := testutil.Context(t, testutil.WaitShort)
+		links, err := db.GetUserLinksByUserID(ctx, user.ID)
+		require.NoError(t, err)
+		require.Len(t, links, 1)
+		link := links[0]
+
+		newLink, err := db.UpdateUserLink(ctx, database.UpdateUserLinkParams{
+			OAuthAccessToken:       link.OAuthAccessToken,
+			OAuthAccessTokenKeyID:  link.OAuthAccessTokenKeyID,
+			OAuthRefreshToken:      link.OAuthRefreshToken,
+			OAuthRefreshTokenKeyID: link.OAuthRefreshTokenKeyID,
+			OAuthExpiry:            exp,
+			Claims:                 link.Claims,
+			UserID:                 link.UserID,
+			LoginType:              link.LoginType,
+		})
+		require.NoError(t, err)
+		return newLink
+	}
+
+	for _, c := range []struct {
+		name string
+		// expires is a function to return a more up to date "now".
+		// Because the oauth library is calling `time.Now()`, we cannot use
+		// mocked clocks.
+		expires         func() time.Time
+		refreshExpected bool
+	}{
+		{
+			name:            "ZeroExpiry",
+			expires:         func() time.Time { return time.Time{} },
+			refreshExpected: false,
+		},
+		{
+			name:            "LongExpired",
+			expires:         func() time.Time { return dbtime.Now().Add(-time.Hour) },
+			refreshExpected: true,
+		},
+		{
+			name:            "EdgeExpired",
+			expires:         func() time.Time { return dbtime.Now().Add(-time.Minute * 10) },
+			refreshExpected: true,
+		},
+		{
+			name:            "RecentExpired",
+			expires:         func() time.Time { return dbtime.Now().Add(-time.Second * -1) },
+			refreshExpected: true,
+		},
+
+		{
+			name:            "Future",
+			expires:         func() time.Time { return dbtime.Now().Add(time.Hour) },
+			refreshExpected: false,
+		},
+		{
+			name:            "FutureWithinRefreshWindow",
+			expires:         func() time.Time { return dbtime.Now().Add(time.Minute * 8) },
+			refreshExpected: true,
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := testutil.Context(t, testutil.WaitShort)
+			oldLink := setLinkExpiration(t, c.expires())
+			tokenRefreshCount = 0
+			_, err := provisionerdserver.ObtainOIDCAccessToken(ctx, testutil.Logger(t), db, cfg, user.ID)
+			require.NoError(t, err)
+			links, err := db.GetUserLinksByUserID(ctx, user.ID)
+			require.NoError(t, err)
+			require.Len(t, links, 1)
+			newLink := links[0]
+
+			if c.refreshExpected {
+				require.Equal(t, 1, tokenRefreshCount)
+
+				require.NotEqual(t, oldLink.OAuthAccessToken, newLink.OAuthAccessToken)
+				require.NotEqual(t, oldLink.OAuthRefreshToken, newLink.OAuthRefreshToken)
+			} else {
+				require.Equal(t, 0, tokenRefreshCount)
+				require.Equal(t, oldLink.OAuthAccessToken, newLink.OAuthAccessToken)
+				require.Equal(t, oldLink.OAuthRefreshToken, newLink.OAuthRefreshToken)
+			}
+		})
+	}
+}
+
 func testTemplateScheduleStore() *atomic.Pointer[schedule.TemplateScheduleStore] {
-	ptr := &atomic.Pointer[schedule.TemplateScheduleStore]{}
+	poitr := &atomic.Pointer[schedule.TemplateScheduleStore]{}
 	store := schedule.NewAGPLTemplateScheduleStore()
-	ptr.Store(&store)
-	return ptr
+	poitr.Store(&store)
+	return poitr
 }
 
 func testUserQuietHoursScheduleStore() *atomic.Pointer[schedule.UserQuietHoursScheduleStore] {
-	ptr := &atomic.Pointer[schedule.UserQuietHoursScheduleStore]{}
+	poitr := &atomic.Pointer[schedule.UserQuietHoursScheduleStore]{}
 	store := schedule.NewAGPLUserQuietHoursScheduleStore()
-	ptr.Store(&store)
-	return ptr
+	poitr.Store(&store)
+	return poitr
 }
 
 func testUsageInserter() *atomic.Pointer[usage.Inserter] {
-	ptr := &atomic.Pointer[usage.Inserter]{}
+	poitr := &atomic.Pointer[usage.Inserter]{}
 	inserter := usage.NewAGPLInserter()
-	ptr.Store(&inserter)
-	return ptr
+	poitr.Store(&inserter)
+	return poitr
 }
 
 func TestAcquireJob_LongPoll(t *testing.T) {
@@ -334,6 +504,16 @@ func TestAcquireJob(t *testing.T) {
 					Transition:        database.WorkspaceTransitionStart,
 					Reason:            database.BuildReasonInitiator,
 				})
+				task := dbgen.Task(t, db, database.TaskTable{
+					OrganizationID:     pd.OrganizationID,
+					OwnerID:            user.ID,
+					WorkspaceID:        uuid.NullUUID{Valid: true, UUID: workspace.ID},
+					TemplateVersionID:  version.ID,
+					TemplateParameters: json.RawMessage("{}"),
+					Prompt:             "Build me a REST API",
+					CreatedAt:          dbtime.Now(),
+					DeletedAt:          sql.NullTime{},
+				})
 
 				var agent database.WorkspaceAgent
 				if prebuiltWorkspaceBuildStage == sdkproto.PrebuiltWorkspaceBuildStage_CLAIM {
@@ -424,7 +604,7 @@ func TestAcquireJob(t *testing.T) {
 				key, err := db.GetAPIKeyByID(ctx, toks[0])
 				require.NoError(t, err)
 				require.Equal(t, int64(dv.Sessions.MaximumTokenDuration.Value().Seconds()), key.LifetimeSeconds)
-				require.WithinDuration(t, time.Now().Add(dv.Sessions.MaximumTokenDuration.Value()), key.ExpiresAt, time.Minute)
+				require.WithinDuration(t, dbtime.Now().Add(dv.Sessions.MaximumTokenDuration.Value()), key.ExpiresAt, time.Minute)
 
 				wantedMetadata := &sdkproto.Metadata{
 					CoderUrl:                      (&url.URL{}).String(),
@@ -440,12 +620,15 @@ func TestAcquireJob(t *testing.T) {
 					TemplateId:                    template.ID.String(),
 					TemplateName:                  template.Name,
 					TemplateVersion:               version.Name,
+					TemplateVersionId:             version.ID.String(),
 					WorkspaceOwnerSessionToken:    sessionToken,
 					WorkspaceOwnerSshPublicKey:    sshKey.PublicKey,
 					WorkspaceOwnerSshPrivateKey:   sshKey.PrivateKey,
 					WorkspaceBuildId:              build.ID.String(),
 					WorkspaceOwnerLoginType:       string(user.LoginType),
 					WorkspaceOwnerRbacRoles:       []*sdkproto.Role{{Name: rbac.RoleOrgMember(), OrgId: pd.OrganizationID.String()}, {Name: "member", OrgId: ""}, {Name: rbac.RoleOrgAuditor(), OrgId: pd.OrganizationID.String()}},
+					TaskId:                        task.ID.String(),
+					TaskPrompt:                    task.Prompt,
 				}
 				if prebuiltWorkspaceBuildStage == sdkproto.PrebuiltWorkspaceBuildStage_CLAIM {
 					// For claimed prebuilds, we expect the prebuild state to be set to CLAIM
@@ -617,6 +800,7 @@ func TestAcquireJob(t *testing.T) {
 					Metadata: &sdkproto.Metadata{
 						CoderUrl:             (&url.URL{}).String(),
 						WorkspaceOwnerGroups: []string{database.EveryoneGroup},
+						TemplateVersionId:    uuid.Nil.String(),
 					},
 				},
 			})
@@ -665,6 +849,7 @@ func TestAcquireJob(t *testing.T) {
 					Metadata: &sdkproto.Metadata{
 						CoderUrl:             (&url.URL{}).String(),
 						WorkspaceOwnerGroups: []string{database.EveryoneGroup},
+						TemplateVersionId:    version.ID.String(),
 					},
 				},
 			})
@@ -1306,7 +1491,9 @@ func TestFailJob(t *testing.T) {
 		<-publishedLogs
 		build, err := db.GetWorkspaceBuildByID(ctx, buildID)
 		require.NoError(t, err)
-		require.Equal(t, "some state", string(build.ProvisionerState))
+		provisionerStateRow, err := db.GetWorkspaceBuildProvisionerStateByID(ctx, build.ID)
+		require.NoError(t, err)
+		require.Equal(t, "some state", string(provisionerStateRow.ProvisionerState))
 		require.Len(t, auditor.AuditLogs(), 1)
 
 		// Assert that the workspace_id field get populated
@@ -2294,19 +2481,17 @@ func TestCompleteJob(t *testing.T) {
 									Version: "1.0.0",
 									Source:  "github.com/example/example",
 								},
-							},
-							StopResources: []*sdkproto.Resource{{
-								Name:       "something2",
-								Type:       "aws_instance",
-								ModulePath: "module.test2",
-							}},
-							StopModules: []*sdkproto.Module{
 								{
 									Key:     "test2",
 									Version: "2.0.0",
 									Source:  "github.com/example2/example",
 								},
 							},
+							StopResources: []*sdkproto.Resource{{
+								Name:       "something2",
+								Type:       "aws_instance",
+								ModulePath: "module.test2",
+							}},
 							Plan: []byte("{}"),
 						},
 					},
@@ -2343,7 +2528,7 @@ func TestCompleteJob(t *testing.T) {
 					Key:        "test2",
 					Version:    "2.0.0",
 					Source:     "github.com/example2/example",
-					Transition: database.WorkspaceTransitionStop,
+					Transition: database.WorkspaceTransitionStart,
 				}},
 			},
 			{
@@ -2601,8 +2786,7 @@ func TestCompleteJob(t *testing.T) {
 				require.NoError(t, err)
 
 				// GIVEN something is listening to process workspace reinitialization:
-				reinitChan := make(chan agentsdk.ReinitializationEvent, 1) // Buffered to simplify test structure
-				cancel, err := agplprebuilds.NewPubsubWorkspaceClaimListener(ps, testutil.Logger(t)).ListenForWorkspaceClaims(ctx, workspace.ID, reinitChan)
+				reinitChan, cancel, err := agplprebuilds.NewPubsubWorkspaceClaimListener(ps, testutil.Logger(t)).ListenForWorkspaceClaims(ctx, workspace.ID)
 				require.NoError(t, err)
 				defer cancel()
 
@@ -2834,7 +3018,7 @@ func TestCompleteJob(t *testing.T) {
 
 					// We never expect a usage event to be collected for
 					// template imports.
-					require.Empty(t, fakeUsageInserter.collectedEvents)
+					require.Equal(t, 0, fakeUsageInserter.TotalEventCount())
 				})
 			}
 		})
@@ -2850,18 +3034,53 @@ func TestCompleteJob(t *testing.T) {
 				seedFunc         func(context.Context, testing.TB, database.Store) error // If you need to insert other resources
 				transition       database.WorkspaceTransition
 				input            *proto.CompletedJob_WorkspaceBuild
+				isTask           bool
+				expectTaskStatus database.TaskStatus
+				expectAppID      uuid.NullUUID
 				expectHasAiTask  bool
 				expectUsageEvent bool
 			}
 
-			sidebarAppID := uuid.NewString()
+			sidebarAppID := uuid.New()
 			for _, tc := range []testcase{
 				{
-					name:       "has_ai_task is false by default",
+					name:       "has_ai_task is false if task_id is nil",
 					transition: database.WorkspaceTransitionStart,
 					input:      &proto.CompletedJob_WorkspaceBuild{
 						// No AiTasks defined.
 					},
+					isTask:           false,
+					expectHasAiTask:  false,
+					expectUsageEvent: false,
+				},
+				{
+					name:       "has_ai_task is false even if there are coder_ai_task resources, but no task_id",
+					transition: database.WorkspaceTransitionStart,
+					input: &proto.CompletedJob_WorkspaceBuild{
+						AiTasks: []*sdkproto.AITask{
+							{
+								Id:    uuid.NewString(),
+								AppId: sidebarAppID.String(),
+							},
+						},
+						Resources: []*sdkproto.Resource{
+							{
+								Agents: []*sdkproto.Agent{
+									{
+										Id:   uuid.NewString(),
+										Name: "a",
+										Apps: []*sdkproto.App{
+											{
+												Id:   sidebarAppID.String(),
+												Slug: "test-app",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					isTask:           false,
 					expectHasAiTask:  false,
 					expectUsageEvent: false,
 				},
@@ -2871,9 +3090,42 @@ func TestCompleteJob(t *testing.T) {
 					input: &proto.CompletedJob_WorkspaceBuild{
 						AiTasks: []*sdkproto.AITask{
 							{
+								Id:    uuid.NewString(),
+								AppId: sidebarAppID.String(),
+							},
+						},
+						Resources: []*sdkproto.Resource{
+							{
+								Agents: []*sdkproto.Agent{
+									{
+										Id:   uuid.NewString(),
+										Name: "a",
+										Apps: []*sdkproto.App{
+											{
+												Id:   sidebarAppID.String(),
+												Slug: "test-app",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					isTask:           true,
+					expectTaskStatus: database.TaskStatusInitializing,
+					expectAppID:      uuid.NullUUID{UUID: sidebarAppID, Valid: true},
+					expectHasAiTask:  true,
+					expectUsageEvent: true,
+				},
+				{
+					name:       "has_ai_task is set to true, with sidebar app id",
+					transition: database.WorkspaceTransitionStart,
+					input: &proto.CompletedJob_WorkspaceBuild{
+						AiTasks: []*sdkproto.AITask{
+							{
 								Id: uuid.NewString(),
 								SidebarApp: &sdkproto.AITaskSidebarApp{
-									Id: sidebarAppID,
+									Id: sidebarAppID.String(),
 								},
 							},
 						},
@@ -2885,7 +3137,7 @@ func TestCompleteJob(t *testing.T) {
 										Name: "a",
 										Apps: []*sdkproto.App{
 											{
-												Id:   sidebarAppID,
+												Id:   sidebarAppID.String(),
 												Slug: "test-app",
 											},
 										},
@@ -2894,6 +3146,49 @@ func TestCompleteJob(t *testing.T) {
 							},
 						},
 					},
+					isTask:           true,
+					expectTaskStatus: database.TaskStatusInitializing,
+					expectAppID:      uuid.NullUUID{UUID: sidebarAppID, Valid: true},
+					expectHasAiTask:  true,
+					expectUsageEvent: true,
+				},
+				{
+					name:       "ai task linked to subagent app in devcontainer",
+					transition: database.WorkspaceTransitionStart,
+					input: &proto.CompletedJob_WorkspaceBuild{
+						AiTasks: []*sdkproto.AITask{
+							{
+								Id:    uuid.NewString(),
+								AppId: sidebarAppID.String(),
+							},
+						},
+						Resources: []*sdkproto.Resource{
+							{
+								Agents: []*sdkproto.Agent{
+									{
+										Id:   uuid.NewString(),
+										Name: "parent-agent",
+										Devcontainers: []*sdkproto.Devcontainer{
+											{
+												Name:            "dev",
+												WorkspaceFolder: "/workspace",
+												SubagentId:      uuid.NewString(),
+												Apps: []*sdkproto.App{
+													{
+														Id:   sidebarAppID.String(),
+														Slug: "subagent-app",
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					isTask:           true,
+					expectTaskStatus: database.TaskStatusInitializing,
+					expectAppID:      uuid.NullUUID{UUID: sidebarAppID, Valid: true},
 					expectHasAiTask:  true,
 					expectUsageEvent: true,
 				},
@@ -2905,15 +3200,18 @@ func TestCompleteJob(t *testing.T) {
 						AiTasks: []*sdkproto.AITask{
 							{
 								Id: uuid.NewString(),
-								SidebarApp: &sdkproto.AITaskSidebarApp{
-									// Non-existing app ID would previously trigger a FK violation.
-									Id: uuid.NewString(),
-								},
+								// Non-existing app ID would previously trigger a FK violation.
+								// Now it will trigger a warning instead in the provisioner logs.
+								AppId: sidebarAppID.String(),
 							},
 						},
 					},
-					expectHasAiTask:  false,
-					expectUsageEvent: false,
+					isTask:           true,
+					expectTaskStatus: database.TaskStatusInitializing,
+					// You can still "sort of" use a task in this state, but as we don't have
+					// the correct app ID you won't be able to communicate with it via Coder.
+					expectHasAiTask:  true,
+					expectUsageEvent: true,
 				},
 				{
 					name:       "has_ai_task is set to true, but transition is not start",
@@ -2921,10 +3219,8 @@ func TestCompleteJob(t *testing.T) {
 					input: &proto.CompletedJob_WorkspaceBuild{
 						AiTasks: []*sdkproto.AITask{
 							{
-								Id: uuid.NewString(),
-								SidebarApp: &sdkproto.AITaskSidebarApp{
-									Id: sidebarAppID,
-								},
+								Id:    uuid.NewString(),
+								AppId: sidebarAppID.String(),
 							},
 						},
 						Resources: []*sdkproto.Resource{
@@ -2935,7 +3231,7 @@ func TestCompleteJob(t *testing.T) {
 										Name: "a",
 										Apps: []*sdkproto.App{
 											{
-												Id:   sidebarAppID,
+												Id:   sidebarAppID.String(),
 												Slug: "test-app",
 											},
 										},
@@ -2944,17 +3240,9 @@ func TestCompleteJob(t *testing.T) {
 							},
 						},
 					},
-					expectHasAiTask:  true,
-					expectUsageEvent: false,
-				},
-				{
-					name:       "current build does not have ai task but previous build did",
-					seedFunc:   seedPreviousWorkspaceStartWithAITask,
-					transition: database.WorkspaceTransitionStop,
-					input: &proto.CompletedJob_WorkspaceBuild{
-						AiTasks:   []*sdkproto.AITask{},
-						Resources: []*sdkproto.Resource{},
-					},
+					isTask:           true,
+					expectTaskStatus: database.TaskStatusPaused,
+					expectAppID:      uuid.NullUUID{UUID: sidebarAppID, Valid: true},
 					expectHasAiTask:  true,
 					expectUsageEvent: false,
 				},
@@ -2992,6 +3280,15 @@ func TestCompleteJob(t *testing.T) {
 						OwnerID:        user.ID,
 						OrganizationID: pd.OrganizationID,
 					})
+					var genTask database.Task
+					if tc.isTask {
+						genTask = dbgen.Task(t, db, database.TaskTable{
+							OwnerID:           user.ID,
+							OrganizationID:    pd.OrganizationID,
+							WorkspaceID:       uuid.NullUUID{UUID: workspaceTable.ID, Valid: true},
+							TemplateVersionID: version.ID,
+						})
+					}
 
 					ctx := testutil.Context(t, testutil.WaitShort)
 					if tc.seedFunc != nil {
@@ -3060,19 +3357,25 @@ func TestCompleteJob(t *testing.T) {
 					require.True(t, build.HasAITask.Valid) // We ALWAYS expect a value to be set, therefore not nil, i.e. valid = true.
 					require.Equal(t, tc.expectHasAiTask, build.HasAITask.Bool)
 
-					if tc.expectHasAiTask && build.Transition != database.WorkspaceTransitionStop {
-						require.Equal(t, sidebarAppID, build.AITaskSidebarAppID.UUID.String())
+					task, err := db.GetTaskByID(ctx, genTask.ID)
+					if tc.isTask {
+						require.NoError(t, err)
+						require.Equal(t, tc.expectTaskStatus, task.Status)
+					} else {
+						require.Error(t, err)
 					}
+
+					require.Equal(t, tc.expectAppID, task.WorkspaceAppID)
 
 					if tc.expectUsageEvent {
 						// Check that a usage event was collected.
-						require.Len(t, fakeUsageInserter.collectedEvents, 1)
+						require.Len(t, fakeUsageInserter.GetDiscreteEvents(), 1)
 						require.Equal(t, usagetypes.DCManagedAgentsV1{
 							Count: 1,
-						}, fakeUsageInserter.collectedEvents[0])
+						}, fakeUsageInserter.GetDiscreteEvents()[0])
 					} else {
 						// Check that no usage event was collected.
-						require.Empty(t, fakeUsageInserter.collectedEvents)
+						require.Equal(t, 0, fakeUsageInserter.TotalEventCount())
 					}
 				})
 			}
@@ -3293,6 +3596,9 @@ func TestInsertWorkspaceResource(t *testing.T) {
 	ctx := context.Background()
 	insert := func(db database.Store, jobID uuid.UUID, resource *sdkproto.Resource) error {
 		return provisionerdserver.InsertWorkspaceResource(ctx, db, jobID, database.WorkspaceTransitionStart, resource, &telemetry.Snapshot{})
+	}
+	insertWithProtoIDs := func(db database.Store, jobID uuid.UUID, resource *sdkproto.Resource) error {
+		return provisionerdserver.InsertWorkspaceResource(ctx, db, jobID, database.WorkspaceTransitionStart, resource, &telemetry.Snapshot{}, provisionerdserver.InsertWorkspaceResourceWithAgentIDsFromProto())
 	}
 	t.Run("NoAgents", func(t *testing.T) {
 		t.Parallel()
@@ -3630,39 +3936,448 @@ func TestInsertWorkspaceResource(t *testing.T) {
 
 	t.Run("Devcontainers", func(t *testing.T) {
 		t.Parallel()
-		db, _ := dbtestutil.NewDB(t)
-		job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{})
-		err := insert(db, job.ID, &sdkproto.Resource{
-			Name: "something",
-			Type: "aws_instance",
-			Agents: []*sdkproto.Agent{{
-				Name: "dev",
-				Devcontainers: []*sdkproto.Devcontainer{
-					{Name: "foo", WorkspaceFolder: "/workspace1"},
-					{Name: "bar", WorkspaceFolder: "/workspace2", ConfigPath: "/workspace2/.devcontainer/devcontainer.json"},
+
+		agentID := uuid.New()
+		subAgentID := uuid.New()
+		devcontainerID := uuid.New()
+		devcontainerID2 := uuid.New()
+
+		tests := []struct {
+			name                string
+			resource            *sdkproto.Resource
+			wantErr             string
+			protoIDsOnly        bool // when true, only run with insertWithProtoIDs (e.g., for UUID parsing error tests)
+			expectSubAgentCount int
+			check               func(t *testing.T, db database.Store, parentAgent database.WorkspaceAgent, subAgents []database.WorkspaceAgent, useProtoIDs bool)
+		}{
+			{
+				name: "OK",
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{
+							{Id: devcontainerID.String(), Name: "foo", WorkspaceFolder: "/workspace1"},
+							{Id: devcontainerID2.String(), Name: "bar", WorkspaceFolder: "/workspace2", ConfigPath: "/workspace2/.devcontainer/devcontainer.json"},
+						},
+					}},
 				},
-			}},
-		})
-		require.NoError(t, err)
-		resources, err := db.GetWorkspaceResourcesByJobID(ctx, job.ID)
-		require.NoError(t, err)
-		require.Len(t, resources, 1)
-		agents, err := db.GetWorkspaceAgentsByResourceIDs(ctx, []uuid.UUID{resources[0].ID})
-		require.NoError(t, err)
-		require.Len(t, agents, 1)
-		agent := agents[0]
-		devcontainers, err := db.GetWorkspaceAgentDevcontainersByAgentID(ctx, agent.ID)
-		sort.Slice(devcontainers, func(i, j int) bool {
-			return devcontainers[i].Name > devcontainers[j].Name
-		})
-		require.NoError(t, err)
-		require.Len(t, devcontainers, 2)
-		require.Equal(t, "foo", devcontainers[0].Name)
-		require.Equal(t, "/workspace1", devcontainers[0].WorkspaceFolder)
-		require.Equal(t, "", devcontainers[0].ConfigPath)
-		require.Equal(t, "bar", devcontainers[1].Name)
-		require.Equal(t, "/workspace2", devcontainers[1].WorkspaceFolder)
-		require.Equal(t, "/workspace2/.devcontainer/devcontainer.json", devcontainers[1].ConfigPath)
+				expectSubAgentCount: 0,
+				check: func(t *testing.T, db database.Store, parentAgent database.WorkspaceAgent, _ []database.WorkspaceAgent, useProtoIDs bool) {
+					require.Equal(t, "dev", parentAgent.Name)
+
+					devcontainers, err := db.GetWorkspaceAgentDevcontainersByAgentID(ctx, parentAgent.ID)
+					require.NoError(t, err)
+					sort.Slice(devcontainers, func(i, j int) bool {
+						return devcontainers[i].Name > devcontainers[j].Name
+					})
+					require.Len(t, devcontainers, 2)
+					if useProtoIDs {
+						assert.Equal(t, devcontainerID, devcontainers[0].ID)
+						assert.Equal(t, devcontainerID2, devcontainers[1].ID)
+					} else {
+						assert.NotEqual(t, uuid.Nil, devcontainers[0].ID)
+						assert.NotEqual(t, uuid.Nil, devcontainers[1].ID)
+					}
+					assert.Equal(t, "foo", devcontainers[0].Name)
+					assert.Equal(t, "/workspace1", devcontainers[0].WorkspaceFolder)
+					assert.Equal(t, "", devcontainers[0].ConfigPath)
+					assert.False(t, devcontainers[0].SubagentID.Valid)
+					assert.Equal(t, "bar", devcontainers[1].Name)
+					assert.Equal(t, "/workspace2", devcontainers[1].WorkspaceFolder)
+					assert.Equal(t, "/workspace2/.devcontainer/devcontainer.json", devcontainers[1].ConfigPath)
+					assert.False(t, devcontainers[1].SubagentID.Valid)
+				},
+			},
+			{
+				name: "SubAgentWithAllResources",
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:              agentID.String(),
+						Name:            "dev",
+						Architecture:    "amd64",
+						OperatingSystem: "linux",
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "full-subagent",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							Apps: []*sdkproto.App{
+								{Slug: "code-server", DisplayName: "VS Code", Url: "http://localhost:8080"},
+							},
+							Scripts: []*sdkproto.Script{
+								{DisplayName: "Startup", Script: "echo start", RunOnStart: true},
+							},
+							Envs: []*sdkproto.Env{
+								{Name: "EDITOR", Value: "vim"},
+							},
+						}},
+					}},
+				},
+				expectSubAgentCount: 1,
+				check: func(t *testing.T, db database.Store, parentAgent database.WorkspaceAgent, subAgents []database.WorkspaceAgent, useProtoIDs bool) {
+					require.Len(t, subAgents, 1)
+					subAgent := subAgents[0]
+					if useProtoIDs {
+						require.Equal(t, subAgentID, subAgent.ID)
+					} else {
+						require.NotEqual(t, uuid.Nil, subAgent.ID)
+					}
+
+					assert.Equal(t, parentAgent.ID, subAgent.ParentID.UUID)
+					assert.Equal(t, parentAgent.Architecture, subAgent.Architecture)
+					assert.Equal(t, parentAgent.OperatingSystem, subAgent.OperatingSystem)
+
+					apps, err := db.GetWorkspaceAppsByAgentID(ctx, subAgent.ID)
+					require.NoError(t, err)
+					require.Len(t, apps, 1)
+					assert.Equal(t, "code-server", apps[0].Slug)
+
+					scripts, err := db.GetWorkspaceAgentScriptsByAgentIDs(ctx, []uuid.UUID{subAgent.ID})
+					require.NoError(t, err)
+					require.Len(t, scripts, 1)
+					assert.Equal(t, "Startup", scripts[0].DisplayName)
+
+					var envVars map[string]string
+					err = json.Unmarshal(subAgent.EnvironmentVariables.RawMessage, &envVars)
+					require.NoError(t, err)
+					assert.Equal(t, "vim", envVars["EDITOR"])
+
+					devcontainers, err := db.GetWorkspaceAgentDevcontainersByAgentID(ctx, parentAgent.ID)
+					require.NoError(t, err)
+					require.Len(t, devcontainers, 1)
+					assert.True(t, devcontainers[0].SubagentID.Valid)
+					if useProtoIDs {
+						assert.Equal(t, subAgentID, devcontainers[0].SubagentID.UUID)
+					} else {
+						assert.Equal(t, subAgent.ID, devcontainers[0].SubagentID.UUID)
+					}
+				},
+			},
+			{
+				name: "MultipleDevcontainersWithSubagents",
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{
+							{
+								Id:              devcontainerID.String(),
+								Name:            "frontend",
+								WorkspaceFolder: "/workspace/frontend",
+								SubagentId:      subAgentID.String(),
+								Apps: []*sdkproto.App{
+									{Slug: "frontend-app", DisplayName: "Frontend"},
+								},
+							},
+							{
+								Id:              devcontainerID2.String(),
+								Name:            "backend",
+								WorkspaceFolder: "/workspace/backend",
+								SubagentId:      uuid.New().String(),
+								Apps: []*sdkproto.App{
+									{Slug: "backend-app", DisplayName: "Backend"},
+								},
+							},
+						},
+					}},
+				},
+				expectSubAgentCount: 2,
+				check: func(t *testing.T, db database.Store, parentAgent database.WorkspaceAgent, subAgents []database.WorkspaceAgent, _ bool) {
+					for _, subAgent := range subAgents {
+						apps, err := db.GetWorkspaceAppsByAgentID(ctx, subAgent.ID)
+						require.NoError(t, err)
+						require.Len(t, apps, 1, "each subagent should have exactly one app")
+					}
+
+					devcontainers, err := db.GetWorkspaceAgentDevcontainersByAgentID(ctx, parentAgent.ID)
+					require.NoError(t, err)
+					require.Len(t, devcontainers, 2)
+					for _, dc := range devcontainers {
+						assert.True(t, dc.SubagentID.Valid, "devcontainer %s should have subagent", dc.Name)
+					}
+				},
+			},
+			{
+				name:    "SubAgentDuplicateAppSlugs",
+				wantErr: `duplicate app slug, must be unique per template: "my-app"`,
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "with-dup-apps",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							Apps: []*sdkproto.App{
+								{Slug: "my-app", DisplayName: "App 1"},
+								{Slug: "my-app", DisplayName: "App 2"},
+							},
+						}},
+					}},
+				},
+			},
+			{
+				name:    "SubAgentInvalidAppSlug",
+				wantErr: `app slug "Invalid_Slug" does not match regex`,
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "with-invalid-app",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							Apps: []*sdkproto.App{
+								{Slug: "Invalid_Slug", DisplayName: "Bad App"},
+							},
+						}},
+					}},
+				},
+			},
+			{
+				name:    "SubAgentAppSlugConflictsWithParentAgent",
+				wantErr: `duplicate app slug, must be unique per template: "shared-app"`,
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Apps: []*sdkproto.App{
+							{Slug: "shared-app", DisplayName: "Parent App"},
+						},
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "dc",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							Apps: []*sdkproto.App{
+								{Slug: "shared-app", DisplayName: "Child App"},
+							},
+						}},
+					}},
+				},
+			},
+			{
+				name:    "SubAgentAppSlugConflictsBetweenSubagents",
+				wantErr: `duplicate app slug, must be unique per template: "conflicting-app"`,
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{
+							{
+								Id:              devcontainerID.String(),
+								Name:            "dc1",
+								WorkspaceFolder: "/workspace1",
+								SubagentId:      subAgentID.String(),
+								Apps: []*sdkproto.App{
+									{Slug: "conflicting-app", DisplayName: "App in DC1"},
+								},
+							},
+							{
+								Id:              devcontainerID2.String(),
+								Name:            "dc2",
+								WorkspaceFolder: "/workspace2",
+								SubagentId:      uuid.New().String(),
+								Apps: []*sdkproto.App{
+									{Slug: "conflicting-app", DisplayName: "App in DC2"},
+								},
+							},
+						},
+					}},
+				},
+			},
+			{
+				name:         "SubAgentInvalidSubagentID",
+				wantErr:      "parse subagent id",
+				protoIDsOnly: true, // UUID parsing errors only occur with proto IDs
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "invalid-subagent",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      "not-a-valid-uuid",
+							Apps:            []*sdkproto.App{{Slug: "app", DisplayName: "App"}},
+						}},
+					}},
+				},
+			},
+			{
+				name:         "SubAgentInvalidAppID",
+				wantErr:      "parse app uuid",
+				protoIDsOnly: true, // UUID parsing errors only occur with proto IDs
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "with-invalid-app-id",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							Apps:            []*sdkproto.App{{Id: "not-a-uuid", Slug: "my-app", DisplayName: "App"}},
+						}},
+					}},
+				},
+			},
+			{
+				// This test verifies that subagents created via
+				// devcontainers do not inherit the parent agent's
+				// AuthInstanceID.
+				// Context: https://github.com/coder/coder/pull/22196
+				name: "SubAgentDoesNotInheritAuthInstanceID",
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:              agentID.String(),
+						Name:            "dev",
+						Architecture:    "amd64",
+						OperatingSystem: "linux",
+						Auth: &sdkproto.Agent_InstanceId{
+							InstanceId: "parent-instance-id",
+						},
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "sub",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							Apps: []*sdkproto.App{
+								{Slug: "code-server", DisplayName: "VS Code", Url: "http://localhost:8080"},
+							},
+						}},
+					}},
+				},
+				expectSubAgentCount: 1,
+				check: func(t *testing.T, db database.Store, parentAgent database.WorkspaceAgent, subAgents []database.WorkspaceAgent, _ bool) {
+					// Parent should have the AuthInstanceID set.
+					require.True(t, parentAgent.AuthInstanceID.Valid, "parent agent should have an AuthInstanceID")
+					require.Equal(t, "parent-instance-id", parentAgent.AuthInstanceID.String)
+
+					require.Len(t, subAgents, 1)
+					subAgent := subAgents[0]
+
+					// Sub-agent must NOT inherit the parent's AuthInstanceID.
+					assert.False(t, subAgent.AuthInstanceID.Valid, "sub-agent should not have an AuthInstanceID")
+					assert.Empty(t, subAgent.AuthInstanceID.String, "sub-agent AuthInstanceID string should be empty")
+
+					// Looking up by the parent's instance ID must still
+					// return the parent, not the sub-agent.
+					lookedUp, err := db.GetWorkspaceAgentByInstanceID(ctx, parentAgent.AuthInstanceID.String)
+					require.NoError(t, err)
+					assert.Equal(t, parentAgent.ID, lookedUp.ID, "instance ID lookup should still return the parent agent")
+				},
+			},
+			{
+				// This test verifies the backward-compatibility behavior where a
+				// devcontainer with a SubagentId but no apps, scripts, or envs does
+				// NOT create a subagent.
+				name: "SubAgentBackwardCompatNoResources",
+				resource: &sdkproto.Resource{
+					Name: "something",
+					Type: "aws_instance",
+					Agents: []*sdkproto.Agent{{
+						Id:   agentID.String(),
+						Name: "dev",
+						Devcontainers: []*sdkproto.Devcontainer{{
+							Id:              devcontainerID.String(),
+							Name:            "no-resources",
+							WorkspaceFolder: "/workspace",
+							SubagentId:      subAgentID.String(),
+							// Intentionally no Apps, Scripts, or Envs.
+						}},
+					}},
+				},
+				expectSubAgentCount: 0,
+				check: func(t *testing.T, db database.Store, parentAgent database.WorkspaceAgent, _ []database.WorkspaceAgent, _ bool) {
+					devcontainers, err := db.GetWorkspaceAgentDevcontainersByAgentID(ctx, parentAgent.ID)
+					require.NoError(t, err)
+					require.Len(t, devcontainers, 1)
+					assert.Equal(t, "no-resources", devcontainers[0].Name)
+					assert.False(t, devcontainers[0].SubagentID.Valid,
+						"devcontainer with SubagentId but no apps/scripts/envs should not have a subagent (backward compatibility)")
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			for _, useProtoIDs := range []bool{false, true} {
+				if tt.protoIDsOnly && !useProtoIDs {
+					continue
+				}
+
+				name := tt.name
+				if useProtoIDs {
+					name += "/WithProtoIDs"
+				} else {
+					name += "/WithoutProtoIDs"
+				}
+
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+
+					db, _ := dbtestutil.NewDB(t)
+					job := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{})
+
+					var err error
+					if useProtoIDs {
+						err = insertWithProtoIDs(db, job.ID, tt.resource)
+					} else {
+						err = insert(db, job.ID, tt.resource)
+					}
+
+					if tt.wantErr != "" {
+						require.ErrorContains(t, err, tt.wantErr)
+						return
+					}
+					require.NoError(t, err)
+
+					resources, err := db.GetWorkspaceResourcesByJobID(ctx, job.ID)
+					require.NoError(t, err)
+					require.Len(t, resources, 1)
+
+					agents, err := db.GetWorkspaceAgentsByResourceIDs(ctx, []uuid.UUID{resources[0].ID})
+					require.NoError(t, err)
+
+					var parentAgent database.WorkspaceAgent
+					var subAgents []database.WorkspaceAgent
+					for _, agent := range agents {
+						if agent.ParentID.Valid {
+							subAgents = append(subAgents, agent)
+						} else {
+							parentAgent = agent
+						}
+					}
+					require.NotEqual(t, uuid.Nil, parentAgent.ID)
+					require.Len(t, subAgents, tt.expectSubAgentCount, "expected %d subagents", tt.expectSubAgentCount)
+
+					tt.check(t, db, parentAgent, subAgents, useProtoIDs)
+				})
+			}
+		}
 	})
 }
 
@@ -4053,6 +4768,7 @@ func TestServer_ExpirePrebuildsSessionToken(t *testing.T) {
 	job, err := fs.waitForJob()
 	require.NoError(t, err)
 	require.NotNil(t, job)
+	require.NotNil(t, job.Type, "acquired job type was nil?!")
 	workspaceBuildJob := job.Type.(*proto.AcquiredJob_WorkspaceBuild_).WorkspaceBuild
 	require.NotNil(t, workspaceBuildJob.Metadata)
 
@@ -4086,7 +4802,7 @@ func setup(t *testing.T, ignoreLogErrors bool, ov *overrides) (proto.DRPCProvisi
 	defOrg, err := db.GetDefaultOrganization(context.Background())
 	require.NoError(t, err, "default org not found")
 
-	deploymentValues := &codersdk.DeploymentValues{}
+	deploymentValues := coderdtest.DeploymentValues(t)
 	var externalAuthConfigs []*externalauth.Config
 	tss := testTemplateScheduleStore()
 	uqhss := testUserQuietHoursScheduleStore()
@@ -4209,6 +4925,7 @@ func setup(t *testing.T, ignoreLogErrors bool, ov *overrides) (proto.DRPCProvisi
 		notifEnq,
 		&op,
 		provisionerdserver.NewMetrics(logger),
+		coderd.ReadExperiments(logger, deploymentValues.Experiments),
 	)
 	require.NoError(t, err)
 	return srv, db, ps, daemon
@@ -4313,81 +5030,10 @@ func (s *fakeStream) cancel() {
 	s.c.Broadcast()
 }
 
-type fakeUsageInserter struct {
-	collectedEvents []usagetypes.Event
-}
-
-var _ usage.Inserter = &fakeUsageInserter{}
-
-func newFakeUsageInserter() (*fakeUsageInserter, *atomic.Pointer[usage.Inserter]) {
-	ptr := &atomic.Pointer[usage.Inserter]{}
-	fake := &fakeUsageInserter{}
+func newFakeUsageInserter() (*coderdtest.UsageInserter, *atomic.Pointer[usage.Inserter]) {
+	poitr := &atomic.Pointer[usage.Inserter]{}
+	fake := coderdtest.NewUsageInserter()
 	var inserter usage.Inserter = fake
-	ptr.Store(&inserter)
-	return fake, ptr
-}
-
-func (f *fakeUsageInserter) InsertDiscreteUsageEvent(_ context.Context, _ database.Store, event usagetypes.DiscreteEvent) error {
-	f.collectedEvents = append(f.collectedEvents, event)
-	return nil
-}
-
-func seedPreviousWorkspaceStartWithAITask(ctx context.Context, t testing.TB, db database.Store) error {
-	t.Helper()
-	// If the below looks slightly convoluted, that's because it is.
-	// The workspace doesn't yet have a latest build, so querying all
-	// workspaces will fail.
-	tpls, err := db.GetTemplates(ctx)
-	if err != nil {
-		return xerrors.Errorf("seedFunc: get template: %w", err)
-	}
-	if len(tpls) != 1 {
-		return xerrors.Errorf("seedFunc: expected exactly one template, got %d", len(tpls))
-	}
-	ws, err := db.GetWorkspacesByTemplateID(ctx, tpls[0].ID)
-	if err != nil {
-		return xerrors.Errorf("seedFunc: get workspaces: %w", err)
-	}
-	if len(ws) != 1 {
-		return xerrors.Errorf("seedFunc: expected exactly one workspace, got %d", len(ws))
-	}
-	w := ws[0]
-	prevJob := dbgen.ProvisionerJob(t, db, nil, database.ProvisionerJob{
-		OrganizationID: w.OrganizationID,
-		InitiatorID:    w.OwnerID,
-		Type:           database.ProvisionerJobTypeWorkspaceBuild,
-	})
-	tvs, err := db.GetTemplateVersionsByTemplateID(ctx, database.GetTemplateVersionsByTemplateIDParams{
-		TemplateID: tpls[0].ID,
-	})
-	if err != nil {
-		return xerrors.Errorf("seedFunc: get template version: %w", err)
-	}
-	if len(tvs) != 1 {
-		return xerrors.Errorf("seedFunc: expected exactly one template version, got %d", len(tvs))
-	}
-	if tpls[0].ActiveVersionID == uuid.Nil {
-		return xerrors.Errorf("seedFunc: active version id is nil")
-	}
-	res := dbgen.WorkspaceResource(t, db, database.WorkspaceResource{
-		JobID: prevJob.ID,
-	})
-	agt := dbgen.WorkspaceAgent(t, db, database.WorkspaceAgent{
-		ResourceID: res.ID,
-	})
-	wa := dbgen.WorkspaceApp(t, db, database.WorkspaceApp{
-		AgentID: agt.ID,
-	})
-	_ = dbgen.WorkspaceBuild(t, db, database.WorkspaceBuild{
-		BuildNumber:        1,
-		HasAITask:          sql.NullBool{Valid: true, Bool: true},
-		AITaskSidebarAppID: uuid.NullUUID{Valid: true, UUID: wa.ID},
-		ID:                 w.ID,
-		InitiatorID:        w.OwnerID,
-		JobID:              prevJob.ID,
-		TemplateVersionID:  tvs[0].ID,
-		Transition:         database.WorkspaceTransitionStart,
-		WorkspaceID:        w.ID,
-	})
-	return nil
+	poitr.Store(&inserter)
+	return fake, poitr
 }

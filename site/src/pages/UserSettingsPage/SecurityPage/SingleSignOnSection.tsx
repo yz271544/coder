@@ -1,23 +1,22 @@
-import { useTheme } from "@emotion/react";
-import GitHubIcon from "@mui/icons-material/GitHub";
 import Link from "@mui/material/Link";
 import TextField from "@mui/material/TextField";
-import { API } from "api/api";
-import { getErrorMessage } from "api/errors";
+import { CircleCheck as CircleCheckIcon, KeyIcon } from "lucide-react";
+import { type FC, useState } from "react";
+import { useMutation } from "react-query";
+import { API } from "#/api/api";
+import { getErrorMessage } from "#/api/errors";
 import type {
 	AuthMethods,
 	LoginType,
 	OIDCAuthMethod,
 	UserLoginType,
-} from "api/typesGenerated";
-import { Button } from "components/Button/Button";
-import { ConfirmDialog } from "components/Dialogs/ConfirmDialog/ConfirmDialog";
-import { EmptyState } from "components/EmptyState/EmptyState";
-import { Stack } from "components/Stack/Stack";
-import { CircleCheck as CircleCheckIcon, KeyIcon } from "lucide-react";
-import { type FC, useState } from "react";
-import { useMutation } from "react-query";
-import { docs } from "utils/docs";
+} from "#/api/typesGenerated";
+import { Button } from "#/components/Button/Button";
+import { ConfirmDialog } from "#/components/Dialogs/ConfirmDialog/ConfirmDialog";
+import { EmptyState } from "#/components/EmptyState/EmptyState";
+import { ExternalImage } from "#/components/ExternalImage/ExternalImage";
+import { Stack } from "#/components/Stack/Stack";
+import { docs } from "#/utils/docs";
 import { Section } from "../Section";
 
 type LoginTypeConfirmation =
@@ -133,8 +132,6 @@ export const SingleSignOnSection: FC<SingleSignOnSectionProps> = ({
 	isConfirming,
 	error,
 }) => {
-	const theme = useTheme();
-
 	const noSsoEnabled = !authMethods.github.enabled && !authMethods.oidc.enabled;
 
 	return (
@@ -144,7 +141,7 @@ export const SingleSignOnSection: FC<SingleSignOnSectionProps> = ({
 				title="Single Sign On"
 				description="Authenticate in Coder using one-click"
 			>
-				<div css={{ display: "grid", gap: "16px" }}>
+				<div className="grid gap-4">
 					{userLoginType.login_type === "password" ? (
 						<>
 							{authMethods.github.enabled && (
@@ -155,7 +152,7 @@ export const SingleSignOnSection: FC<SingleSignOnSectionProps> = ({
 									disabled={isUpdating}
 									onClick={() => openConfirmation("github")}
 								>
-									<GitHubIcon />
+									<ExternalImage src="/icon/github.svg" />
 									GitHub
 								</Button>
 							)}
@@ -176,24 +173,8 @@ export const SingleSignOnSection: FC<SingleSignOnSectionProps> = ({
 							{noSsoEnabled && <SSOEmptyState />}
 						</>
 					) : (
-						<div
-							css={{
-								background: theme.palette.background.paper,
-								borderRadius: 8,
-								border: `1px solid ${theme.palette.divider}`,
-								padding: 16,
-								display: "flex",
-								gap: 16,
-								alignItems: "center",
-								fontSize: 14,
-							}}
-						>
-							<CircleCheckIcon
-								css={{
-									color: theme.palette.success.light,
-								}}
-								className="size-icon-xs"
-							/>
+						<div className="bg-surface-secondary rounded-md border border-border border-solid p-4 flex gap-4 items-center text-sm">
+							<CircleCheckIcon className="text-content-success size-icon-xs" />
 							<span>
 								Authenticated with{" "}
 								<strong>
@@ -202,9 +183,9 @@ export const SingleSignOnSection: FC<SingleSignOnSectionProps> = ({
 										: getOIDCLabel(authMethods.oidc)}
 								</strong>
 							</span>
-							<div css={{ marginLeft: "auto", lineHeight: 1 }}>
+							<div className="leading-none ml-auto">
 								{userLoginType.login_type === "github" ? (
-									<GitHubIcon css={{ width: 16, height: 16 }} />
+									<ExternalImage src="/icon/github.svg" className="size-4" />
 								) : (
 									<OIDCIcon oidcAuth={authMethods.oidc} />
 								)}
@@ -235,11 +216,7 @@ const OIDCIcon: FC<OIDCIconProps> = ({ oidcAuth }) => {
 	}
 
 	return (
-		<img
-			alt="Open ID Connect icon"
-			src={oidcAuth.iconUrl}
-			css={{ width: 16, height: 16 }}
-		/>
+		<img alt="Open ID Connect icon" src={oidcAuth.iconUrl} className="size-4" />
 	);
 };
 
